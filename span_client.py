@@ -40,7 +40,8 @@ def register() -> None:
 
     payload = {
         "name": "ClaudeVibeMonitor",
-        "description": "Local monitoring via Claude Code"
+        "description": "Local monitoring via Claude Code",
+        "door-bypass": True
     }
 
     try:

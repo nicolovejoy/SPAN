@@ -30,7 +30,7 @@ python span_client.py --run
 
 Base URL: `http://192.168.4.72/api/v1`
 
-- `POST /auth/register` - Register client, returns accessToken
+- `POST /auth/register` - Register client, returns accessToken (requires `door-bypass: true` for door-proximity auth)
 - `GET /circuits` - Returns circuit data (requires Bearer token)
 
 Circuit data structure includes `instantPowerW`, `relayState`, and `name` fields.
