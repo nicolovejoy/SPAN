@@ -1,8 +1,13 @@
 # TODO
 
+## Next: Pi Deployment
+
+- Pi 5 on order (Vilros)
+- When it arrives: follow `pi/SETUP.md`
+- Migrate collector from Mac to Pi
+
 ## Future Ideas
 
-- Historical data logging
 - Power usage alerts/thresholds
-- Web UI alternative to terminal
-- Export to InfluxDB/Grafana
+- Per-circuit historical trends dashboard
+- Cost calculations (integrate electricity rate)
