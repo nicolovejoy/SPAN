@@ -39,6 +39,15 @@ Pi details:
 4. Once Grafana accessible, verify dashboard shows SPAN data
 5. Stop collector on Mac once Pi collector confirmed working
 
+## Next: Move Secrets to Env Vars
+
+Hardcoded passwords in `docker-compose.yml` are now visible in public repo:
+- Grafana password
+- InfluxDB password
+- InfluxDB token
+
+Move these to `.env` files (git-ignored) and reference via `${VAR}` in docker-compose.
+
 ## Future Ideas
 
 - Power usage alerts/thresholds
