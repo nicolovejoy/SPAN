@@ -39,6 +39,4 @@ Base URL: `http://192.168.4.72/api/v1`
 
 ## Credentials
 
-- `.env` - SPAN_ACCESS_TOKEN (git-ignored)
-- Grafana: admin / spanmonitor123
-- InfluxDB: admin / spanmonitor123, token: span-local-token
+All secrets are in `pi/.env` (git-ignored). See `pi/.env.example` for the required variables.

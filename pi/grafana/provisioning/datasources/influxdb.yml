@@ -11,5 +11,5 @@ datasources:
       organization: home
       defaultBucket: span
     secureJsonData:
-      token: span-local-token
+      token: $INFLUXDB_TOKEN
     isDefault: true

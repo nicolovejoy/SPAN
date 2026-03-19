@@ -22,14 +22,10 @@ Note: Use Safari (Chrome doesn't resolve `.local` domains).
 ### Next Steps
 1. Consider ethernet to Pi for reliability (mesh WiFi can be unstable)
 
-## Next: Move Secrets to Env Vars
+## Next: Weekly Power Report & Bath Detection
 
-Hardcoded passwords in `docker-compose.yml` are now visible in public repo:
-- Grafana password
-- InfluxDB password
-- InfluxDB token
-
-Move these to `.env` files (git-ignored) and reference via `${VAR}` in docker-compose.
+- Weekly email summarizing power consumption by circuit and time of day, with cost calculations (time-of-use rates)
+- Detect bath events from heat pump circuit signature (sustained elevated draw replacing normal cycling)
 
 ## Future Ideas
 
