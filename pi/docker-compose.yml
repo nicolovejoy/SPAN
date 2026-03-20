@@ -32,6 +32,12 @@ services:
     environment:
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
+      - GF_SERVER_ROOT_URL=https://grafana.pianohouseproject.org
+      - GF_SMTP_ENABLED=true
+      - GF_SMTP_HOST=smtp.resend.com:465
+      - GF_SMTP_USER=resend
+      - GF_SMTP_PASSWORD=${RESEND_API_KEY}
+      - GF_SMTP_FROM_ADDRESS=grafana@pianohouseproject.org
       - INFLUXDB_TOKEN=${INFLUXDB_TOKEN}
     depends_on:
       - influxdb
@@ -53,6 +59,64 @@ services:
       - "host.docker.internal:host-gateway"
     depends_on:
       - influxdb
+
+  bath-detector:
+    build: .
+    container_name: bath-detector
+    restart: unless-stopped
+    command: ["python", "-u", "bath_detector.py", "--loop"]
+    env_file:
+      - .env
+    environment:
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=${INFLUXDB_TOKEN}
+      - INFLUXDB_ORG=home
+      - INFLUXDB_BUCKET=span
+    depends_on:
+      - influxdb
+
+  charge-detector:
+    build: .
+    container_name: charge-detector
+    restart: unless-stopped
+    command: ["python", "-u", "charge_detector.py", "--loop"]
+    env_file:
+      - .env
+    environment:
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=${INFLUXDB_TOKEN}
+      - INFLUXDB_ORG=home
+      - INFLUXDB_BUCKET=span
+    depends_on:
+      - influxdb
+
+  daily-report:
+    build: .
+    container_name: daily-report
+    restart: unless-stopped
+    command: ["python", "-u", "daily_report.py", "--loop"]
+    env_file:
+      - .env
+    environment:
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=${INFLUXDB_TOKEN}
+      - INFLUXDB_ORG=home
+      - INFLUXDB_BUCKET=span
+      - RESEND_API_KEY=${RESEND_API_KEY}
+      - REPORT_EMAIL=${REPORT_EMAIL}
+      - TZ=America/Los_Angeles
+    depends_on:
+      - influxdb
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    env_file:
+      - .env
+    depends_on:
+      - grafana
 
 volumes:
   influxdb-data:

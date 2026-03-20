@@ -3,11 +3,14 @@
 
 import argparse
 import os
+import time
 import logging
 from datetime import datetime, timezone, timedelta
 
 from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.write_api import SYNCHRONOUS
+
+from rates import cost_for_kwh
 
 logging.basicConfig(
     level=logging.INFO,
@@ -134,6 +137,10 @@ def find_bath_events(hp_samples: list[dict], aux_samples: list[dict]) -> list[di
         aux_mean = sum(aux_powers) / len(aux_powers) if aux_powers else 0.0
         aux_max = max(aux_powers) if aux_powers else 0.0
 
+        # Energy and cost
+        total_mean_w = hp_mean + aux_mean
+        energy_kwh = total_mean_w * duration_min / 60 / 1000
+
         result.append({
             "start": event_start,
             "end": event_end,
@@ -143,13 +150,15 @@ def find_bath_events(hp_samples: list[dict], aux_samples: list[dict]) -> list[di
             "aux_active": aux_active,
             "aux_mean_power_w": round(aux_mean, 1),
             "aux_max_power_w": round(aux_max, 1),
+            "energy_kwh": round(energy_kwh, 3),
+            "cost_dollars": round(cost_for_kwh(energy_kwh, event_start), 2),
         })
 
     return result
 
 
 def event_already_exists(query_api, event_start: datetime) -> bool:
-    """Check if a bath_event already exists within ±2 hours of the event start."""
+    """Check if a bath_event already exists within +/-2 hours of the event start."""
     t_lo = (event_start - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
     t_hi = (event_start + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
     flux = f'''
@@ -177,6 +186,8 @@ def write_bath_event(write_api, event: dict, status: str = "completed"):
         .field("aux_active", event["aux_active"])
         .field("aux_mean_power_w", event["aux_mean_power_w"])
         .field("aux_max_power_w", event["aux_max_power_w"])
+        .field("energy_kwh", event["energy_kwh"])
+        .field("cost_dollars", event["cost_dollars"])
         .field("status", status)
         .time(event["start"])
     )
@@ -214,7 +225,7 @@ def backtest(client: InfluxDBClient, days: int, write: bool = False):
                 f"{ev['end'].strftime('%H:%M')}  "
                 f"{ev['duration_min']:.0f}min  "
                 f"HP avg {ev['hp_mean_power_w']:.0f}W max {ev['hp_max_power_w']:.0f}W  "
-                f"{aux_str}"
+                f"{aux_str}  {ev['energy_kwh']:.1f}kWh ${ev['cost_dollars']:.2f}"
             )
             if write_api:
                 if event_already_exists(query_api, ev["start"]):
@@ -247,7 +258,8 @@ def normal_run(client: InfluxDBClient):
         write_bath_event(write_api, ev)
         logger.info(
             f"Wrote bath_event: {ev['start'].strftime('%H:%M')}-{ev['end'].strftime('%H:%M')} "
-            f"({ev['duration_min']:.0f}min, HP avg {ev['hp_mean_power_w']:.0f}W)"
+            f"({ev['duration_min']:.0f}min, HP avg {ev['hp_mean_power_w']:.0f}W, "
+            f"{ev['energy_kwh']:.1f}kWh, ${ev['cost_dollars']:.2f})"
         )
 
 
@@ -256,6 +268,8 @@ def main():
     parser.add_argument("--backtest", action="store_true", help="Scan historical data (no writes)")
     parser.add_argument("--backfill", action="store_true", help="Scan historical data and write events")
     parser.add_argument("--days", type=int, default=7, help="Days to scan in backtest/backfill mode")
+    parser.add_argument("--loop", action="store_true", help="Run continuously with interval")
+    parser.add_argument("--interval", type=int, default=600, help="Seconds between checks in loop mode")
     args = parser.parse_args()
 
     if not INFLUXDB_TOKEN:
@@ -268,6 +282,14 @@ def main():
         mode = "Backfill" if args.backfill else "Backtest"
         logger.info(f"{mode} mode: scanning last {args.days} days")
         backtest(client, args.days, write=args.backfill)
+    elif args.loop:
+        logger.info(f"Loop mode: checking every {args.interval}s")
+        while True:
+            try:
+                normal_run(client)
+            except Exception as e:
+                logger.error(f"Detection error: {e}")
+            time.sleep(args.interval)
     else:
         normal_run(client)
 
