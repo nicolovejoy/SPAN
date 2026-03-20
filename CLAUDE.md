@@ -24,10 +24,23 @@ cd pi && nohup ./run_collector.sh > collector.log 2>&1 &
 ## Architecture
 
 - `span_client.py` - CLI client with live terminal dashboard
-- `pi/` - Docker stack for Pi deployment
+- `pi/` - Docker stack for Pi deployment (7 services)
   - `collector.py` - Polls SPAN every 30s, writes to InfluxDB
-  - `docker-compose.yml` - InfluxDB + Grafana
+  - `bath_detector.py` - Detects bath events from heat pump signature (10min loop)
+  - `charge_detector.py` - Detects EV charging sessions (10min loop)
+  - `daily_report.py` - HTML email report via Resend at 7am daily
+  - `rates.py` - TOU rate schedule for cost calculations
+  - `docker-compose.yml` - InfluxDB, Grafana, collector, bath-detector, charge-detector, daily-report, cloudflared
   - `grafana/provisioning/` - Auto-configured datasource + dashboard
+
+## Next Steps
+
+- Configure Cloudflare tunnel: create tunnel in Zero Trust dashboard, set ingress to `grafana.pianohouseproject.org`, add Access email OTP policy
+- Add Resend DKIM/SPF DNS records to pianohouseproject.org
+- Add `CLOUDFLARE_TUNNEL_TOKEN`, `RESEND_API_KEY`, `REPORT_EMAIL` to `pi/.env`
+- Update TOU rates in `pi/rates.py` with actual utility rates
+- Verify charge circuit name matches SPAN panel (default: "Outdoor / Tesla Car Charger")
+- Create Grafana alert rules via UI: grid >10kW, collector down >5min, heat pump >4hr
 
 ## SPAN API
 
