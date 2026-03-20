@@ -31,7 +31,7 @@ LOOKBACK_MINUTES = 90
 POWER_THRESHOLD = 50      # watts — on/off boundary
 DUTY_CYCLE_MIN = 0.85     # fraction of samples above threshold
 MAX_TRANSITIONS = 2       # on/off crossings in a window
-MEAN_POWER_MIN = 500      # watts
+MEAN_POWER_MIN = 2500     # watts
 
 
 def query_circuit_power(query_api, circuit_name: str, start: str, stop: str = "now()") -> list[dict]:
@@ -111,10 +111,10 @@ def find_bath_events(hp_samples: list[dict], aux_samples: list[dict]) -> list[di
         if w["bath_like"]:
             current_run.append(w)
         else:
-            if len(current_run) >= 2:
+            if len(current_run) >= 3:
                 events.append(current_run)
             current_run = []
-    if len(current_run) >= 2:
+    if len(current_run) >= 3:
         events.append(current_run)
 
     # Build event records
