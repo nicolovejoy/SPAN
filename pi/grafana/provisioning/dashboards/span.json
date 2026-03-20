@@ -1,6 +1,15 @@
 {
   "annotations": {
-    "list": []
+    "list": [
+      {
+        "datasource": { "type": "influxdb", "uid": "influxdb" },
+        "enable": true,
+        "iconColor": "blue",
+        "name": "Bath Events",
+        "query": "from(bucket: \"span\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"bath_event\")\n  |> filter(fn: (r) => r._field == \"duration_min\")\n  |> map(fn: (r) => ({r with _value: \"Bath: \" + string(v: r._value) + \" min\"}))",
+        "textColumn": "_value"
+      }
+    ]
   },
   "editable": true,
   "fiscalYearStartMonth": 0,
@@ -32,7 +41,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 0 },
       "id": 1,
       "options": {
         "colorMode": "value",
@@ -78,7 +87,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
+      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 0 },
       "id": 2,
       "options": {
         "colorMode": "value",
@@ -124,30 +133,45 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
       "id": 3,
       "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "values": ["value", "percent"],
+          "sortBy": "Value",
+          "sortDesc": true
+        },
+        "pieType": "donut",
         "reduceOptions": {
-          "calcs": ["count"],
+          "calcs": ["sum"],
           "fields": "",
           "values": false
         },
-        "textMode": "auto"
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
       },
       "pluginVersion": "10.0.0",
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "influxdb" },
-          "query": "from(bucket: \"span\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"circuit\" and r._field == \"relay_state\" and r._value == 1)\n  |> last()\n  |> group()",
+          "query": "from(bucket: \"span\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"circuit\" and r._field == \"power_w\")\n  |> map(fn: (r) => ({r with _value: if r._value < 0.0 then -r._value else r._value}))\n  |> integral(unit: 1h)\n  |> map(fn: (r) => ({r with _value: r._value / 1000.0}))\n  |> keep(columns: [\"name\", \"_value\"])\n  |> group()\n  |> sort(columns: [\"_value\"], desc: true)",
           "refId": "A"
         }
       ],
-      "title": "Active Circuits",
-      "type": "stat"
+      "title": "Energy by Circuit (kWh)",
+      "type": "piechart",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "unit": "kwatth"
+        },
+        "overrides": []
+      }
     },
     {
       "datasource": {
@@ -189,7 +213,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 6 },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
       "id": 4,
       "options": {
         "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "right", "showLegend": true },
@@ -246,7 +270,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 10, "w": 16, "x": 0, "y": 14 },
+      "gridPos": { "h": 10, "w": 16, "x": 0, "y": 16 },
       "id": 5,
       "options": {
         "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "right", "showLegend": true, "sortBy": "Max", "sortDesc": true },
@@ -287,7 +311,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 10, "w": 8, "x": 16, "y": 14 },
+      "gridPos": { "h": 10, "w": 8, "x": 16, "y": 16 },
       "id": 6,
       "options": {
         "displayMode": "gradient",
@@ -361,7 +385,7 @@
           }
         ]
       },
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 24 },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 26 },
       "id": 7,
       "options": {
         "footer": { "enablePagination": false, "fields": "", "reducer": ["sum"], "show": false },
@@ -378,6 +402,82 @@
       ],
       "title": "All Circuits",
       "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto",
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Duration (min)" },
+            "properties": [
+              { "id": "unit", "value": "min" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "HP Avg (W)" },
+            "properties": [
+              { "id": "unit", "value": "watt" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "HP Max (W)" },
+            "properties": [
+              { "id": "unit", "value": "watt" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Aux Active" },
+            "properties": [
+              { "id": "custom.displayMode", "value": "color-background-solid" },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "transparent", "value": null },
+                    { "color": "orange", "value": 1 }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 36 },
+      "id": 8,
+      "options": {
+        "footer": { "enablePagination": false, "fields": "", "reducer": ["sum"], "show": false },
+        "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "Time" }]
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "influxdb" },
+          "query": "duration = from(bucket: \"span\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"bath_event\" and r._field == \"duration_min\")\n  |> keep(columns: [\"_time\", \"_value\"])\n  |> rename(columns: {_value: \"Duration (min)\", _time: \"Time\"})\n\nhp_mean = from(bucket: \"span\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"bath_event\" and r._field == \"hp_mean_power_w\")\n  |> keep(columns: [\"_time\", \"_value\"])\n  |> rename(columns: {_value: \"HP Avg (W)\", _time: \"Time\"})\n\nhp_max = from(bucket: \"span\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"bath_event\" and r._field == \"hp_max_power_w\")\n  |> keep(columns: [\"_time\", \"_value\"])\n  |> rename(columns: {_value: \"HP Max (W)\", _time: \"Time\"})\n\naux = from(bucket: \"span\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"bath_event\" and r._field == \"aux_active\")\n  |> map(fn: (r) => ({r with _value: if r._value then 1 else 0}))\n  |> keep(columns: [\"_time\", \"_value\"])\n  |> rename(columns: {_value: \"Aux Active\", _time: \"Time\"})\n\njoin(tables: {duration: duration, hp_mean: hp_mean}, on: [\"Time\"])\n  |> join(tables: {prev: _, hp_max: hp_max}, on: [\"Time\"])\n  |> join(tables: {prev: _, aux: aux}, on: [\"Time\"])\n  |> sort(columns: [\"Time\"], desc: true)",
+          "refId": "A"
+        }
+      ],
+      "title": "Bath Events",
+      "type": "table"
     }
   ],
   "refresh": "30s",
@@ -388,13 +488,13 @@
     "list": []
   },
   "time": {
-    "from": "now-1h",
+    "from": "now-24h",
     "to": "now"
   },
   "timepicker": {},
   "timezone": "",
   "title": "SPAN Panel Monitor",
   "uid": "span-main",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }
