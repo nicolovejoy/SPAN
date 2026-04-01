@@ -33,13 +33,17 @@ cd pi && nohup ./run_collector.sh > collector.log 2>&1 &
   - `docker-compose.yml` - InfluxDB, Grafana, collector, bath-detector, charge-detector, daily-report, cloudflared
   - `grafana/provisioning/` - Auto-configured datasource + dashboard
 
+## Co-located Services
+
+- **sentiment-arbitrage worker** — systemd timer, 3x/day weekdays. See `docs/sentiment-arbitrage.md`
+
 ## Next Steps
 
+- Deploy sentiment-arbitrage worker to Pi: push systemd files to repo, run setup-pi.sh, fill .env secrets, test manual run, start timer
 - Configure Cloudflare tunnel: create tunnel in Zero Trust dashboard, set ingress to `grafana.pianohouseproject.org`, add Access email OTP policy
 - Add Resend DKIM/SPF DNS records to pianohouseproject.org
 - Add `CLOUDFLARE_TUNNEL_TOKEN`, `RESEND_API_KEY`, `REPORT_EMAIL` to `pi/.env`
 - Update TOU rates in `pi/rates.py` with actual utility rates
-- Verify charge circuit name matches SPAN panel (default: "Outdoor / Tesla Car Charger")
 - Create Grafana alert rules via UI: grid >10kW, collector down >5min, heat pump >4hr
 
 ## SPAN API
