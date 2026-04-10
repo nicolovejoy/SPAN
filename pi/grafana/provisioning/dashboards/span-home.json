@@ -191,11 +191,11 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "influxdb" },
-          "query": "from(bucket: \"span\")\n  |> range(start: today())\n  |> filter(fn: (r) => r._measurement == \"panel\" and r._field == \"consumed_energy_wh\")\n  |> difference(nonNegative: true)\n  |> sum()\n  |> map(fn: (r) => ({r with _value: r._value / 1000.0 * 0.42}))",
+          "query": "from(bucket: \"span\")\n  |> range(start: today())\n  |> filter(fn: (r) => r._measurement == \"panel\" and r._field == \"consumed_energy_wh\")\n  |> difference(nonNegative: true)\n  |> sum()\n  |> map(fn: (r) => ({r with _value: r._value / 1000.0 * ${rate}}))",
           "refId": "A"
         }
       ],
-      "title": "Cost today (est. $0.42/kWh)",
+      "title": "Cost today (flat $${rate}/kWh)",
       "type": "stat"
     },
     {
@@ -232,11 +232,12 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "influxdb" },
-          "query": "from(bucket: \"span\")\n  |> range(start: -24h)\n  |> filter(fn: (r) => r._measurement == \"panel\" and r._field == \"consumed_energy_wh\")\n  |> aggregateWindow(every: 1h, fn: last, createEmpty: false)\n  |> difference(nonNegative: true)\n  |> map(fn: (r) => ({r with _value: r._value / 1000.0}))",
+          "query": "from(bucket: \"span\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"panel\" and r._field == \"consumed_energy_wh\")\n  |> aggregateWindow(every: 1h, fn: last, createEmpty: false)\n  |> difference(nonNegative: true)\n  |> map(fn: (r) => ({r with _value: r._value / 1000.0}))",
           "refId": "A"
         }
       ],
-      "title": "Hourly kWh  ·  last 24h",
+      "timeFrom": "now/d",
+      "title": "Hourly kWh  ·  today",
       "type": "timeseries"
     },
     {
@@ -314,7 +315,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "influxdb" },
-          "query": "from(bucket: \"span\")\n  |> range(start: -7d)\n  |> filter(fn: (r) => r._measurement == \"panel\" and r._field == \"consumed_energy_wh\")\n  |> difference(nonNegative: true)\n  |> sum()\n  |> map(fn: (r) => ({r with _value: r._value / 1000.0 * 0.42}))",
+          "query": "from(bucket: \"span\")\n  |> range(start: -7d)\n  |> filter(fn: (r) => r._measurement == \"panel\" and r._field == \"consumed_energy_wh\")\n  |> difference(nonNegative: true)\n  |> sum()\n  |> map(fn: (r) => ({r with _value: r._value / 1000.0 * ${rate}}))",
           "refId": "A"
         }
       ],
@@ -355,10 +356,11 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "influxdb" },
-          "query": "from(bucket: \"span\")\n  |> range(start: -7d)\n  |> filter(fn: (r) => r._measurement == \"panel\" and r._field == \"consumed_energy_wh\")\n  |> aggregateWindow(every: 1d, fn: last, createEmpty: false)\n  |> difference(nonNegative: true)\n  |> map(fn: (r) => ({r with _value: r._value / 1000.0}))",
+          "query": "from(bucket: \"span\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"panel\" and r._field == \"consumed_energy_wh\")\n  |> aggregateWindow(every: 1d, fn: last, createEmpty: false)\n  |> difference(nonNegative: true)\n  |> map(fn: (r) => ({r with _value: r._value / 1000.0}))",
           "refId": "A"
         }
       ],
+      "timeFrom": "7d",
       "title": "Daily kWh  ·  last 7 days",
       "type": "timeseries"
     },
@@ -400,6 +402,7 @@
           "refId": "A"
         }
       ],
+      "timeFrom": "7d",
       "title": "Top circuits by kWh  ·  last 7 days",
       "type": "table"
     },
@@ -515,10 +518,11 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "influxdb" },
-          "query": "from(bucket: \"span\")\n  |> range(start: -90d)\n  |> filter(fn: (r) => r._measurement == \"panel\" and r._field == \"consumed_energy_wh\")\n  |> aggregateWindow(every: 1d, fn: last, createEmpty: false)\n  |> difference(nonNegative: true)\n  |> map(fn: (r) => ({r with _value: r._value / 1000.0}))",
+          "query": "from(bucket: \"span\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"panel\" and r._field == \"consumed_energy_wh\")\n  |> aggregateWindow(every: 1d, fn: last, createEmpty: false)\n  |> difference(nonNegative: true)\n  |> map(fn: (r) => ({r with _value: r._value / 1000.0}))",
           "refId": "A"
         }
       ],
+      "timeFrom": "90d",
       "title": "Daily kWh  ·  last 90 days",
       "type": "timeseries"
     },
@@ -554,7 +558,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "influxdb" },
-          "query": "from(bucket: \"span\")\n  |> range(start: -30d)\n  |> filter(fn: (r) => r._measurement == \"panel\" and r._field == \"consumed_energy_wh\")\n  |> difference(nonNegative: true)\n  |> sum()\n  |> map(fn: (r) => ({r with _value: r._value / 1000.0 * 0.42}))",
+          "query": "from(bucket: \"span\")\n  |> range(start: -30d)\n  |> filter(fn: (r) => r._measurement == \"panel\" and r._field == \"consumed_energy_wh\")\n  |> difference(nonNegative: true)\n  |> sum()\n  |> map(fn: (r) => ({r with _value: r._value / 1000.0 * ${rate}}))",
           "refId": "A"
         }
       ],
@@ -589,7 +593,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "influxdb" },
-          "query": "from(bucket: \"span\")\n  |> range(start: -60d, stop: -30d)\n  |> filter(fn: (r) => r._measurement == \"panel\" and r._field == \"consumed_energy_wh\")\n  |> difference(nonNegative: true)\n  |> sum()\n  |> map(fn: (r) => ({r with _value: r._value / 1000.0 * 0.42}))",
+          "query": "from(bucket: \"span\")\n  |> range(start: -60d, stop: -30d)\n  |> filter(fn: (r) => r._measurement == \"panel\" and r._field == \"consumed_energy_wh\")\n  |> difference(nonNegative: true)\n  |> sum()\n  |> map(fn: (r) => ({r with _value: r._value / 1000.0 * ${rate}}))",
           "refId": "A"
         }
       ],
@@ -634,8 +638,51 @@
           "refId": "A"
         }
       ],
+      "timeFrom": "30d",
       "title": "Top circuits by kWh  ·  last 30 days",
       "type": "table"
+    },
+    {
+      "datasource": { "type": "influxdb", "uid": "influxdb" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisPlacement": "auto",
+            "drawStyle": "bars",
+            "fillOpacity": 90,
+            "lineWidth": 0,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": { "group": "A", "mode": "normal" }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "green", "value": null }]
+          },
+          "unit": "kwatth",
+          "decimals": 1
+        }
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 45 },
+      "id": 137,
+      "options": {
+        "legend": { "calcs": ["mean", "sum"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "influxdb" },
+          "query": "from(bucket: \"span\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"circuit\" and r._field == \"consumed_energy_wh\")\n  |> filter(fn: (r) => r.name =~ /Heat pump|Auxiliary/)\n  |> aggregateWindow(every: 1d, fn: last, createEmpty: false)\n  |> difference(nonNegative: true)\n  |> map(fn: (r) => ({r with _value: r._value / 1000.0}))\n  |> keep(columns: [\"_time\", \"_value\", \"name\"])",
+          "refId": "A"
+        }
+      ],
+      "timeFrom": "60d",
+      "title": "Heat pump daily kWh  ·  last 60 days  (recirc experiment)",
+      "type": "timeseries"
     }
   ],
   "refresh": "1m",
@@ -643,7 +690,18 @@
   "style": "dark",
   "tags": ["span", "energy", "home"],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "current": { "selected": false, "text": "0.1338", "value": "0.1338" },
+        "hide": 0,
+        "label": "Rate ($/kWh)",
+        "name": "rate",
+        "options": [{ "selected": true, "text": "0.1338", "value": "0.1338" }],
+        "query": "0.1338",
+        "skipUrlSync": false,
+        "type": "textbox"
+      }
+    ]
   },
   "time": {
     "from": "now-24h",
@@ -653,8 +711,6 @@
   "timezone": "browser",
   "title": "SPAN — Home View",
   "uid": "span-home",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }
-</content>
-</invoke>
