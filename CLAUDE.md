@@ -39,11 +39,10 @@ cd pi && nohup ./run_collector.sh > collector.log 2>&1 &
 
 ## Next Steps
 
+- Redesign `span-home.json` as an **exploration dashboard** (not status snapshots): one meaningful time picker, `category` multi-select variable (HVAC/EV/Kitchen/Lights/Other) driven by existing span.json regex, stacked daily-kWh chart + breakdown that react to both. Drop all panel-level `timeFrom` overrides, the previous-30d tiles, the recirc annotation, and the dedicated heat pump panel. Discussing framing tomorrow before implementing.
 - Deploy sentiment-arbitrage worker to Pi: push systemd files to repo, run setup-pi.sh, fill .env secrets, test manual run, start timer
-- Configure Cloudflare tunnel: create tunnel in Zero Trust dashboard, set ingress to `grafana.pianohouseproject.org`, add Access email OTP policy
-- Add Resend DKIM/SPF DNS records to pianohouseproject.org
-- Add `CLOUDFLARE_TUNNEL_TOKEN`, `RESEND_API_KEY`, `REPORT_EMAIL` to `pi/.env`
-- Update TOU rates in `pi/rates.py` with actual utility rates
+- Add Resend DKIM/SPF DNS records to pianohouseproject.org + `RESEND_API_KEY`, `REPORT_EMAIL` to `pi/.env` for daily-report container
+- Update `pi/rates.py` to match Seattle City Light (flat $0.1338/kWh, no tiers, no seasonal) — currently has PG&E defaults
 - Create Grafana alert rules via UI: grid >10kW, collector down >5min, heat pump >4hr
 
 ## SPAN API
