@@ -20,16 +20,13 @@ function makeClient() {
   return new InfluxDB({
     url: URL,
     token: TOKEN,
-    transportOptions: {
-      headers: {
-        ...(CF_ID && CF_SECRET
-          ? {
-              "CF-Access-Client-Id": CF_ID,
-              "CF-Access-Client-Secret": CF_SECRET,
-            }
-          : {}),
-      },
-    },
+    headers:
+      CF_ID && CF_SECRET
+        ? {
+            "CF-Access-Client-Id": CF_ID,
+            "CF-Access-Client-Secret": CF_SECRET,
+          }
+        : undefined,
   });
 }
 
