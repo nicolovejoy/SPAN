@@ -37,12 +37,23 @@ cd pi && nohup ./run_collector.sh > collector.log 2>&1 &
 
 - **sentiment-arbitrage worker** — systemd timer, 3x/day weekdays. See `docs/sentiment-arbitrage.md`
 
+## web/ — power explorer
+
+Next.js 16 app deployed to Vercel, gated by Cloudflare Access (passkey/Face ID).
+Reads InfluxDB on Pi via CF tunnel + service token.
+
+- URL-driven state: `?range=24h&interval=1h&groupBy=category&categories=HVAC,EV`
+- Auto-coarsen interval picks bucket size to stay ≤175 points across the range
+- Categories sourced from `pi/categories.json` (copied to `web/categories.generated.json` by `predev`/`prebuild`)
+- Deploy/auth setup: see `docs/web-deploy.md`
+
 ## Next Steps
 
-- Redesign `span-home.json` as an **exploration dashboard** (not status snapshots): one meaningful time picker, `category` multi-select variable (HVAC/EV/Kitchen/Lights/Other) driven by existing span.json regex, stacked daily-kWh chart + breakdown that react to both. Drop all panel-level `timeFrom` overrides, the previous-30d tiles, the recirc annotation, and the dedicated heat pump panel. Discussing framing tomorrow before implementing.
-- Deploy sentiment-arbitrage worker to Pi: push systemd files to repo, run setup-pi.sh, fill .env secrets, test manual run, start timer
-- Add Resend DKIM/SPF DNS records to pianohouseproject.org + `RESEND_API_KEY`, `REPORT_EMAIL` to `pi/.env` for daily-report container
-- Update `pi/rates.py` to match Seattle City Light (flat $0.1338/kWh, no tiers, no seasonal) — currently has PG&E defaults
+- **Manual one-time CF + Vercel setup:** follow `docs/web-deploy.md` — expose Influx through tunnel, create service token, create two Access apps (Influx with service-auth policy; dashboard with passkey policy), import repo to Vercel with root `web/`, paste env vars
+- Restart `pi/collector.py` on the Pi after pulling so new points get the `category` tag (old points read as `Other` until they age out of queries)
+- **#1** cost calculations broken (PG&E placeholders → SCL TOU). Park: https://github.com/nicolovejoy/SPAN/issues/1
+- Deploy sentiment-arbitrage worker to Pi: push systemd files, run setup-pi.sh, fill .env, start timer
+- Add Resend DKIM/SPF DNS records + `RESEND_API_KEY`/`REPORT_EMAIL` to `pi/.env` for daily-report
 - Create Grafana alert rules via UI: grid >10kW, collector down >5min, heat pump >4hr
 
 ## SPAN API
