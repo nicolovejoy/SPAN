@@ -19,7 +19,6 @@ ENV NODE_ENV=production \
 
 COPY --from=builder /repo/web/.next/standalone ./
 COPY --from=builder /repo/web/.next/static ./.next/static
-COPY --from=builder /repo/web/public ./public
 
 EXPOSE 3000
 CMD ["node", "server.js"]
