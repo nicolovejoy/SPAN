@@ -32,12 +32,12 @@ export function PowerChart({ data }: { data: SeriesPoint[] }) {
   const seriesNames = Array.from(new Set(data.map((d) => d.series)));
   const byTime = new Map<string, Record<string, number>>();
   for (const p of data) {
-    const row = byTime.get(p.time) ?? { time: 0 };
+    const row = byTime.get(p.time) ?? {};
     row[p.series] = p.watts / 1000; // kW
-    byTime.set(p.time, row as Record<string, number>);
+    byTime.set(p.time, row);
   }
   const rows = Array.from(byTime.entries())
-    .map(([time, vals]) => ({ time, ...vals }))
+    .map(([time, vals]) => ({ ...vals, time }))
     .sort((a, b) => a.time.localeCompare(b.time));
 
   return (

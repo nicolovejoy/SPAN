@@ -126,14 +126,17 @@ export async function queryEnergyByCategory(opts: {
     filters.push(`(${set})`);
   }
 
-  // integral with unit: 1h converts watts·time → watt-hours; /1000 → kWh.
+  // Integrate each circuit's power separately to get Wh, then sum by
+  // category. integral() requires _start/_stop in the group key.
   const flux = `
 from(bucket: "${BUCKET}")
   |> range(start: ${fluxDate(fromMs)}, stop: ${fluxDate(toMs)})
   |> filter(fn: (r) => ${filters.join(" and ")})
   |> map(fn: (r) => ({ r with _value: if r._value < 0.0 then -r._value else r._value }))
-  |> group(columns: ["category"])
+  |> group(columns: ["name", "category", "_start", "_stop"])
   |> integral(unit: 1h)
+  |> group(columns: ["category"])
+  |> sum()
   |> map(fn: (r) => ({ r with _value: r._value / 1000.0 }))
   |> keep(columns: ["category", "_value"])
 `;
