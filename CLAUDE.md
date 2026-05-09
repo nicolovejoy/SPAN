@@ -24,14 +24,15 @@ cd pi && nohup ./run_collector.sh > collector.log 2>&1 &
 ## Architecture
 
 - `span_client.py` - CLI client with live terminal dashboard
-- `pi/` - Docker stack for Pi deployment (7 services)
+- `pi/` - Docker stack for Pi deployment (8 services)
   - `collector.py` - Polls SPAN every 30s, writes to InfluxDB
   - `bath_detector.py` - Detects bath events from heat pump signature (10min loop)
   - `charge_detector.py` - Detects EV charging sessions (10min loop)
   - `daily_report.py` - HTML email report via Resend at 7am daily
   - `rates.py` - TOU rate schedule for cost calculations
-  - `docker-compose.yml` - InfluxDB, Grafana, collector, bath-detector, charge-detector, daily-report, cloudflared
+  - `docker-compose.yml` - InfluxDB, Grafana, collector, bath-detector, charge-detector, daily-report, web, cloudflared
   - `grafana/provisioning/` - Auto-configured datasource + dashboard
+- `web/` - Next.js power-explorer dashboard (Docker service, see § web/)
 
 ## Co-located Services
 
@@ -39,12 +40,15 @@ cd pi && nohup ./run_collector.sh > collector.log 2>&1 &
 
 ## web/ — power explorer
 
-Next.js 16 app deployed to Vercel, gated by Cloudflare Access (passkey/Face ID).
-Reads InfluxDB on Pi via CF tunnel + service token.
+Next.js 16 app, **Pi-hosted** as a Docker service alongside InfluxDB / Grafana,
+routed through the same `phrpi` Cloudflare tunnel, gated by Cloudflare Access
+(passkey/Face ID).
 
 - URL-driven state: `?range=24h&interval=1h&groupBy=category&categories=HVAC,EV`
 - Auto-coarsen interval picks bucket size to stay ≤175 points across the range
-- Categories sourced from `pi/categories.json` (copied to `web/categories.generated.json` by `predev`/`prebuild`)
+- Categories sourced from `pi/categories.json` (copied to `web/categories.generated.json` by `predev`/`prebuild`; the Dockerfile copies the canonical file straight into the build, no sync step needed in container)
+- Talks to Influx via Docker service name (`http://influxdb:8086`) — no CF service token needed at runtime since the call never leaves the host
+- Built with `output: "standalone"` for a small runtime image
 - Deploy/auth setup: see `docs/web-deploy.md`
 
 ## Next Steps

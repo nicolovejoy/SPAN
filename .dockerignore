@@ -1,0 +1,10 @@
+**/node_modules
+**/.next
+**/dist
+**/.git
+**/.env
+**/.env.local
+**/*.log
+**/.DS_Store
+**/.vercel
+web/categories.generated.json
