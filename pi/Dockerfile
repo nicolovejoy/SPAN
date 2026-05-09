@@ -9,5 +9,7 @@ COPY bath_detector.py .
 COPY charge_detector.py .
 COPY daily_report.py .
 COPY rates.py .
+COPY categories.py .
+COPY categories.json .
 
 CMD ["python", "-u", "collector.py"]
