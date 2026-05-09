@@ -10,6 +10,8 @@ import httpx
 from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.write_api import SYNCHRONOUS
 
+from categories import categorize
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
@@ -75,10 +77,12 @@ def collect_and_write(http_client: httpx.Client, write_api) -> None:
     if circuits_data:
         circuits = circuits_data.get("circuits", {})
         for circuit_id, circuit in circuits.items():
+            name = circuit.get("name", "Unknown")
             points.append(
                 Point("circuit")
                 .tag("circuit_id", circuit_id)
-                .tag("name", circuit.get("name", "Unknown"))
+                .tag("name", name)
+                .tag("category", categorize(name))
                 .field("power_w", circuit.get("instantPowerW", 0))
                 .field("consumed_energy_wh", circuit.get("consumedEnergyWh", 0))
                 .field("produced_energy_wh", circuit.get("producedEnergyWh", 0))
