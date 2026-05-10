@@ -72,17 +72,20 @@ export async function queryPower(opts: {
   // per circuit), then sum across circuits within the chosen group at each
   // bucket boundary. This gives total instantaneous power for the group.
   // The `category` tag wasn't written before commit a806090, so derive it
-  // from `name` for every row — covers historical data and stays consistent.
+  // from `name` — but do it AFTER aggregateWindow so we run the regex on
+  // ~30×buckets rows instead of every raw point (multi-million on a 7d range).
+  const synthCategory =
+    groupBy === "category" ? `|> ${categoryFromNameFlux()}` : "";
   const flux = `
 import "math"
 
 from(bucket: "${BUCKET}")
   |> range(start: ${fluxDate(fromMs)}, stop: ${fluxDate(toMs)})
   |> filter(fn: (r) => ${filters.join(" and ")})
-  |> ${categoryFromNameFlux()}
   |> map(fn: (r) => ({ r with _value: if r._value < 0.0 then -r._value else r._value }))
   |> aggregateWindow(every: ${fluxEvery(interval)}, fn: mean, createEmpty: false)
   |> fill(value: 0.0)
+  ${synthCategory}
   ${
     groupCol
       ? `|> group(columns: ["_time", "${groupCol}"])
@@ -128,18 +131,18 @@ export async function queryEnergyByCategory(opts: {
     filters.push(nameMatchesCategoriesFlux(categories));
   }
 
-  // Integrate each circuit's power separately to get Wh, then sum by
-  // category. integral() requires _start/_stop in the group key. Derive
-  // `category` from `name` so pre-tagged historical data is bucketed
-  // correctly (see comment in queryPower).
+  // Integrate each circuit's power separately to get Wh, then derive category
+  // from name (collapses pre/post-cutover rows for the same circuit), then
+  // sum by category. Running the regex AFTER integral keeps it ~30 rows
+  // instead of millions. integral() requires _start/_stop in the group key.
   const flux = `
 from(bucket: "${BUCKET}")
   |> range(start: ${fluxDate(fromMs)}, stop: ${fluxDate(toMs)})
   |> filter(fn: (r) => ${filters.join(" and ")})
-  |> ${categoryFromNameFlux()}
   |> map(fn: (r) => ({ r with _value: if r._value < 0.0 then -r._value else r._value }))
-  |> group(columns: ["name", "category", "_start", "_stop"])
+  |> group(columns: ["name", "_start", "_stop"])
   |> integral(unit: 1h)
+  |> ${categoryFromNameFlux()}
   |> group(columns: ["category"])
   |> sum()
   |> map(fn: (r) => ({ r with _value: r._value / 1000.0 }))
