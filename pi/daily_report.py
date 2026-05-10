@@ -25,6 +25,7 @@ INFLUXDB_ORG = os.getenv("INFLUXDB_ORG", "home")
 INFLUXDB_BUCKET = os.getenv("INFLUXDB_BUCKET", "span")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 REPORT_EMAIL = os.getenv("REPORT_EMAIL")
+REPORT_FROM = os.getenv("REPORT_FROM", "SPAN Monitor <energy@mail.pianohouseproject.org>")
 REPORT_HOUR = int(os.getenv("REPORT_HOUR", "7"))
 LOCAL_TZ = ZoneInfo(os.getenv("TZ", "America/Los_Angeles"))
 
@@ -209,7 +210,7 @@ def send_email(html: str, date_str: str):
         "https://api.resend.com/emails",
         headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
         json={
-            "from": "SPAN Monitor <energy@pianohouseproject.org>",
+            "from": REPORT_FROM,
             "to": [REPORT_EMAIL],
             "subject": f"Energy Report \u2014 {date_str}",
             "html": html,
