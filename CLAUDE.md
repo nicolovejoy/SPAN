@@ -54,9 +54,9 @@ routed through the same `phrpi` Cloudflare tunnel, gated by Cloudflare Access
 ## Next Steps
 
 - **Vercel cleanup:** remove `span.pianohouseproject.org` as a custom domain from the Vercel project (no longer the origin); optionally pause/delete the Vercel project entirely or keep dormant for previews.
-- **#1** cost calculations broken (PG&E placeholders → SCL TOU). Park: https://github.com/nicolovejoy/SPAN/issues/1
+- **#1** cost calculations broken (PG&E placeholders → SCL TOU): https://github.com/nicolovejoy/SPAN/issues/1
+- **#2** clean up peak/off-peak rate model and unify dashboard + daily-report on one rate engine: https://github.com/nicolovejoy/SPAN/issues/2
 - Deploy sentiment-arbitrage worker to Pi: push systemd files, run setup-pi.sh, fill .env, start timer
-- Add Resend DKIM/SPF DNS records + `RESEND_API_KEY`/`REPORT_EMAIL` to `pi/.env` for daily-report
 - Create Grafana alert rules via UI: grid >10kW, collector down >5min, heat pump >4hr
 
 ## SPAN API
