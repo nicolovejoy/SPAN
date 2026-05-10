@@ -53,13 +53,8 @@ routed through the same `phrpi` Cloudflare tunnel, gated by Cloudflare Access
 
 ## Next Steps
 
-- **🔒 Auth gap on `span.pianohouseproject.org`** (state as of 2026-05-09): dashboard loads + queries data correctly. CF Access app `SPAN dashboard` was created with policy `me` (Allow nlovejoy@me.com), but isn't actually gating the hostname because the CNAME is `proxy:off` (DNS-only) — traffic goes Mac→Vercel direct, bypassing Cloudflare. Two architectural options for next session:
-  1. Flip CF proxy on (orange cloud), keep dashboard on Vercel. Risk: cert/origin chain with Vercel as origin behind CF proxy needs care.
-  2. Move dashboard to Pi-hosted Docker service alongside Influx/Grafana, route through existing tunnel, gate with same CF Access pattern as Influx but human passkey instead of service token. Cleaner; loses Vercel preview deploys.
-  3. Just use Vercel Authentication (Standard Protection) — kills Face-ID dream, but works today.
-  Also: CF account-level MFA needs to be enabled before WebAuthn can be added (Access controls → Access settings → Allow MFA). On the in-progress app, only `onetimepin` IdP exists; WebAuthn is MFA, not primary IdP.
-- **Stopgap:** before leaving the dashboard up unattended, re-enable Vercel Standard Protection on the project so it's not internet-public.
-- Influx-side auth (`influx.pianohouseproject.org` → CF Access service-token policy `web service token` referencing `span-web` token) **is** working correctly — Vercel queries authenticate, anonymous gets 403.
+- **Pre-tagged data shows as "Other"** in the breakdown — collisions with the actual "Other" category make a duplicate row. Fix: track the category-cutover timestamp in a constant, and either filter pre-cutover data or label it "Pre-tagged" in queries (`queryEnergyByCategory` + `queryPower`).
+- **Vercel cleanup:** remove `span.pianohouseproject.org` as a custom domain from the Vercel project (no longer the origin); optionally pause/delete the Vercel project entirely or keep dormant for previews.
 - **#1** cost calculations broken (PG&E placeholders → SCL TOU). Park: https://github.com/nicolovejoy/SPAN/issues/1
 - Deploy sentiment-arbitrage worker to Pi: push systemd files, run setup-pi.sh, fill .env, start timer
 - Add Resend DKIM/SPF DNS records + `RESEND_API_KEY`/`REPORT_EMAIL` to `pi/.env` for daily-report
