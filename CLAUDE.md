@@ -53,7 +53,6 @@ routed through the same `phrpi` Cloudflare tunnel, gated by Cloudflare Access
 
 ## Next Steps
 
-- **Pre-tagged data shows as "Other"** in the breakdown — collisions with the actual "Other" category make a duplicate row. Fix: track the category-cutover timestamp in a constant, and either filter pre-cutover data or label it "Pre-tagged" in queries (`queryEnergyByCategory` + `queryPower`).
 - **Vercel cleanup:** remove `span.pianohouseproject.org` as a custom domain from the Vercel project (no longer the origin); optionally pause/delete the Vercel project entirely or keep dormant for previews.
 - **#1** cost calculations broken (PG&E placeholders → SCL TOU). Park: https://github.com/nicolovejoy/SPAN/issues/1
 - Deploy sentiment-arbitrage worker to Pi: push systemd files, run setup-pi.sh, fill .env, start timer

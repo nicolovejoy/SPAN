@@ -1,6 +1,7 @@
 import { InfluxDB } from "@influxdata/influxdb-client";
 import type { IntervalKey } from "./interval";
 import { fluxEvery } from "./interval";
+import { categoryFromNameFlux, nameMatchesCategoriesFlux } from "./categories";
 
 const URL = process.env.INFLUX_URL!;
 const TOKEN = process.env.INFLUX_TOKEN!;
@@ -57,8 +58,7 @@ export async function queryPower(opts: {
     `r._field == "power_w"`,
   ];
   if (categories?.length) {
-    const set = categories.map((c) => `r.category == "${c}"`).join(" or ");
-    filters.push(`(${set})`);
+    filters.push(nameMatchesCategoriesFlux(categories));
   }
   if (circuits?.length) {
     const set = circuits.map((c) => `r.name == "${c}"`).join(" or ");
@@ -71,12 +71,15 @@ export async function queryPower(opts: {
   // Strategy: per-circuit aggregateWindow first (mean watts in each bucket
   // per circuit), then sum across circuits within the chosen group at each
   // bucket boundary. This gives total instantaneous power for the group.
+  // The `category` tag wasn't written before commit a806090, so derive it
+  // from `name` for every row — covers historical data and stays consistent.
   const flux = `
 import "math"
 
 from(bucket: "${BUCKET}")
   |> range(start: ${fluxDate(fromMs)}, stop: ${fluxDate(toMs)})
   |> filter(fn: (r) => ${filters.join(" and ")})
+  |> ${categoryFromNameFlux()}
   |> map(fn: (r) => ({ r with _value: if r._value < 0.0 then -r._value else r._value }))
   |> aggregateWindow(every: ${fluxEvery(interval)}, fn: mean, createEmpty: false)
   |> fill(value: 0.0)
@@ -122,16 +125,18 @@ export async function queryEnergyByCategory(opts: {
     `r._field == "power_w"`,
   ];
   if (categories?.length) {
-    const set = categories.map((c) => `r.category == "${c}"`).join(" or ");
-    filters.push(`(${set})`);
+    filters.push(nameMatchesCategoriesFlux(categories));
   }
 
   // Integrate each circuit's power separately to get Wh, then sum by
-  // category. integral() requires _start/_stop in the group key.
+  // category. integral() requires _start/_stop in the group key. Derive
+  // `category` from `name` so pre-tagged historical data is bucketed
+  // correctly (see comment in queryPower).
   const flux = `
 from(bucket: "${BUCKET}")
   |> range(start: ${fluxDate(fromMs)}, stop: ${fluxDate(toMs)})
   |> filter(fn: (r) => ${filters.join(" and ")})
+  |> ${categoryFromNameFlux()}
   |> map(fn: (r) => ({ r with _value: if r._value < 0.0 then -r._value else r._value }))
   |> group(columns: ["name", "category", "_start", "_stop"])
   |> integral(unit: 1h)
