@@ -25,7 +25,7 @@ INFLUXDB_ORG = os.getenv("INFLUXDB_ORG", "home")
 INFLUXDB_BUCKET = os.getenv("INFLUXDB_BUCKET", "span")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 REPORT_EMAIL = os.getenv("REPORT_EMAIL")
-REPORT_FROM = os.getenv("REPORT_FROM", "SPAN Monitor <energy@mail.pianohouseproject.org>")
+REPORT_FROM = os.getenv("REPORT_FROM", "SPAN Monitor <energy@span.pianohouseproject.org>")
 REPORT_HOUR = int(os.getenv("REPORT_HOUR", "7"))
 LOCAL_TZ = ZoneInfo(os.getenv("TZ", "America/Los_Angeles"))
 
