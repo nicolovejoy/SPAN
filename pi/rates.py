@@ -1,43 +1,29 @@
 #!/usr/bin/env python3
-"""TOU rate schedule for cost calculations.
+"""Energy rate model.
 
-Update these values to match your actual utility rates.
-Default: approximate PG&E E-TOU-C schedule.
+Seattle City Light, Small General Service schedule (per May 2026 bill).
+Flat $/kWh — no TOU peak/off-peak split, no seasonal variation.
+
+If the service ever moves to a TOU schedule, reintroduce a get_rate(dt)
+that branches on hour/season; callers already pass a datetime.
 """
 
 from datetime import datetime
 
-# PG&E E-TOU-C (placeholder — update with your actual rates)
-# Summer: June 1 - September 30
-# Winter: October 1 - May 31
-# Peak: 4pm - 9pm weekdays
-RATES = {
-    "summer": {
-        "peak": 0.54,       # $/kWh
-        "off_peak": 0.40,
-    },
-    "winter": {
-        "peak": 0.48,
-        "off_peak": 0.39,
-    },
-}
+ENERGY_RATE = 0.1241        # $/kWh (Apr 2026+; pre-Apr was 0.1291)
+BASE_CHARGE_DAILY = 0.83    # $/day fixed service charge (≈$47.31 / 57 days)
 
 
-def is_summer(dt: datetime) -> bool:
-    return 6 <= dt.month <= 9
-
-
-def is_peak(dt: datetime) -> bool:
-    return 16 <= dt.hour < 21 and dt.weekday() < 5
-
-
-def get_rate(dt: datetime) -> float:
-    """Get $/kWh rate for the given datetime."""
-    season = "summer" if is_summer(dt) else "winter"
-    period = "peak" if is_peak(dt) else "off_peak"
-    return RATES[season][period]
+def get_rate(_dt: datetime) -> float:
+    """Return $/kWh rate. Flat — datetime is accepted for API compatibility."""
+    return ENERGY_RATE
 
 
 def cost_for_kwh(kwh: float, dt: datetime) -> float:
-    """Calculate cost in dollars for given kWh at the given time."""
+    """Energy cost in dollars for the given kWh."""
     return kwh * get_rate(dt)
+
+
+def is_peak(_dt: datetime) -> bool:
+    """No TOU on this plan."""
+    return False

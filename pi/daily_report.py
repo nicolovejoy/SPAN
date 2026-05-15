@@ -2,16 +2,24 @@
 """Daily energy report — queries InfluxDB, sends HTML email via Resend."""
 
 import argparse
+import base64
+import io
+import json
 import os
+import re
 import time
 import logging
 from datetime import date, datetime, timezone, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import httpx
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 from influxdb_client import InfluxDBClient
 
-from rates import get_rate, is_peak
+from rates import ENERGY_RATE, BASE_CHARGE_DAILY
 
 logging.basicConfig(
     level=logging.INFO,
@@ -57,32 +65,10 @@ from(bucket: "{INFLUXDB_BUCKET}")
     return 0.0
 
 
-def query_hourly_power(query_api, start: str, stop: str) -> list[dict]:
-    """Hourly mean grid power for TOU cost calculation."""
-    flux = f'''
-from(bucket: "{INFLUXDB_BUCKET}")
-  |> range(start: {start}, stop: {stop})
-  |> filter(fn: (r) => r._measurement == "panel" and r._field == "grid_power_w")
-  |> aggregateWindow(every: 1h, fn: mean, createEmpty: false)
-'''
-    results = []
-    for table in query_api.query(flux, org=INFLUXDB_ORG):
-        for record in table.records:
-            results.append({"time": record.get_time(), "power_w": record.get_value() or 0})
-    return results
-
-
-def compute_tou_cost(hourly: list[dict]) -> tuple[float, float, float]:
-    """Returns (total_cost, peak_cost, off_peak_cost)."""
-    peak = off_peak = 0.0
-    for h in hourly:
-        kwh = h["power_w"] / 1000.0
-        cost = kwh * get_rate(h["time"])
-        if is_peak(h["time"]):
-            peak += cost
-        else:
-            off_peak += cost
-    return round(peak + off_peak, 2), round(peak, 2), round(off_peak, 2)
+def compute_cost(kwh: float) -> tuple[float, float, float]:
+    """Returns (total_cost, energy_cost, base_charge) for one local day."""
+    energy = kwh * ENERGY_RATE
+    return round(energy + BASE_CHARGE_DAILY, 2), round(energy, 2), round(BASE_CHARGE_DAILY, 2)
 
 
 def query_circuit_energy(query_api, start: str, stop: str) -> list[dict]:
@@ -105,6 +91,152 @@ from(bucket: "{INFLUXDB_BUCKET}")
     return results
 
 
+_EV_PATTERN: re.Pattern | None = None
+
+
+def ev_circuit_pattern() -> re.Pattern:
+    """Compile the EV-category regex from categories.json (cached)."""
+    global _EV_PATTERN
+    if _EV_PATTERN is not None:
+        return _EV_PATTERN
+    cats_path = Path(__file__).parent / "categories.json"
+    pat = "Tesla|Car Charger|EV "  # fallback
+    try:
+        rules = json.loads(cats_path.read_text()).get("rules", [])
+        for r in rules:
+            if r.get("category") == "EV":
+                pat = r.get("pattern", pat)
+                break
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning(f"categories.json unavailable, using default EV pattern: {e}")
+    _EV_PATTERN = re.compile(pat, re.IGNORECASE)
+    return _EV_PATTERN
+
+
+def query_circuit_kwh_by_name(query_api, start: str, stop: str) -> dict[str, float]:
+    """{circuit_name: kWh} over [start, stop). Reuses query_circuit_energy shape."""
+    return {c["name"]: c["kwh"] for c in query_circuit_energy(query_api, start, stop)}
+
+
+def query_hourly_kwh(query_api, start: str, stop: str) -> list[tuple[datetime, float]]:
+    """Hourly grid kWh (mean power per hour, treated as kWh since window=1h)."""
+    flux = f'''
+from(bucket: "{INFLUXDB_BUCKET}")
+  |> range(start: {start}, stop: {stop})
+  |> filter(fn: (r) => r._measurement == "panel" and r._field == "grid_power_w")
+  |> aggregateWindow(every: 1h, fn: mean, createEmpty: true)
+  |> map(fn: (r) => ({{r with _value: (if exists r._value then r._value else 0.0) / 1000.0}}))
+'''
+    out = []
+    for table in query_api.query(flux, org=INFLUXDB_ORG):
+        for record in table.records:
+            out.append((record.get_time(), record.get_value() or 0.0))
+    return out
+
+
+def query_hourly_circuit_kwh(query_api, start: str, stop: str,
+                             name_filter: str) -> list[tuple[datetime, float]]:
+    """Hourly kWh summed across circuits matching name_filter regex (case-insensitive)."""
+    flux = f'''
+from(bucket: "{INFLUXDB_BUCKET}")
+  |> range(start: {start}, stop: {stop})
+  |> filter(fn: (r) => r._measurement == "circuit" and r._field == "power_w")
+  |> filter(fn: (r) => r.name =~ /(?i){name_filter}/)
+  |> map(fn: (r) => ({{r with _value: if r._value < 0.0 then -r._value else r._value}}))
+  |> aggregateWindow(every: 1h, fn: mean, createEmpty: false)
+  |> map(fn: (r) => ({{r with _value: r._value / 1000.0}}))
+  |> group(columns: ["_time"])
+  |> sum()
+'''
+    out = []
+    for table in query_api.query(flux, org=INFLUXDB_ORG):
+        for record in table.records:
+            out.append((record.get_time(), record.get_value() or 0.0))
+    return out
+
+
+def _localize(series: list[tuple[datetime, float]]) -> list[tuple[datetime, float]]:
+    return [(t.astimezone(LOCAL_TZ), v) for t, v in series]
+
+
+def _subtract_series(a: list[tuple[datetime, float]],
+                     b: list[tuple[datetime, float]]) -> list[tuple[datetime, float]]:
+    """a - b, aligned by timestamp; missing b values treated as 0."""
+    bmap = {t: v for t, v in b}
+    return [(t, max(0.0, v - bmap.get(t, 0.0))) for t, v in a]
+
+
+def _hour_of_day_avg(series: list[tuple[datetime, float]]) -> dict[int, float]:
+    """Mean value grouped by local hour-of-day across the series."""
+    by_hour: dict[int, list[float]] = {}
+    for t, v in series:
+        by_hour.setdefault(t.hour, []).append(v)
+    return {h: sum(vs) / len(vs) for h, vs in by_hour.items() if vs}
+
+
+def _daily_totals(series: list[tuple[datetime, float]]) -> list[tuple[date, float]]:
+    """Sum hourly series into per-local-date totals, sorted."""
+    by_day: dict[date, float] = {}
+    for t, v in series:
+        by_day[t.date()] = by_day.get(t.date(), 0.0) + v
+    return sorted(by_day.items())
+
+
+def render_today_chart(today_hourly: list[tuple[datetime, float]],
+                       week_hourly: list[tuple[datetime, float]]) -> str:
+    """PNG (base64) of today hourly bars + 7d same-hour avg line."""
+    today_local = _localize(today_hourly)
+    week_local = _localize(week_hourly)
+    if not today_local:
+        return ""
+
+    hours = [t.hour for t, _ in today_local]
+    values = [v for _, v in today_local]
+    avg_by_hour = _hour_of_day_avg(week_local)
+    avg_line = [avg_by_hour.get(h, 0.0) for h in hours]
+
+    fig, ax = plt.subplots(figsize=(7, 3), dpi=120)
+    ax.bar(hours, values, width=0.8, color="#3498db", label="Today")
+    ax.plot(hours, avg_line, color="#e67e22", linewidth=2, marker="o",
+            markersize=3, label="7-day avg (same hour)")
+    ax.set_xlabel("Hour of day (local)")
+    ax.set_ylabel("kWh")
+    ax.set_xticks(range(0, 24, 3))
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="upper left", fontsize=9)
+    fig.tight_layout()
+    return _fig_to_b64(fig)
+
+
+def render_week_chart(daily: list[tuple[date, float]],
+                      avg7: float) -> str:
+    """PNG (base64) of 7-day daily bars + flat 7d-avg overlay."""
+    if not daily:
+        return ""
+    days = [d for d, _ in daily]
+    values = [v for _, v in daily]
+    labels = [d.strftime("%a %-m/%-d") for d in days]
+
+    fig, ax = plt.subplots(figsize=(7, 3), dpi=120)
+    ax.bar(range(len(days)), values, width=0.7, color="#3498db", label="Daily")
+    ax.axhline(avg7, color="#e67e22", linewidth=2, linestyle="--",
+               label=f"7-day avg ({avg7:.1f} kWh)")
+    ax.set_xticks(range(len(days)))
+    ax.set_xticklabels(labels, fontsize=9)
+    ax.set_ylabel("kWh")
+    ax.grid(True, alpha=0.3, axis="y")
+    ax.legend(loc="upper left", fontsize=9)
+    fig.tight_layout()
+    return _fig_to_b64(fig)
+
+
+def _fig_to_b64(fig) -> str:
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight")
+    plt.close(fig)
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
 def query_events(query_api, measurement: str, start: str, stop: str) -> list[dict]:
     """Query pivoted event records (bath_event or charge_event)."""
     flux = f'''
@@ -120,8 +252,10 @@ from(bucket: "{INFLUXDB_BUCKET}")
     return results
 
 
-def build_html(date_str, kwh, cost_total, cost_peak, cost_off_peak,
-               prev_kwh, avg7_kwh, circuits, baths, charges, avg_rate):
+def build_html(date_str, kwh, cost_total, cost_energy, cost_base,
+               prev_kwh, avg7_kwh, circuits, baths, charges,
+               kwh_excl_car, car_kwh_today, car_kwh_week,
+               today_chart_b64, week_chart_b64):
     """Build HTML email body."""
 
     def delta(current, baseline):
@@ -133,7 +267,7 @@ def build_html(date_str, kwh, cost_total, cost_peak, cost_off_peak,
 
     circuit_rows = ""
     for c in circuits[:10]:
-        est = round(c["kwh"] * avg_rate, 2)
+        est = round(c["kwh"] * ENERGY_RATE, 2)
         circuit_rows += f'<tr><td>{c["name"]}</td><td>{c["kwh"]:.2f}</td><td>${est:.2f}</td></tr>\n'
 
     bath_rows = ""
@@ -161,11 +295,25 @@ def build_html(date_str, kwh, cost_total, cost_peak, cost_off_peak,
 {bath_rows}</table>'''
 
     charge_section = ""
-    if charges:
+    if charges or car_kwh_today > 0 or car_kwh_week > 0:
+        car_summary = (f'<p style="margin:8px 0;color:#666;font-size:13px;">'
+                       f'Car charging today: <strong>{car_kwh_today:.2f} kWh</strong> '
+                       f'(${car_kwh_today * ENERGY_RATE:.2f}) &middot; '
+                       f'last 7 days: <strong>{car_kwh_week:.2f} kWh</strong> '
+                       f'(${car_kwh_week * ENERGY_RATE:.2f})</p>')
+        table = (f'<table><tr><th>Time</th><th>Min</th><th>Power</th><th>Energy</th><th>Cost</th></tr>\n'
+                 f'{charge_rows}</table>') if charges else ''
         charge_section = f'''
-<h3>Car Charging ({len(charges)})</h3>
-<table><tr><th>Time</th><th>Min</th><th>Power</th><th>Energy</th><th>Cost</th></tr>
-{charge_rows}</table>'''
+<h3>Car Charging ({len(charges)} session{"s" if len(charges) != 1 else ""})</h3>
+{car_summary}
+{table}'''
+
+    today_chart_img = (f'<img src="data:image/png;base64,{today_chart_b64}" '
+                       f'alt="Today hourly" style="width:100%;max-width:560px;display:block;margin:8px 0;">') \
+        if today_chart_b64 else ''
+    week_chart_img = (f'<img src="data:image/png;base64,{week_chart_b64}" '
+                      f'alt="7-day daily" style="width:100%;max-width:560px;display:block;margin:8px 0;">') \
+        if week_chart_b64 else ''
 
     return f'''<!DOCTYPE html>
 <html><head><style>
@@ -189,12 +337,19 @@ th {{ background: #f8f9fa; font-weight: 600; }}
 <div class="stat"><div class="val">{avg7_kwh:.1f} kWh</div><div class="lbl">7-Day Avg</div></div>
 </div>
 
+<h3>Today &mdash; hourly (excl. car)</h3>
+{today_chart_img}
+
+<h3>Last 7 days &mdash; daily (excl. car)</h3>
+{week_chart_img}
+
 <h3>Cost Breakdown</h3>
 <table>
-<tr><td>Peak (4-9pm weekdays)</td><td>${cost_peak:.2f}</td></tr>
-<tr><td>Off-Peak</td><td>${cost_off_peak:.2f}</td></tr>
+<tr><td>Energy &mdash; {kwh:.1f} kWh &times; ${ENERGY_RATE:.4f}</td><td>${cost_energy:.2f}</td></tr>
+<tr><td>Base service charge</td><td>${cost_base:.2f}</td></tr>
 <tr><td><strong>Total</strong></td><td><strong>${cost_total:.2f}</strong></td></tr>
 </table>
+<p style="font-size:11px;color:#888;margin:4px 0;">SCL Small General, flat rate.</p>
 
 <h3>Top 10 Circuits</h3>
 <table><tr><th>Circuit</th><th>kWh</th><th>Est. Cost</th></tr>
@@ -222,7 +377,7 @@ def send_email(html: str, date_str: str):
 
 
 def generate_report(client: InfluxDBClient, target_date: date):
-    """Generate and send report for a specific local date."""
+    """Generate and send report for a specific local date (midnight-to-midnight)."""
     query_api = client.query_api()
 
     utc_start, utc_end = local_day_utc_range(target_date)
@@ -231,26 +386,45 @@ def generate_report(client: InfluxDBClient, target_date: date):
     date_str = target_date.strftime("%A, %B %-d")
 
     kwh = query_total_kwh(query_api, start_str, end_str)
-
-    hourly = query_hourly_power(query_api, start_str, end_str)
-    cost_total, cost_peak, cost_off_peak = compute_tou_cost(hourly)
-    avg_rate = cost_total / kwh if kwh > 0 else 0.42
+    cost_total, cost_energy, cost_base = compute_cost(kwh)
 
     # Previous day for comparison
     prev_start, prev_end = local_day_utc_range(target_date - timedelta(days=1))
     prev_kwh = query_total_kwh(query_api, flux_ts(prev_start), flux_ts(prev_end))
 
-    # 7-day average (7 days before target)
-    avg_range_start = local_day_utc_range(target_date - timedelta(days=7))[0]
-    total_7d = query_total_kwh(query_api, flux_ts(avg_range_start), start_str)
+    # 7-day window preceding target (calendar days)
+    week_start, _ = local_day_utc_range(target_date - timedelta(days=7))
+    week_start_str = flux_ts(week_start)
+    total_7d = query_total_kwh(query_api, week_start_str, start_str)
     avg7_kwh = total_7d / 7 if total_7d > 0 else 0
 
     circuits = query_circuit_energy(query_api, start_str, end_str)
     baths = query_events(query_api, "bath_event", start_str, end_str)
     charges = query_events(query_api, "charge_event", start_str, end_str)
 
-    html = build_html(date_str, kwh, cost_total, cost_peak, cost_off_peak,
-                      prev_kwh, avg7_kwh, circuits, baths, charges, avg_rate)
+    # Car (EV) energy — today and trailing 7 days, from circuit data
+    ev_pat = ev_circuit_pattern().pattern  # raw string for Flux regex
+    car_today_series = query_hourly_circuit_kwh(query_api, start_str, end_str, ev_pat)
+    car_week_series = query_hourly_circuit_kwh(query_api, week_start_str, start_str, ev_pat)
+    car_kwh_today = sum(v for _, v in car_today_series)
+    car_kwh_week = sum(v for _, v in car_week_series)
+    kwh_excl_car = max(0.0, kwh - car_kwh_today)
+
+    # Charts: total grid minus EV, hourly today + daily week
+    today_hourly_total = query_hourly_kwh(query_api, start_str, end_str)
+    week_hourly_total = query_hourly_kwh(query_api, week_start_str, start_str)
+    today_hourly_excl = _subtract_series(today_hourly_total, car_today_series)
+    week_hourly_excl = _subtract_series(week_hourly_total, car_week_series)
+    week_daily_excl = [(d, v) for d, v in _daily_totals(_localize(week_hourly_excl))]
+    avg7_excl_car = (sum(v for _, v in week_daily_excl) / 7) if week_daily_excl else 0.0
+
+    today_chart_b64 = render_today_chart(today_hourly_excl, week_hourly_excl)
+    week_chart_b64 = render_week_chart(week_daily_excl, avg7_excl_car)
+
+    html = build_html(date_str, kwh, cost_total, cost_energy, cost_base,
+                      prev_kwh, avg7_kwh, circuits, baths, charges,
+                      kwh_excl_car, car_kwh_today, car_kwh_week,
+                      today_chart_b64, week_chart_b64)
     send_email(html, date_str)
 
 
