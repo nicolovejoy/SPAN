@@ -3,6 +3,7 @@
 
 import argparse
 import base64
+import calendar
 import io
 import json
 import os
@@ -204,6 +205,73 @@ from(bucket: "{INFLUXDB_BUCKET}")
     return out
 
 
+def query_monthly_panel_kwh(query_api, start: str, stop: str) -> list[tuple[tuple[int, int], float]]:
+    """Monthly grid kWh via per-local-month integral. One record per local calendar month."""
+    flux = f'''
+import "timezone"
+option location = timezone.location(name: "{LOCAL_TZ_NAME}")
+
+from(bucket: "{INFLUXDB_BUCKET}")
+  |> range(start: {start}, stop: {stop})
+  |> filter(fn: (r) => r._measurement == "panel" and r._field == "grid_power_w")
+  |> aggregateWindow(
+       every: 1mo,
+       fn: (column, tables=<-) => tables |> integral(unit: 1h, column: column),
+       createEmpty: true)
+  |> map(fn: (r) => ({{r with _value: (if exists r._value then r._value else 0.0) / 1000.0}}))
+'''
+    out: list[tuple[tuple[int, int], float]] = []
+    for table in query_api.query(flux, org=INFLUXDB_ORG):
+        for record in table.records:
+            t = record.get_time().astimezone(LOCAL_TZ)
+            d = (t - timedelta(seconds=1)).date()
+            out.append(((d.year, d.month), record.get_value() or 0.0))
+    return out
+
+
+def query_monthly_circuit_kwh(query_api, start: str, stop: str,
+                              name_filter: str) -> list[tuple[tuple[int, int], float]]:
+    """Monthly kWh summed across circuits matching name_filter (case-insensitive)."""
+    flux = f'''
+import "timezone"
+option location = timezone.location(name: "{LOCAL_TZ_NAME}")
+
+from(bucket: "{INFLUXDB_BUCKET}")
+  |> range(start: {start}, stop: {stop})
+  |> filter(fn: (r) => r._measurement == "circuit" and r._field == "power_w")
+  |> filter(fn: (r) => r.name =~ /(?i){name_filter}/)
+  |> map(fn: (r) => ({{r with _value: if r._value < 0.0 then -r._value else r._value}}))
+  |> aggregateWindow(
+       every: 1mo,
+       fn: (column, tables=<-) => tables |> integral(unit: 1h, column: column),
+       createEmpty: false)
+  |> map(fn: (r) => ({{r with _value: r._value / 1000.0}}))
+  |> group(columns: ["_time"])
+  |> sum()
+'''
+    out: list[tuple[tuple[int, int], float]] = []
+    for table in query_api.query(flux, org=INFLUXDB_ORG):
+        for record in table.records:
+            t = record.get_time().astimezone(LOCAL_TZ)
+            d = (t - timedelta(seconds=1)).date()
+            out.append(((d.year, d.month), record.get_value() or 0.0))
+    return out
+
+
+def add_months(year: int, month: int, delta: int) -> tuple[int, int]:
+    """Add `delta` calendar months to (year, month). Handles negative deltas."""
+    total = year * 12 + (month - 1) + delta
+    return total // 12, total % 12 + 1
+
+
+def latest_complete_month(target_date: date) -> tuple[int, int]:
+    """Most recent month fully covered by target_date."""
+    last_day = calendar.monthrange(target_date.year, target_date.month)[1]
+    if target_date.day == last_day:
+        return target_date.year, target_date.month
+    return add_months(target_date.year, target_date.month, -1)
+
+
 def _localize(series: list[tuple[datetime, float]]) -> list[tuple[datetime, float]]:
     return [(t.astimezone(LOCAL_TZ), v) for t, v in series]
 
@@ -286,6 +354,29 @@ def render_week_daily_chart(daily_excl: list[tuple[date, float]]) -> str:
     return _fig_to_b64(fig)
 
 
+def render_monthly_chart(monthly_excl: list[tuple[tuple[int, int], float]]) -> str:
+    """12 monthly bars (excl. car) + dashed avg line."""
+    if not monthly_excl:
+        return ""
+
+    labels = [f"{calendar.month_abbr[m]} '{str(y)[2:]}" for (y, m), _ in monthly_excl]
+    values = [v for _, v in monthly_excl]
+    avg = sum(values) / len(values)
+
+    x = list(range(len(values)))
+    fig, ax = plt.subplots(figsize=(7, 3.2), dpi=120)
+    ax.bar(x, values, width=0.7, color="#3498db", label="Month total (excl. car)")
+    ax.axhline(avg, color="#e67e22", linewidth=2, linestyle="--",
+               label=f"12-mo avg ({avg:.0f} kWh)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontsize=9, rotation=30, ha="right")
+    ax.set_ylabel("kWh")
+    ax.grid(True, alpha=0.3, axis="y")
+    ax.legend(loc="upper left", fontsize=9)
+    fig.tight_layout()
+    return _fig_to_b64(fig)
+
+
 def _fig_to_b64(fig) -> str:
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches="tight")
@@ -341,7 +432,8 @@ def build_html(date_str, kwh_today, kwh_week, kwh_today_excl, kwh_week_excl,
                circuit_rows_data, circuit_totals,
                baths_today, baths_week_summary,
                charges_today, charge_today_summary, charge_week_summary,
-               today_chart_b64, week_daily_chart_b64):
+               today_chart_b64, week_daily_chart_b64,
+               monthly_section=""):
     """Build HTML email body."""
 
     def delta(current, baseline):
@@ -475,6 +567,7 @@ table.summary th:first-child, table.summary td:first-child {{ text-align: left; 
 <tr><th>Circuit</th><th>kWh (day)</th><th>$ (day)</th><th>kWh (7d)</th><th>$ (7d)</th></tr>
 {circuit_rows}{circuit_total_row}
 </table>
+{monthly_section}
 {bath_section}
 {charge_section}
 </body></html>'''
@@ -497,7 +590,68 @@ def send_email(html: str, date_str: str):
     logger.info(f"Email sent to {REPORT_EMAIL}: {resp.json().get('id')}")
 
 
-def generate_report(client: InfluxDBClient, target_date: date):
+def build_monthly_section(query_api, target_date: date) -> str:
+    """Render trailing-12-month chart + table. Returns HTML fragment (or '' if no data)."""
+    end_y, end_m = latest_complete_month(target_date)
+    start_y, start_m = add_months(end_y, end_m, -11)
+    after_end_y, after_end_m = add_months(end_y, end_m, 1)
+
+    start_dt = datetime(start_y, start_m, 1, tzinfo=LOCAL_TZ)
+    end_dt = datetime(after_end_y, after_end_m, 1, tzinfo=LOCAL_TZ)
+    start_str = flux_ts(start_dt.astimezone(timezone.utc))
+    stop_str = flux_ts(end_dt.astimezone(timezone.utc))
+
+    ev_pat = ev_circuit_pattern().pattern
+    grid = dict(query_monthly_panel_kwh(query_api, start_str, stop_str))
+    ev = dict(query_monthly_circuit_kwh(query_api, start_str, stop_str, ev_pat))
+
+    months: list[tuple[int, int]] = []
+    y, m = start_y, start_m
+    while (y, m) != (after_end_y, after_end_m):
+        months.append((y, m))
+        y, m = add_months(y, m, 1)
+
+    monthly_excl = [(ym, max(0.0, grid.get(ym, 0.0) - ev.get(ym, 0.0))) for ym in months]
+    if not any(v > 0 for _, v in monthly_excl):
+        return ""
+
+    chart_b64 = render_monthly_chart(monthly_excl)
+    chart_img = (f'<img src="data:image/png;base64,{chart_b64}" '
+                 f'alt="Trailing 12 months excl. car" '
+                 f'style="width:100%;max-width:560px;display:block;margin:8px 0;">') \
+        if chart_b64 else ''
+
+    rows = ""
+    tot_excl = tot_ev = tot_total = tot_cost = 0.0
+    for (y, m), excl in monthly_excl:
+        ev_kwh = ev.get((y, m), 0.0)
+        total = excl + ev_kwh
+        days = calendar.monthrange(y, m)[1]
+        cost = total * ENERGY_RATE + days * BASE_CHARGE_DAILY
+        label = f"{calendar.month_abbr[m]} {y}"
+        rows += (f'<tr><td>{label}</td><td>{excl:.1f}</td>'
+                 f'<td>{ev_kwh:.1f}</td><td>{total:.1f}</td>'
+                 f'<td>${cost:.2f}</td></tr>\n')
+        tot_excl += excl
+        tot_ev += ev_kwh
+        tot_total += total
+        tot_cost += cost
+
+    total_row = (f'<tr style="background:#f8f9fa;font-weight:600;">'
+                 f'<td>12-mo total</td><td>{tot_excl:.1f}</td>'
+                 f'<td>{tot_ev:.1f}</td><td>{tot_total:.1f}</td>'
+                 f'<td>${tot_cost:.2f}</td></tr>')
+
+    return f'''
+<h3>Trailing 12 Months</h3>
+{chart_img}
+<table>
+<tr><th>Month</th><th>kWh excl. car</th><th>EV kWh</th><th>Total kWh</th><th>Est. cost</th></tr>
+{rows}{total_row}
+</table>'''
+
+
+def generate_report(client: InfluxDBClient, target_date: date, force_monthly: bool = False):
     """Generate and send report for a specific local date (midnight-to-midnight).
 
     Window conventions (all aligned to local midnight):
@@ -573,6 +727,9 @@ def generate_report(client: InfluxDBClient, target_date: date):
     today_chart_b64 = render_today_chart(today_hourly_excl, week_hourly_excl)
     week_daily_chart_b64 = render_week_daily_chart(daily_excl)
 
+    monthly_section = (build_monthly_section(query_api, target_date)
+                       if force_monthly or target_date.weekday() == 6 else "")
+
     html = build_html(
         date_str=date_str,
         kwh_today=kwh_today, kwh_week=kwh_week,
@@ -587,6 +744,7 @@ def generate_report(client: InfluxDBClient, target_date: date):
         charge_week_summary=charge_week_summary,
         today_chart_b64=today_chart_b64,
         week_daily_chart_b64=week_daily_chart_b64,
+        monthly_section=monthly_section,
     )
     send_email(html, date_str)
 
@@ -604,6 +762,8 @@ def main():
     parser = argparse.ArgumentParser(description="Daily energy report email")
     parser.add_argument("--loop", action="store_true", help="Send at REPORT_HOUR daily")
     parser.add_argument("--date", type=str, help="Report for date (YYYY-MM-DD)")
+    parser.add_argument("--monthly", action="store_true",
+                        help="Force-include trailing-12-month section (otherwise: Sundays only)")
     args = parser.parse_args()
 
     for var, name in [(INFLUXDB_TOKEN, "INFLUXDB_TOKEN"), (RESEND_API_KEY, "RESEND_API_KEY"),
@@ -617,7 +777,7 @@ def main():
     if args.date:
         target = datetime.strptime(args.date, "%Y-%m-%d").date()
         logger.info(f"Generating report for {args.date}")
-        generate_report(client, target)
+        generate_report(client, target, force_monthly=args.monthly)
     elif args.loop:
         logger.info(f"Loop mode: report at {REPORT_HOUR}:00 daily")
         while True:
@@ -626,12 +786,12 @@ def main():
             time.sleep(wait)
             yesterday = (datetime.now() - timedelta(days=1)).date()
             try:
-                generate_report(client, yesterday)
+                generate_report(client, yesterday, force_monthly=args.monthly)
             except Exception as e:
                 logger.error(f"Report failed: {e}")
     else:
         yesterday = (datetime.now() - timedelta(days=1)).date()
-        generate_report(client, yesterday)
+        generate_report(client, yesterday, force_monthly=args.monthly)
 
     client.close()
 
