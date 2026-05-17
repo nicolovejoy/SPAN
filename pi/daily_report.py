@@ -10,8 +10,10 @@ import os
 import re
 import time
 import logging
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -438,150 +440,235 @@ from(bucket: "{INFLUXDB_BUCKET}")
     return results
 
 
-def build_html(date_str, kwh_today, kwh_week, kwh_today_excl, kwh_week_excl,
-               cost_today, cost_week, cost_energy_today, cost_base_today,
-               prev_kwh, avg30_excl_per_day,
-               circuit_rows_data, circuit_totals,
-               baths_today, baths_week_summary,
-               charges_today, charge_today_summary, charge_week_summary,
-               today_chart_b64, week_daily_chart_b64,
-               monthly_section=""):
-    """Build HTML email body."""
+@dataclass
+class Period:
+    """Energy over a contiguous range. Both grid and EV in kWh."""
+    grid: float = 0.0
+    ev: float = 0.0
+    days: int = 1
 
-    def delta(current, baseline):
-        if baseline == 0:
-            return ""
-        pct = (current - baseline) / baseline * 100
-        arrow, color = ("&uarr;", "#e74c3c") if pct > 0 else ("&darr;", "#27ae60")
-        return (f' <span style="color:{color};font-size:12px;font-weight:500;">'
-                f'{arrow}{abs(pct):.0f}% vs yesterday</span>')
+    @property
+    def excl(self) -> float:
+        return max(0.0, self.grid - self.ev)
 
-    # Top 10 circuit rows + totals
-    circuit_rows = ""
-    for c in circuit_rows_data:
-        cost_d = c["kwh_day"] * ENERGY_RATE
-        cost_w = c["kwh_week"] * ENERGY_RATE
-        circuit_rows += (
-            f'<tr><td>{c["name"]}</td>'
-            f'<td>{c["kwh_day"]:.2f}</td><td>${cost_d:.2f}</td>'
-            f'<td>{c["kwh_week"]:.2f}</td><td>${cost_w:.2f}</td></tr>\n'
+    @property
+    def cost(self) -> float:
+        return round(self.grid * ENERGY_RATE + self.days * BASE_CHARGE_DAILY, 2)
+
+    @property
+    def ev_cost(self) -> float:
+        return round(self.ev * ENERGY_RATE, 2)
+
+
+@dataclass
+class ReportContext:
+    query_api: Any
+    target_date: date
+    force_monthly: bool
+    today: Period
+    week: Period
+    prev_day_kwh: float
+    daily_grid: dict[date, float]  # 5wk window
+    daily_ev: dict[date, float]    # 5wk window
+    today_hourly_excl: list[tuple[datetime, float]]
+    week_hourly_excl: list[tuple[datetime, float]]
+    circuits_top10: list[dict]
+    circuits_totals: dict
+    baths_today: list[dict]
+    baths_week_summary: dict
+    charges_today: list[dict]
+
+    @property
+    def date_str(self) -> str:
+        return self.target_date.strftime("%A, %B %-d")
+
+    @property
+    def daily_excl(self) -> list[tuple[date, float]]:
+        return sorted(
+            (d, max(0.0, k - self.daily_ev.get(d, 0.0)))
+            for d, k in self.daily_grid.items()
         )
-    ct_cost_d = circuit_totals["kwh_day"] * ENERGY_RATE
-    ct_cost_w = circuit_totals["kwh_week"] * ENERGY_RATE
-    circuit_total_row = (
-        f'<tr style="background:#f8f9fa;font-weight:600;">'
-        f'<td>Total (top 10)</td>'
-        f'<td>{circuit_totals["kwh_day"]:.2f}</td><td>${ct_cost_d:.2f}</td>'
-        f'<td>{circuit_totals["kwh_week"]:.2f}</td><td>${ct_cost_w:.2f}</td></tr>'
-    )
 
-    # Bath section: summary line + today's events table
-    bath_section = ""
-    if baths_today or baths_week_summary["count"] > 0:
-        bath_rows = ""
-        for b in baths_today:
-            t = b.get("_time")
-            ts = t.strftime("%-I:%M %p") if hasattr(t, "strftime") else str(t)
-            kwh = b.get("energy_kwh", 0) or 0
-            bath_rows += (f'<tr><td>{ts}</td><td>{b.get("duration_min", 0):.0f}</td>'
-                          f'<td>{kwh:.2f} kWh</td>'
-                          f'<td>${kwh * ENERGY_RATE:.2f}</td></tr>\n')
-        bath_summary_line = (
-            f'<p style="margin:8px 0;color:#666;font-size:13px;">'
-            f'Today: <strong>{len(baths_today)}</strong> '
-            f'(<strong>{sum((b.get("energy_kwh") or 0) for b in baths_today):.2f} kWh</strong>, '
-            f'${sum((b.get("energy_kwh") or 0) for b in baths_today) * ENERGY_RATE:.2f}) &middot; '
-            f'last 7 days: <strong>{baths_week_summary["count"]}</strong> '
-            f'(<strong>{baths_week_summary["kwh"]:.2f} kWh</strong>, '
-            f'${baths_week_summary["cost"]:.2f})</p>'
-        )
-        bath_table = (f'<table><tr><th>Time</th><th>Min</th><th>Energy</th><th>Cost</th></tr>\n'
-                      f'{bath_rows}</table>') if baths_today else ''
-        bath_section = f'''
-<h3>Bath Events</h3>
-{bath_summary_line}
-{bath_table}'''
+    @property
+    def avg30_excl(self) -> float:
+        last = self.daily_excl[-30:]
+        return (sum(v for _, v in last) / len(last)) if last else 0.0
 
-    # Charge section: summary line + today's sessions table
-    charge_section = ""
-    if charges_today or charge_today_summary["kwh"] > 0 or charge_week_summary["kwh"] > 0:
-        charge_rows = ""
-        for ch in charges_today:
-            t = ch.get("_time")
-            ts = t.strftime("%-I:%M %p") if hasattr(t, "strftime") else str(t)
-            kwh = ch.get("energy_kwh", 0) or 0
-            charge_rows += (f'<tr><td>{ts}</td><td>{ch.get("duration_min", 0):.0f}</td>'
-                            f'<td>{ch.get("mean_power_w", 0):.0f} W</td>'
-                            f'<td>{kwh:.2f} kWh</td>'
-                            f'<td>${kwh * ENERGY_RATE:.2f}</td></tr>\n')
-        charge_summary_line = (
-            f'<p style="margin:8px 0;color:#666;font-size:13px;">'
-            f'Today: <strong>{charge_today_summary["kwh"]:.2f} kWh</strong> '
-            f'(${charge_today_summary["cost"]:.2f}) &middot; '
-            f'last 7 days: <strong>{charge_week_summary["kwh"]:.2f} kWh</strong> '
-            f'(${charge_week_summary["cost"]:.2f})</p>'
-        )
-        charge_table = (f'<table><tr><th>Time</th><th>Min</th><th>Power</th><th>Energy</th><th>Cost</th></tr>\n'
-                        f'{charge_rows}</table>') if charges_today else ''
-        charge_section = f'''
-<h3>Car Charging</h3>
-{charge_summary_line}
-{charge_table}'''
+    @property
+    def show_monthly(self) -> bool:
+        return self.force_monthly or self.target_date.weekday() == 6
 
-    today_chart_img = (f'<img src="data:image/png;base64,{today_chart_b64}" '
-                       f'alt="Today hourly" style="width:100%;max-width:560px;display:block;margin:8px 0;">') \
-        if today_chart_b64 else ''
-    week_daily_chart_img = (f'<img src="data:image/png;base64,{week_daily_chart_b64}" '
-                         f'alt="Last 7 days vs 5-week avg, daily" '
-                         f'style="width:100%;max-width:560px;display:block;margin:8px 0;">') \
-        if week_daily_chart_b64 else ''
 
-    return f'''<!DOCTYPE html>
-<html><head><style>
-body {{ font-family: -apple-system, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; color: #333; }}
-h2 {{ color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 8px; }}
-h3 {{ color: #2c3e50; margin-top: 24px; }}
-table {{ border-collapse: collapse; width: 100%; margin: 8px 0; }}
-th, td {{ padding: 6px 12px; text-align: left; border-bottom: 1px solid #eee; }}
-th {{ background: #f8f9fa; font-weight: 600; }}
-table.summary td {{ text-align: right; }}
-table.summary th:first-child, table.summary td:first-child {{ text-align: left; }}
-</style></head>
-<body>
-<h2>Energy Report &mdash; {date_str}</h2>
+def _chart_img(b64: str, alt: str) -> str:
+    return (f'<img src="data:image/png;base64,{b64}" alt="{alt}" '
+            f'style="width:100%;max-width:560px;display:block;margin:8px 0;">')
+
+
+def _delta_arrow(current: float, baseline: float) -> str:
+    if baseline == 0:
+        return ""
+    pct = (current - baseline) / baseline * 100
+    arrow, color = ("&uarr;", "#e74c3c") if pct > 0 else ("&darr;", "#27ae60")
+    return (f' <span style="color:{color};font-size:12px;font-weight:500;">'
+            f'{arrow}{abs(pct):.0f}% vs yesterday</span>')
+
+
+def _event_time(e: dict) -> str:
+    t = e.get("_time")
+    return t.strftime("%-I:%M %p") if hasattr(t, "strftime") else str(t)
+
+
+# ---------- sections ----------
+
+def section_summary(ctx: ReportContext) -> str:
+    delta = _delta_arrow(ctx.today.grid, ctx.prev_day_kwh)
+    return f'''<h2>Energy Report &mdash; {ctx.date_str}</h2>
 
 <table class="summary">
 <tr><th></th><th>Today</th><th>Last 7 days</th></tr>
-<tr><th>Total kWh</th><td>{kwh_today:.1f}{delta(kwh_today, prev_kwh)}</td><td>{kwh_week:.1f}</td></tr>
-<tr><th>Excl. car</th><td>{kwh_today_excl:.1f}</td><td>{kwh_week_excl:.1f}</td></tr>
-<tr><th>Est. cost</th><td>${cost_today:.2f}</td><td>${cost_week:.2f}</td></tr>
+<tr><th>Total kWh</th><td>{ctx.today.grid:.1f}{delta}</td><td>{ctx.week.grid:.1f}</td></tr>
+<tr><th>Excl. car</th><td>{ctx.today.excl:.1f}</td><td>{ctx.week.excl:.1f}</td></tr>
+<tr><th>Est. cost</th><td>${ctx.today.cost:.2f}</td><td>${ctx.week.cost:.2f}</td></tr>
 </table>
 <p style="font-size:12px;color:#666;margin:4px 0 16px;">
-30-day daily avg (excl. car): <strong>{avg30_excl_per_day:.1f} kWh/day</strong>
-</p>
+30-day daily avg (excl. car): <strong>{ctx.avg30_excl:.1f} kWh/day</strong>
+</p>'''
 
-<h3>Today &mdash; hourly (excl. car)</h3>
-{today_chart_img}
 
-<h3>Last 7 days vs 5-week avg &mdash; daily (stacked: excl. car + EV)</h3>
-{week_daily_chart_img}
+def section_today_chart(ctx: ReportContext) -> str:
+    b64 = render_today_chart(ctx.today_hourly_excl, ctx.week_hourly_excl)
+    if not b64:
+        return ""
+    return f'<h3>Today &mdash; hourly (excl. car)</h3>\n{_chart_img(b64, "Today hourly")}'
 
-<h3>Cost Breakdown &mdash; today</h3>
+
+def section_week_chart(ctx: ReportContext) -> str:
+    b64 = render_week_daily_chart(ctx.daily_excl, ctx.daily_ev)
+    if not b64:
+        return ""
+    return (f'<h3>Last 7 days vs 5-week avg &mdash; daily (stacked: excl. car + EV)</h3>\n'
+            f'{_chart_img(b64, "Week daily")}')
+
+
+def section_cost_breakdown(ctx: ReportContext) -> str:
+    energy = round(ctx.today.grid * ENERGY_RATE, 2)
+    base = round(BASE_CHARGE_DAILY, 2)
+    return f'''<h3>Cost Breakdown &mdash; today</h3>
 <table>
-<tr><td>Energy &mdash; {kwh_today:.1f} kWh &times; ${ENERGY_RATE:.4f}</td><td>${cost_energy_today:.2f}</td></tr>
-<tr><td>Base service charge</td><td>${cost_base_today:.2f}</td></tr>
-<tr><td><strong>Total</strong></td><td><strong>${cost_today:.2f}</strong></td></tr>
+<tr><td>Energy &mdash; {ctx.today.grid:.1f} kWh &times; ${ENERGY_RATE:.4f}</td><td>${energy:.2f}</td></tr>
+<tr><td>Base service charge</td><td>${base:.2f}</td></tr>
+<tr><td><strong>Total</strong></td><td><strong>${ctx.today.cost:.2f}</strong></td></tr>
 </table>
-<p style="font-size:11px;color:#888;margin:4px 0;">SCL Small General, flat rate.</p>
+<p style="font-size:11px;color:#888;margin:4px 0;">SCL Small General, flat rate.</p>'''
 
-<h3>Top 10 Circuits</h3>
+
+def section_top_circuits(ctx: ReportContext) -> str:
+    rows = "".join(
+        f'<tr><td>{c["name"]}</td>'
+        f'<td>{c["kwh_day"]:.2f}</td><td>${c["kwh_day"] * ENERGY_RATE:.2f}</td>'
+        f'<td>{c["kwh_week"]:.2f}</td><td>${c["kwh_week"] * ENERGY_RATE:.2f}</td></tr>\n'
+        for c in ctx.circuits_top10
+    )
+    t = ctx.circuits_totals
+    totals_row = (
+        f'<tr style="background:#f8f9fa;font-weight:600;">'
+        f'<td>Total (top 10)</td>'
+        f'<td>{t["kwh_day"]:.2f}</td><td>${t["kwh_day"] * ENERGY_RATE:.2f}</td>'
+        f'<td>{t["kwh_week"]:.2f}</td><td>${t["kwh_week"] * ENERGY_RATE:.2f}</td></tr>'
+    )
+    return f'''<h3>Top 10 Circuits</h3>
 <table>
 <tr><th>Circuit</th><th>kWh (day)</th><th>$ (day)</th><th>kWh (7d)</th><th>$ (7d)</th></tr>
-{circuit_rows}{circuit_total_row}
-</table>
-{monthly_section}
-{bath_section}
-{charge_section}
+{rows}{totals_row}
+</table>'''
+
+
+def section_monthly(ctx: ReportContext) -> str:
+    if not ctx.show_monthly:
+        return ""
+    return build_monthly_section(ctx.query_api, ctx.target_date)
+
+
+def section_baths(ctx: ReportContext) -> str:
+    if not (ctx.baths_today or ctx.baths_week_summary["count"] > 0):
+        return ""
+    today_kwh = sum((b.get("energy_kwh") or 0) for b in ctx.baths_today)
+    summary = (
+        f'<p style="margin:8px 0;color:#666;font-size:13px;">'
+        f'Today: <strong>{len(ctx.baths_today)}</strong> '
+        f'(<strong>{today_kwh:.2f} kWh</strong>, ${today_kwh * ENERGY_RATE:.2f}) &middot; '
+        f'last 7 days: <strong>{ctx.baths_week_summary["count"]}</strong> '
+        f'(<strong>{ctx.baths_week_summary["kwh"]:.2f} kWh</strong>, '
+        f'${ctx.baths_week_summary["cost"]:.2f})</p>'
+    )
+    table = ""
+    if ctx.baths_today:
+        rows = "".join(
+            f'<tr><td>{_event_time(b)}</td><td>{b.get("duration_min", 0):.0f}</td>'
+            f'<td>{(b.get("energy_kwh") or 0):.2f} kWh</td>'
+            f'<td>${(b.get("energy_kwh") or 0) * ENERGY_RATE:.2f}</td></tr>\n'
+            for b in ctx.baths_today
+        )
+        table = (f'<table><tr><th>Time</th><th>Min</th><th>Energy</th><th>Cost</th></tr>\n'
+                 f'{rows}</table>')
+    return f'<h3>Bath Events</h3>\n{summary}\n{table}'
+
+
+def section_charges(ctx: ReportContext) -> str:
+    if not (ctx.charges_today or ctx.today.ev > 0 or ctx.week.ev > 0):
+        return ""
+    summary = (
+        f'<p style="margin:8px 0;color:#666;font-size:13px;">'
+        f'Today: <strong>{ctx.today.ev:.2f} kWh</strong> '
+        f'(${ctx.today.ev_cost:.2f}) &middot; '
+        f'last 7 days: <strong>{ctx.week.ev:.2f} kWh</strong> '
+        f'(${ctx.week.ev_cost:.2f})</p>'
+    )
+    table = ""
+    if ctx.charges_today:
+        rows = "".join(
+            f'<tr><td>{_event_time(ch)}</td><td>{ch.get("duration_min", 0):.0f}</td>'
+            f'<td>{ch.get("mean_power_w", 0):.0f} W</td>'
+            f'<td>{(ch.get("energy_kwh") or 0):.2f} kWh</td>'
+            f'<td>${(ch.get("energy_kwh") or 0) * ENERGY_RATE:.2f}</td></tr>\n'
+            for ch in ctx.charges_today
+        )
+        table = (f'<table><tr><th>Time</th><th>Min</th><th>Power</th><th>Energy</th><th>Cost</th></tr>\n'
+                 f'{rows}</table>')
+    return f'<h3>Car Charging</h3>\n{summary}\n{table}'
+
+
+SECTIONS = [
+    section_summary,
+    section_today_chart,
+    section_week_chart,
+    section_cost_breakdown,
+    section_top_circuits,
+    section_monthly,
+    section_baths,
+    section_charges,
+]
+
+
+CSS = """
+body { font-family: -apple-system, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; color: #333; }
+h2 { color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 8px; }
+h3 { color: #2c3e50; margin-top: 24px; }
+table { border-collapse: collapse; width: 100%; margin: 8px 0; }
+th, td { padding: 6px 12px; text-align: left; border-bottom: 1px solid #eee; }
+th { background: #f8f9fa; font-weight: 600; }
+table.summary td { text-align: right; }
+table.summary th:first-child, table.summary td:first-child { text-align: left; }
+"""
+
+
+def build_html(ctx: ReportContext) -> str:
+    """Render the email body by concatenating non-empty sections."""
+    body = "\n\n".join(s for s in (section(ctx) for section in SECTIONS) if s)
+    return f'''<!DOCTYPE html>
+<html><head><style>{CSS}</style></head>
+<body>
+{body}
 </body></html>'''
 
 
@@ -663,102 +750,83 @@ def build_monthly_section(query_api, target_date: date) -> str:
 </table>'''
 
 
-def generate_report(client: InfluxDBClient, target_date: date, force_monthly: bool = False):
-    """Generate and send report for a specific local date (midnight-to-midnight).
+def build_context(query_api, target_date: date, force_monthly: bool) -> ReportContext:
+    """Fetch everything needed for the report and pack into a ReportContext.
 
     Window conventions (all aligned to local midnight):
       TODAY = [target, target+1)
       WEEK  = [target-6, target+1)         — 7 days inclusive of target
-      MONTH = [target-29, target+1)        — 30 days inclusive
-      5WK   = [target-34, target+1)        — 35 days inclusive, feeds the 3h chart
+      5WK   = [target-34, target+1)        — 35 days inclusive
     """
-    query_api = client.query_api()
-
     utc_start, utc_end = local_day_utc_range(target_date)
-    start_str = flux_ts(utc_start)
-    end_str = flux_ts(utc_end)
-    week_start_str = flux_ts(local_day_utc_range(target_date - timedelta(days=6))[0])
-    month_start_str = flux_ts(local_day_utc_range(target_date - timedelta(days=29))[0])
-    fivewk_start_str = flux_ts(local_day_utc_range(target_date - timedelta(days=34))[0])
-    date_str = target_date.strftime("%A, %B %-d")
+    today_start = flux_ts(utc_start)
+    today_end = flux_ts(utc_end)
+    week_start = flux_ts(local_day_utc_range(target_date - timedelta(days=6))[0])
+    fivewk_start = flux_ts(local_day_utc_range(target_date - timedelta(days=34))[0])
 
-    # Totals
-    kwh_today = query_total_kwh(query_api, start_str, end_str)
-    kwh_week = query_total_kwh(query_api, week_start_str, end_str)
+    ev_pat = ev_circuit_pattern().pattern
+
+    # Today + week Periods (grid total + EV total)
+    today_ev_series = query_hourly_circuit_kwh(query_api, today_start, today_end, ev_pat)
+    week_ev_series = query_hourly_circuit_kwh(query_api, week_start, today_end, ev_pat)
+    today = Period(
+        grid=query_total_kwh(query_api, today_start, today_end),
+        ev=sum(v for _, v in today_ev_series),
+        days=1,
+    )
+    week = Period(
+        grid=query_total_kwh(query_api, week_start, today_end),
+        ev=sum(v for _, v in week_ev_series),
+        days=7,
+    )
 
     # Previous day for "vs yesterday" delta
-    prev_start, prev_end = local_day_utc_range(target_date - timedelta(days=1))
-    prev_kwh = query_total_kwh(query_api, flux_ts(prev_start), flux_ts(prev_end))
+    pstart, pend = local_day_utc_range(target_date - timedelta(days=1))
+    prev_day_kwh = query_total_kwh(query_api, flux_ts(pstart), flux_ts(pend))
 
-    # Car (EV) — windowed totals and hourly series (for chart subtraction)
-    ev_pat = ev_circuit_pattern().pattern
-    car_today_series = query_hourly_circuit_kwh(query_api, start_str, end_str, ev_pat)
-    car_week_series = query_hourly_circuit_kwh(query_api, week_start_str, end_str, ev_pat)
-    car_kwh_today = sum(v for _, v in car_today_series)
-    car_kwh_week = sum(v for _, v in car_week_series)
+    # 5-week daily series (drives week chart + 30d avg)
+    daily_grid = dict(query_daily_panel_kwh(query_api, fivewk_start, today_end))
+    daily_ev = dict(query_daily_circuit_kwh(query_api, fivewk_start, today_end, ev_pat))
 
-    kwh_today_excl = max(0.0, kwh_today - car_kwh_today)
-    kwh_week_excl = max(0.0, kwh_week - car_kwh_week)
+    # Hourly excl-EV series for today chart's bars + overlay
+    today_hourly_total = query_hourly_kwh(query_api, today_start, today_end)
+    week_hourly_total = query_hourly_kwh(query_api, week_start, today_end)
+    today_hourly_excl = _subtract_series(today_hourly_total, today_ev_series)
+    week_hourly_excl = _subtract_series(week_hourly_total, week_ev_series)
 
-    cost_today = cost_n_days(kwh_today, 1)
-    cost_week = cost_n_days(kwh_week, 7)
-    cost_energy_today = round(kwh_today * ENERGY_RATE, 2)
-    cost_base_today = round(BASE_CHARGE_DAILY, 2)
+    # Circuit breakdown
+    circuits_today = query_circuit_energy(query_api, today_start, today_end)
+    circuits_week = query_circuit_energy(query_api, week_start, today_end)
+    top10, totals = merge_circuits(circuits_today, circuits_week, n=10)
 
-    # Circuit energy today AND over last 7 days, merged for the top-10 table
-    circuits_today = query_circuit_energy(query_api, start_str, end_str)
-    circuits_week = query_circuit_energy(query_api, week_start_str, end_str)
-    circuit_rows_data, circuit_totals = merge_circuits(circuits_today, circuits_week, n=10)
+    # Events
+    baths_today = query_events(query_api, "bath_event", today_start, today_end)
+    baths_week = query_events(query_api, "bath_event", week_start, today_end)
+    charges_today = query_events(query_api, "charge_event", today_start, today_end)
 
-    # Events: today + 7-day summaries
-    baths_today = query_events(query_api, "bath_event", start_str, end_str)
-    baths_week = query_events(query_api, "bath_event", week_start_str, end_str)
-    charges_today = query_events(query_api, "charge_event", start_str, end_str)
-    baths_week_summary = event_summary(baths_week)
-    charge_today_summary = {"kwh": car_kwh_today, "cost": round(car_kwh_today * ENERGY_RATE, 2)}
-    charge_week_summary = {"kwh": car_kwh_week, "cost": round(car_kwh_week * ENERGY_RATE, 2)}
-
-    # Today chart still needs hourly series (24 points subtracted hourly)
-    today_hourly_total = query_hourly_kwh(query_api, start_str, end_str)
-    week_hourly_total = query_hourly_kwh(query_api, week_start_str, end_str)
-    today_hourly_excl = _subtract_series(today_hourly_total, car_today_series)
-    week_hourly_excl = _subtract_series(week_hourly_total, car_week_series)
-
-    # Daily totals via per-local-day integral (matches the summary's exact-energy path).
-    # One query for grid, one for EV; subtract by date.
-    daily_grid = dict(query_daily_panel_kwh(query_api, fivewk_start_str, end_str))
-    daily_ev = dict(query_daily_circuit_kwh(query_api, fivewk_start_str, end_str, ev_pat))
-    daily_excl = sorted(
-        (d, max(0.0, kwh - daily_ev.get(d, 0.0))) for d, kwh in daily_grid.items()
-    )
-
-    # 30-day daily avg (excl. car) for the helper line under the summary table
-    last30 = daily_excl[-30:] if len(daily_excl) >= 30 else daily_excl
-    avg30_excl_per_day = (sum(v for _, v in last30) / len(last30)) if last30 else 0.0
-
-    today_chart_b64 = render_today_chart(today_hourly_excl, week_hourly_excl)
-    week_daily_chart_b64 = render_week_daily_chart(daily_excl, daily_ev)
-
-    monthly_section = (build_monthly_section(query_api, target_date)
-                       if force_monthly or target_date.weekday() == 6 else "")
-
-    html = build_html(
-        date_str=date_str,
-        kwh_today=kwh_today, kwh_week=kwh_week,
-        kwh_today_excl=kwh_today_excl, kwh_week_excl=kwh_week_excl,
-        cost_today=cost_today, cost_week=cost_week,
-        cost_energy_today=cost_energy_today, cost_base_today=cost_base_today,
-        prev_kwh=prev_kwh, avg30_excl_per_day=avg30_excl_per_day,
-        circuit_rows_data=circuit_rows_data, circuit_totals=circuit_totals,
-        baths_today=baths_today, baths_week_summary=baths_week_summary,
+    return ReportContext(
+        query_api=query_api,
+        target_date=target_date,
+        force_monthly=force_monthly,
+        today=today,
+        week=week,
+        prev_day_kwh=prev_day_kwh,
+        daily_grid=daily_grid,
+        daily_ev=daily_ev,
+        today_hourly_excl=today_hourly_excl,
+        week_hourly_excl=week_hourly_excl,
+        circuits_top10=top10,
+        circuits_totals=totals,
+        baths_today=baths_today,
+        baths_week_summary=event_summary(baths_week),
         charges_today=charges_today,
-        charge_today_summary=charge_today_summary,
-        charge_week_summary=charge_week_summary,
-        today_chart_b64=today_chart_b64,
-        week_daily_chart_b64=week_daily_chart_b64,
-        monthly_section=monthly_section,
     )
-    send_email(html, date_str)
+
+
+def generate_report(client: InfluxDBClient, target_date: date, force_monthly: bool = False):
+    """Build the email for `target_date` (local) and send via Resend."""
+    ctx = build_context(client.query_api(), target_date, force_monthly)
+    send_email(build_html(ctx), ctx.date_str)
 
 
 def seconds_until_hour(hour: int) -> float:
