@@ -319,55 +319,69 @@ def render_today_chart(today_hourly: list[tuple[datetime, float]],
     return _fig_to_b64(fig)
 
 
-def render_week_daily_chart(daily_excl: list[tuple[date, float]]) -> str:
-    """Grouped daily bars: last 7 days actual vs 5-week-same-weekday avg.
+def render_week_daily_chart(daily_excl: list[tuple[date, float]],
+                            daily_ev: dict[date, float]) -> str:
+    """Grouped daily bars (stacked excl + EV): last 7 days actual vs 5-week-same-weekday avg.
 
     `daily_excl` is the full lookback window (e.g. 35 days), one entry per local day.
+    `daily_ev` covers the same window, keyed by local date.
     """
     if not daily_excl:
         return ""
 
-    # 5-week avg per weekday from full history
-    by_wd: dict[int, list[float]] = {}
+    # 5-week avg per weekday from full history — excl and EV separately
+    by_wd_excl: dict[int, list[float]] = {}
+    by_wd_ev: dict[int, list[float]] = {}
     for d, v in daily_excl:
-        by_wd.setdefault(d.weekday(), []).append(v)
-    wd_avg = {wd: sum(vs) / len(vs) for wd, vs in by_wd.items() if vs}
+        by_wd_excl.setdefault(d.weekday(), []).append(v)
+        by_wd_ev.setdefault(d.weekday(), []).append(daily_ev.get(d, 0.0))
+    wd_avg_excl = {wd: sum(vs) / len(vs) for wd, vs in by_wd_excl.items() if vs}
+    wd_avg_ev = {wd: sum(vs) / len(vs) for wd, vs in by_wd_ev.items() if vs}
 
     last7 = daily_excl[-7:]
     days = [d for d, _ in last7]
-    actual = [v for _, v in last7]
-    avg = [wd_avg.get(d.weekday(), 0.0) for d in days]
+    actual_excl = [v for _, v in last7]
+    actual_ev = [daily_ev.get(d, 0.0) for d in days]
+    avg_excl = [wd_avg_excl.get(d.weekday(), 0.0) for d in days]
+    avg_ev = [wd_avg_ev.get(d.weekday(), 0.0) for d in days]
     labels = [d.strftime("%a %-m/%-d") for d in days]
 
     x = list(range(len(days)))
     width = 0.4
+    left = [i - width / 2 for i in x]
+    right = [i + width / 2 for i in x]
     fig, ax = plt.subplots(figsize=(7, 3.2), dpi=120)
-    ax.bar([i - width / 2 for i in x], actual, width, color="#3498db", label="Day total")
-    ax.bar([i + width / 2 for i in x], avg, width, color="#e67e22",
-           label="5-week avg (same weekday)")
+    ax.bar(left, actual_excl, width, color="#3498db", label="Day excl. car")
+    ax.bar(left, actual_ev, width, bottom=actual_excl, color="#9b59b6", label="Day EV")
+    ax.bar(right, avg_excl, width, color="#e67e22", label="5-week avg excl.")
+    ax.bar(right, avg_ev, width, bottom=avg_excl, color="#f0b27a", label="5-week avg EV")
     ax.set_xticks(x)
     ax.set_xticklabels(labels, fontsize=9)
     ax.set_ylabel("kWh")
     ax.grid(True, alpha=0.3, axis="y")
-    ax.legend(loc="upper left", fontsize=9)
+    ax.legend(loc="upper left", fontsize=8, ncol=2)
     fig.tight_layout()
     return _fig_to_b64(fig)
 
 
-def render_monthly_chart(monthly_excl: list[tuple[tuple[int, int], float]]) -> str:
-    """12 monthly bars (excl. car) + dashed avg line."""
+def render_monthly_chart(monthly_excl: list[tuple[tuple[int, int], float]],
+                         monthly_ev: dict[tuple[int, int], float]) -> str:
+    """Stacked monthly bars (excl + EV) + dashed total-avg line."""
     if not monthly_excl:
         return ""
 
     labels = [f"{calendar.month_abbr[m]} '{str(y)[2:]}" for (y, m), _ in monthly_excl]
-    values = [v for _, v in monthly_excl]
-    avg = sum(values) / len(values)
+    excl_values = [v for _, v in monthly_excl]
+    ev_values = [monthly_ev.get(ym, 0.0) for ym, _ in monthly_excl]
+    totals = [e + v for e, v in zip(excl_values, ev_values)]
+    avg = sum(totals) / len(totals)
 
-    x = list(range(len(values)))
+    x = list(range(len(excl_values)))
     fig, ax = plt.subplots(figsize=(7, 3.2), dpi=120)
-    ax.bar(x, values, width=0.7, color="#3498db", label="Month total (excl. car)")
+    ax.bar(x, excl_values, width=0.7, color="#3498db", label="excl. car")
+    ax.bar(x, ev_values, width=0.7, bottom=excl_values, color="#9b59b6", label="EV")
     ax.axhline(avg, color="#e67e22", linewidth=2, linestyle="--",
-               label=f"12-mo avg ({avg:.0f} kWh)")
+               label=f"12-mo avg total ({avg:.0f} kWh)")
     ax.set_xticks(x)
     ax.set_xticklabels(labels, fontsize=9, rotation=30, ha="right")
     ax.set_ylabel("kWh")
@@ -551,7 +565,7 @@ table.summary th:first-child, table.summary td:first-child {{ text-align: left; 
 <h3>Today &mdash; hourly (excl. car)</h3>
 {today_chart_img}
 
-<h3>Last 7 days vs 5-week avg &mdash; daily (excl. car)</h3>
+<h3>Last 7 days vs 5-week avg &mdash; daily (stacked: excl. car + EV)</h3>
 {week_daily_chart_img}
 
 <h3>Cost Breakdown &mdash; today</h3>
@@ -615,7 +629,7 @@ def build_monthly_section(query_api, target_date: date) -> str:
     if not any(v > 0 for _, v in monthly_excl):
         return ""
 
-    chart_b64 = render_monthly_chart(monthly_excl)
+    chart_b64 = render_monthly_chart(monthly_excl, ev)
     chart_img = (f'<img src="data:image/png;base64,{chart_b64}" '
                  f'alt="Trailing 12 months excl. car" '
                  f'style="width:100%;max-width:560px;display:block;margin:8px 0;">') \
@@ -725,7 +739,7 @@ def generate_report(client: InfluxDBClient, target_date: date, force_monthly: bo
     avg30_excl_per_day = (sum(v for _, v in last30) / len(last30)) if last30 else 0.0
 
     today_chart_b64 = render_today_chart(today_hourly_excl, week_hourly_excl)
-    week_daily_chart_b64 = render_week_daily_chart(daily_excl)
+    week_daily_chart_b64 = render_week_daily_chart(daily_excl, daily_ev)
 
     monthly_section = (build_monthly_section(query_api, target_date)
                        if force_monthly or target_date.weekday() == 6 else "")
