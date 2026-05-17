@@ -505,7 +505,7 @@ def _chart_img(b64: str, alt: str) -> str:
 
 
 def _delta_arrow(current: float, baseline: float) -> str:
-    if baseline == 0:
+    if baseline == 0 or current == 0:
         return ""
     pct = (current - baseline) / baseline * 100
     arrow, color = ("&uarr;", "#e74c3c") if pct > 0 else ("&darr;", "#27ae60")
@@ -563,6 +563,8 @@ def section_cost_breakdown(ctx: ReportContext) -> str:
 
 
 def section_top_circuits(ctx: ReportContext) -> str:
+    if not ctx.circuits_top10:
+        return ""
     rows = "".join(
         f'<tr><td>{c["name"]}</td>'
         f'<td>{c["kwh_day"]:.2f}</td><td>${c["kwh_day"] * ENERGY_RATE:.2f}</td>'
@@ -711,7 +713,13 @@ def build_monthly_section(query_api, target_date: date) -> str:
         y, m = add_months(y, m, 1)
 
     monthly_excl = [(ym, max(0.0, grid.get(ym, 0.0) - ev.get(ym, 0.0))) for ym in months]
-    if not any(v > 0 for _, v in monthly_excl):
+    # Trim leading months with no data at all (avoids phantom base-charge rows)
+    first_idx = next(
+        (i for i, (ym, v) in enumerate(monthly_excl) if v > 0 or ev.get(ym, 0.0) > 0),
+        len(monthly_excl),
+    )
+    monthly_excl = monthly_excl[first_idx:]
+    if not monthly_excl:
         return ""
 
     chart_b64 = render_monthly_chart(monthly_excl, ev)
