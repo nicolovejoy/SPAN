@@ -65,12 +65,6 @@ from(bucket: "{INFLUXDB_BUCKET}")
     return 0.0
 
 
-def compute_cost(kwh: float) -> tuple[float, float, float]:
-    """Returns (total_cost, energy_cost, base_charge) for one local day."""
-    energy = kwh * ENERGY_RATE
-    return round(energy + BASE_CHARGE_DAILY, 2), round(energy, 2), round(BASE_CHARGE_DAILY, 2)
-
-
 def query_circuit_energy(query_api, start: str, stop: str) -> list[dict]:
     """Energy per circuit in kWh, sorted descending."""
     flux = f'''
@@ -268,6 +262,33 @@ def _fig_to_b64(fig) -> str:
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
+def cost_n_days(kwh: float, days: int) -> float:
+    """Total cost for `days` days at `kwh` energy (energy + N × base)."""
+    return round(kwh * ENERGY_RATE + days * BASE_CHARGE_DAILY, 2)
+
+
+def merge_circuits(today_list: list[dict], week_list: list[dict],
+                   n: int = 10) -> tuple[list[dict], dict]:
+    """Top N circuits by today's kWh, with week kWh joined in. Returns (rows, totals)."""
+    week_map = {c["name"]: c["kwh"] for c in week_list}
+    rows = sorted(
+        ({"name": c["name"], "kwh_day": c["kwh"], "kwh_week": week_map.get(c["name"], 0.0)}
+         for c in today_list),
+        key=lambda r: r["kwh_day"], reverse=True,
+    )[:n]
+    totals = {
+        "kwh_day": sum(r["kwh_day"] for r in rows),
+        "kwh_week": sum(r["kwh_week"] for r in rows),
+    }
+    return rows, totals
+
+
+def event_summary(events: list[dict]) -> dict:
+    """Count + kWh + cost (recomputed at current ENERGY_RATE) for a list of events."""
+    kwh = sum((e.get("energy_kwh") or 0) for e in events)
+    return {"count": len(events), "kwh": kwh, "cost": round(kwh * ENERGY_RATE, 2)}
+
+
 def query_events(query_api, measurement: str, start: str, stop: str) -> list[dict]:
     """Query pivoted event records (bath_event or charge_event)."""
     flux = f'''
@@ -283,9 +304,12 @@ from(bucket: "{INFLUXDB_BUCKET}")
     return results
 
 
-def build_html(date_str, kwh, cost_total, cost_energy, cost_base,
-               prev_kwh, avg30_kwh, circuits, baths, charges,
-               kwh_excl_car, car_kwh_today, car_kwh_week,
+def build_html(date_str, kwh_today, kwh_week, kwh_today_excl, kwh_week_excl,
+               cost_today, cost_week, cost_energy_today, cost_base_today,
+               prev_kwh, avg30_excl_per_day,
+               circuit_rows_data, circuit_totals,
+               baths_today, baths_week_summary,
+               charges_today, charge_today_summary, charge_week_summary,
                today_chart_b64, week_3h_chart_b64):
     """Build HTML email body."""
 
@@ -294,50 +318,80 @@ def build_html(date_str, kwh, cost_total, cost_energy, cost_base,
             return ""
         pct = (current - baseline) / baseline * 100
         arrow, color = ("&uarr;", "#e74c3c") if pct > 0 else ("&darr;", "#27ae60")
-        return f' <span style="color:{color}">{arrow}{abs(pct):.0f}%</span>'
+        return (f' <span style="color:{color};font-size:12px;font-weight:500;">'
+                f'{arrow}{abs(pct):.0f}% vs yesterday</span>')
 
+    # Top 10 circuit rows + totals
     circuit_rows = ""
-    for c in circuits[:10]:
-        est = round(c["kwh"] * ENERGY_RATE, 2)
-        circuit_rows += f'<tr><td>{c["name"]}</td><td>{c["kwh"]:.2f}</td><td>${est:.2f}</td></tr>\n'
+    for c in circuit_rows_data:
+        cost_d = c["kwh_day"] * ENERGY_RATE
+        cost_w = c["kwh_week"] * ENERGY_RATE
+        circuit_rows += (
+            f'<tr><td>{c["name"]}</td>'
+            f'<td>{c["kwh_day"]:.2f}</td><td>${cost_d:.2f}</td>'
+            f'<td>{c["kwh_week"]:.2f}</td><td>${cost_w:.2f}</td></tr>\n'
+        )
+    ct_cost_d = circuit_totals["kwh_day"] * ENERGY_RATE
+    ct_cost_w = circuit_totals["kwh_week"] * ENERGY_RATE
+    circuit_total_row = (
+        f'<tr style="background:#f8f9fa;font-weight:600;">'
+        f'<td>Total (top 10)</td>'
+        f'<td>{circuit_totals["kwh_day"]:.2f}</td><td>${ct_cost_d:.2f}</td>'
+        f'<td>{circuit_totals["kwh_week"]:.2f}</td><td>${ct_cost_w:.2f}</td></tr>'
+    )
 
-    bath_rows = ""
-    for b in baths:
-        t = b.get("_time")
-        ts = t.strftime("%-I:%M %p") if hasattr(t, "strftime") else str(t)
-        bath_rows += (f'<tr><td>{ts}</td><td>{b.get("duration_min", 0):.0f}</td>'
-                      f'<td>{b.get("energy_kwh", 0):.2f} kWh</td>'
-                      f'<td>${b.get("cost_dollars", 0):.2f}</td></tr>\n')
-
-    charge_rows = ""
-    for ch in charges:
-        t = ch.get("_time")
-        ts = t.strftime("%-I:%M %p") if hasattr(t, "strftime") else str(t)
-        charge_rows += (f'<tr><td>{ts}</td><td>{ch.get("duration_min", 0):.0f}</td>'
-                        f'<td>{ch.get("mean_power_w", 0):.0f} W</td>'
-                        f'<td>{ch.get("energy_kwh", 0):.2f} kWh</td>'
-                        f'<td>${ch.get("cost_dollars", 0):.2f}</td></tr>\n')
-
+    # Bath section: summary line + today's events table
     bath_section = ""
-    if baths:
+    if baths_today or baths_week_summary["count"] > 0:
+        bath_rows = ""
+        for b in baths_today:
+            t = b.get("_time")
+            ts = t.strftime("%-I:%M %p") if hasattr(t, "strftime") else str(t)
+            kwh = b.get("energy_kwh", 0) or 0
+            bath_rows += (f'<tr><td>{ts}</td><td>{b.get("duration_min", 0):.0f}</td>'
+                          f'<td>{kwh:.2f} kWh</td>'
+                          f'<td>${kwh * ENERGY_RATE:.2f}</td></tr>\n')
+        bath_summary_line = (
+            f'<p style="margin:8px 0;color:#666;font-size:13px;">'
+            f'Today: <strong>{len(baths_today)}</strong> '
+            f'(<strong>{sum((b.get("energy_kwh") or 0) for b in baths_today):.2f} kWh</strong>, '
+            f'${sum((b.get("energy_kwh") or 0) for b in baths_today) * ENERGY_RATE:.2f}) &middot; '
+            f'last 7 days: <strong>{baths_week_summary["count"]}</strong> '
+            f'(<strong>{baths_week_summary["kwh"]:.2f} kWh</strong>, '
+            f'${baths_week_summary["cost"]:.2f})</p>'
+        )
+        bath_table = (f'<table><tr><th>Time</th><th>Min</th><th>Energy</th><th>Cost</th></tr>\n'
+                      f'{bath_rows}</table>') if baths_today else ''
         bath_section = f'''
-<h3>Bath Events ({len(baths)})</h3>
-<table><tr><th>Time</th><th>Min</th><th>Energy</th><th>Cost</th></tr>
-{bath_rows}</table>'''
+<h3>Bath Events</h3>
+{bath_summary_line}
+{bath_table}'''
 
+    # Charge section: summary line + today's sessions table
     charge_section = ""
-    if charges or car_kwh_today > 0 or car_kwh_week > 0:
-        car_summary = (f'<p style="margin:8px 0;color:#666;font-size:13px;">'
-                       f'Car charging today: <strong>{car_kwh_today:.2f} kWh</strong> '
-                       f'(${car_kwh_today * ENERGY_RATE:.2f}) &middot; '
-                       f'last 7 days: <strong>{car_kwh_week:.2f} kWh</strong> '
-                       f'(${car_kwh_week * ENERGY_RATE:.2f})</p>')
-        table = (f'<table><tr><th>Time</th><th>Min</th><th>Power</th><th>Energy</th><th>Cost</th></tr>\n'
-                 f'{charge_rows}</table>') if charges else ''
+    if charges_today or charge_today_summary["kwh"] > 0 or charge_week_summary["kwh"] > 0:
+        charge_rows = ""
+        for ch in charges_today:
+            t = ch.get("_time")
+            ts = t.strftime("%-I:%M %p") if hasattr(t, "strftime") else str(t)
+            kwh = ch.get("energy_kwh", 0) or 0
+            charge_rows += (f'<tr><td>{ts}</td><td>{ch.get("duration_min", 0):.0f}</td>'
+                            f'<td>{ch.get("mean_power_w", 0):.0f} W</td>'
+                            f'<td>{kwh:.2f} kWh</td>'
+                            f'<td>${kwh * ENERGY_RATE:.2f}</td></tr>\n')
+        charge_summary_line = (
+            f'<p style="margin:8px 0;color:#666;font-size:13px;">'
+            f'Today: <strong>{charge_today_summary["kwh"]:.2f} kWh</strong> '
+            f'(${charge_today_summary["cost"]:.2f}) &middot; '
+            f'last 7 days: <strong>{charge_week_summary["kwh"]:.2f} kWh</strong> '
+            f'(${charge_week_summary["cost"]:.2f})</p>'
+        )
+        charge_table = (f'<table><tr><th>Time</th><th>Min</th><th>Power</th><th>Energy</th><th>Cost</th></tr>\n'
+                        f'{charge_rows}</table>') if charges_today else ''
         charge_section = f'''
-<h3>Car Charging ({len(charges)} session{"s" if len(charges) != 1 else ""})</h3>
-{car_summary}
-{table}'''
+<h3>Car Charging</h3>
+{charge_summary_line}
+{charge_table}'''
 
     today_chart_img = (f'<img src="data:image/png;base64,{today_chart_b64}" '
                        f'alt="Today hourly" style="width:100%;max-width:560px;display:block;margin:8px 0;">') \
@@ -355,19 +409,21 @@ h3 {{ color: #2c3e50; margin-top: 24px; }}
 table {{ border-collapse: collapse; width: 100%; margin: 8px 0; }}
 th, td {{ padding: 6px 12px; text-align: left; border-bottom: 1px solid #eee; }}
 th {{ background: #f8f9fa; font-weight: 600; }}
-.stats {{ display: flex; gap: 8px; margin: 16px 0; }}
-.stat {{ flex: 1; text-align: center; padding: 12px; background: #f8f9fa; border-radius: 8px; }}
-.stat .val {{ font-size: 24px; font-weight: 700; }}
-.stat .lbl {{ font-size: 12px; color: #666; }}
+table.summary td {{ text-align: right; }}
+table.summary th:first-child, table.summary td:first-child {{ text-align: left; }}
 </style></head>
 <body>
 <h2>Energy Report &mdash; {date_str}</h2>
 
-<div class="stats">
-<div class="stat"><div class="val">{kwh:.1f} kWh</div><div class="lbl">Consumption{delta(kwh, prev_kwh)}</div></div>
-<div class="stat"><div class="val">${cost_total:.2f}</div><div class="lbl">Est. Cost</div></div>
-<div class="stat"><div class="val">{avg30_kwh:.1f} kWh</div><div class="lbl">30-Day Avg</div></div>
-</div>
+<table class="summary">
+<tr><th></th><th>Today</th><th>Last 7 days</th></tr>
+<tr><th>Total kWh</th><td>{kwh_today:.1f}{delta(kwh_today, prev_kwh)}</td><td>{kwh_week:.1f}</td></tr>
+<tr><th>Excl. car</th><td>{kwh_today_excl:.1f}</td><td>{kwh_week_excl:.1f}</td></tr>
+<tr><th>Est. cost</th><td>${cost_today:.2f}</td><td>${cost_week:.2f}</td></tr>
+</table>
+<p style="font-size:12px;color:#666;margin:4px 0 16px;">
+30-day daily avg (excl. car): <strong>{avg30_excl_per_day:.1f} kWh/day</strong>
+</p>
 
 <h3>Today &mdash; hourly (excl. car)</h3>
 {today_chart_img}
@@ -375,17 +431,19 @@ th {{ background: #f8f9fa; font-weight: 600; }}
 <h3>Last 7 days vs 5-week avg &mdash; 3h buckets (excl. car)</h3>
 {week_3h_chart_img}
 
-<h3>Cost Breakdown</h3>
+<h3>Cost Breakdown &mdash; today</h3>
 <table>
-<tr><td>Energy &mdash; {kwh:.1f} kWh &times; ${ENERGY_RATE:.4f}</td><td>${cost_energy:.2f}</td></tr>
-<tr><td>Base service charge</td><td>${cost_base:.2f}</td></tr>
-<tr><td><strong>Total</strong></td><td><strong>${cost_total:.2f}</strong></td></tr>
+<tr><td>Energy &mdash; {kwh_today:.1f} kWh &times; ${ENERGY_RATE:.4f}</td><td>${cost_energy_today:.2f}</td></tr>
+<tr><td>Base service charge</td><td>${cost_base_today:.2f}</td></tr>
+<tr><td><strong>Total</strong></td><td><strong>${cost_today:.2f}</strong></td></tr>
 </table>
 <p style="font-size:11px;color:#888;margin:4px 0;">SCL Small General, flat rate.</p>
 
 <h3>Top 10 Circuits</h3>
-<table><tr><th>Circuit</th><th>kWh</th><th>Est. Cost</th></tr>
-{circuit_rows}</table>
+<table>
+<tr><th>Circuit</th><th>kWh (day)</th><th>$ (day)</th><th>kWh (7d)</th><th>$ (7d)</th></tr>
+{circuit_rows}{circuit_total_row}
+</table>
 {bath_section}
 {charge_section}
 </body></html>'''
@@ -409,62 +467,95 @@ def send_email(html: str, date_str: str):
 
 
 def generate_report(client: InfluxDBClient, target_date: date):
-    """Generate and send report for a specific local date (midnight-to-midnight)."""
+    """Generate and send report for a specific local date (midnight-to-midnight).
+
+    Window conventions (all aligned to local midnight):
+      TODAY = [target, target+1)
+      WEEK  = [target-6, target+1)         — 7 days inclusive of target
+      MONTH = [target-29, target+1)        — 30 days inclusive
+      5WK   = [target-34, target+1)        — 35 days inclusive, feeds the 3h chart
+    """
     query_api = client.query_api()
 
     utc_start, utc_end = local_day_utc_range(target_date)
     start_str = flux_ts(utc_start)
     end_str = flux_ts(utc_end)
+    week_start_str = flux_ts(local_day_utc_range(target_date - timedelta(days=6))[0])
+    month_start_str = flux_ts(local_day_utc_range(target_date - timedelta(days=29))[0])
+    fivewk_start_str = flux_ts(local_day_utc_range(target_date - timedelta(days=34))[0])
     date_str = target_date.strftime("%A, %B %-d")
 
-    kwh = query_total_kwh(query_api, start_str, end_str)
-    cost_total, cost_energy, cost_base = compute_cost(kwh)
+    # Totals
+    kwh_today = query_total_kwh(query_api, start_str, end_str)
+    kwh_week = query_total_kwh(query_api, week_start_str, end_str)
 
-    # Previous day for comparison
+    # Previous day for "vs yesterday" delta
     prev_start, prev_end = local_day_utc_range(target_date - timedelta(days=1))
     prev_kwh = query_total_kwh(query_api, flux_ts(prev_start), flux_ts(prev_end))
 
-    # 35-day window preceding target — feeds 7d view, 30d avg, and 5-week weekday means
-    LOOKBACK_DAYS = 35
-    month_start, _ = local_day_utc_range(target_date - timedelta(days=LOOKBACK_DAYS))
-    month_start_str = flux_ts(month_start)
-    # 7-day window for car summary
-    week_start, _ = local_day_utc_range(target_date - timedelta(days=7))
-    week_start_str = flux_ts(week_start)
-
-    circuits = query_circuit_energy(query_api, start_str, end_str)
-    baths = query_events(query_api, "bath_event", start_str, end_str)
-    charges = query_events(query_api, "charge_event", start_str, end_str)
-
-    # Car (EV) energy — today + trailing 7 days for summary; 35d for chart-subtraction
+    # Car (EV) — windowed totals and hourly series (for chart subtraction)
     ev_pat = ev_circuit_pattern().pattern
     car_today_series = query_hourly_circuit_kwh(query_api, start_str, end_str, ev_pat)
-    car_week_series = query_hourly_circuit_kwh(query_api, week_start_str, start_str, ev_pat)
-    car_month_series = query_hourly_circuit_kwh(query_api, month_start_str, start_str, ev_pat)
+    car_week_series = query_hourly_circuit_kwh(query_api, week_start_str, end_str, ev_pat)
+    car_fivewk_series = query_hourly_circuit_kwh(query_api, fivewk_start_str, end_str, ev_pat)
     car_kwh_today = sum(v for _, v in car_today_series)
     car_kwh_week = sum(v for _, v in car_week_series)
-    kwh_excl_car = max(0.0, kwh - car_kwh_today)
 
-    # Grid hourly (excl. car) for today, last 7 days, and the 35-day history
+    kwh_today_excl = max(0.0, kwh_today - car_kwh_today)
+    kwh_week_excl = max(0.0, kwh_week - car_kwh_week)
+
+    cost_today = cost_n_days(kwh_today, 1)
+    cost_week = cost_n_days(kwh_week, 7)
+    cost_energy_today = round(kwh_today * ENERGY_RATE, 2)
+    cost_base_today = round(BASE_CHARGE_DAILY, 2)
+
+    # Circuit energy today AND over last 7 days, merged for the top-10 table
+    circuits_today = query_circuit_energy(query_api, start_str, end_str)
+    circuits_week = query_circuit_energy(query_api, week_start_str, end_str)
+    circuit_rows_data, circuit_totals = merge_circuits(circuits_today, circuits_week, n=10)
+
+    # Events: today + 7-day summaries
+    baths_today = query_events(query_api, "bath_event", start_str, end_str)
+    baths_week = query_events(query_api, "bath_event", week_start_str, end_str)
+    charges_today = query_events(query_api, "charge_event", start_str, end_str)
+    baths_week_summary = event_summary(baths_week)
+    charge_today_summary = {"kwh": car_kwh_today, "cost": round(car_kwh_today * ENERGY_RATE, 2)}
+    charge_week_summary = {"kwh": car_kwh_week, "cost": round(car_kwh_week * ENERGY_RATE, 2)}
+
+    # Chart hourly series (excl. car)
     today_hourly_total = query_hourly_kwh(query_api, start_str, end_str)
-    week_hourly_total = query_hourly_kwh(query_api, week_start_str, start_str)
-    month_hourly_total = query_hourly_kwh(query_api, month_start_str, start_str)
+    week_hourly_total = query_hourly_kwh(query_api, week_start_str, end_str)
+    fivewk_hourly_total = query_hourly_kwh(query_api, fivewk_start_str, end_str)
     today_hourly_excl = _subtract_series(today_hourly_total, car_today_series)
     week_hourly_excl = _subtract_series(week_hourly_total, car_week_series)
-    month_hourly_excl = _subtract_series(month_hourly_total, car_month_series)
+    fivewk_hourly_excl = _subtract_series(fivewk_hourly_total, car_fivewk_series)
 
-    # 30-day daily avg (excl. car) for the top stat tile
+    # 30-day daily avg (excl. car) for the helper line under the summary table
+    month_hourly_total = query_hourly_kwh(query_api, month_start_str, end_str)
+    car_month_series = query_hourly_circuit_kwh(query_api, month_start_str, end_str, ev_pat)
+    month_hourly_excl = _subtract_series(month_hourly_total, car_month_series)
     month_daily_excl = _daily_totals(_localize(month_hourly_excl))
-    last30 = month_daily_excl[-30:] if len(month_daily_excl) >= 30 else month_daily_excl
-    avg30_excl_car = (sum(v for _, v in last30) / len(last30)) if last30 else 0.0
+    avg30_excl_per_day = (sum(v for _, v in month_daily_excl) / len(month_daily_excl)) \
+        if month_daily_excl else 0.0
 
     today_chart_b64 = render_today_chart(today_hourly_excl, week_hourly_excl)
-    week_3h_chart_b64 = render_week_3h_chart(month_hourly_excl)
+    week_3h_chart_b64 = render_week_3h_chart(fivewk_hourly_excl)
 
-    html = build_html(date_str, kwh, cost_total, cost_energy, cost_base,
-                      prev_kwh, avg30_excl_car, circuits, baths, charges,
-                      kwh_excl_car, car_kwh_today, car_kwh_week,
-                      today_chart_b64, week_3h_chart_b64)
+    html = build_html(
+        date_str=date_str,
+        kwh_today=kwh_today, kwh_week=kwh_week,
+        kwh_today_excl=kwh_today_excl, kwh_week_excl=kwh_week_excl,
+        cost_today=cost_today, cost_week=cost_week,
+        cost_energy_today=cost_energy_today, cost_base_today=cost_base_today,
+        prev_kwh=prev_kwh, avg30_excl_per_day=avg30_excl_per_day,
+        circuit_rows_data=circuit_rows_data, circuit_totals=circuit_totals,
+        baths_today=baths_today, baths_week_summary=baths_week_summary,
+        charges_today=charges_today,
+        charge_today_summary=charge_today_summary,
+        charge_week_summary=charge_week_summary,
+        today_chart_b64=today_chart_b64,
+        week_3h_chart_b64=week_3h_chart_b64,
+    )
     send_email(html, date_str)
 
 
