@@ -68,7 +68,7 @@ from(bucket: "{INFLUXDB_BUCKET}")
 
 
 def query_circuit_energy(query_api, start: str, stop: str) -> list[dict]:
-    """Energy per circuit in kWh, sorted descending."""
+    """Energy per circuit in kWh, summed across tag-variants, sorted descending."""
     flux = f'''
 from(bucket: "{INFLUXDB_BUCKET}")
   |> range(start: {start}, stop: {stop})
@@ -76,8 +76,10 @@ from(bucket: "{INFLUXDB_BUCKET}")
   |> map(fn: (r) => ({{r with _value: if r._value < 0.0 then -r._value else r._value}}))
   |> integral(unit: 1h)
   |> map(fn: (r) => ({{r with _value: r._value / 1000.0}}))
-  |> keep(columns: ["name", "_value"])
+  |> group(columns: ["name"])
+  |> sum(column: "_value")
   |> group()
+  |> keep(columns: ["name", "_value"])
   |> sort(columns: ["_value"], desc: true)
 '''
     results = []
