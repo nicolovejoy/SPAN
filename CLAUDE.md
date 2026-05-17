@@ -55,7 +55,7 @@ routed through the same `phrpi` Cloudflare tunnel, gated by Cloudflare Access
 
 - **Vercel cleanup:** remove `span.pianohouseproject.org` as a custom domain from the Vercel project (no longer the origin); optionally pause/delete the Vercel project entirely or keep dormant for previews.
 - **Confirm SCL plan** — bill shows "Small General Energy" flat $0.1241/kWh + $0.83/day base. Check whether residential RSC tiered rate (or a TOU plan) would be cheaper; current model in `rates.py` assumes the small-general flat schedule.
-- **Daily-report verify** — first deploy with charts + flat cost: confirm matplotlib build OK on Pi, charts render in Gmail, EV exclusion matches the Tesla circuit, base/energy split matches bill.
+- **First auto-fired monthly email** — Mon 2026-05-18 7am should deliver the trailing-12-month section for Sun 5/17. Skim for any layout issues that didn't show during manual `--monthly` testing.
 - **Grafana cost panel** — point any cost-related Grafana queries at the flat rate too (currently still PG&E-shaped if they exist).
 - Deploy sentiment-arbitrage worker to Pi: push systemd files, run setup-pi.sh, fill .env, start timer
 - Create Grafana alert rules via UI: grid >10kW, collector down >5min, heat pump >4hr
