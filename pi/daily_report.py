@@ -405,12 +405,17 @@ def cost_n_days(kwh: float, days: int) -> float:
 
 def merge_circuits(today_list: list[dict], week_list: list[dict],
                    n: int = 10) -> tuple[list[dict], dict]:
-    """Top N circuits by today's kWh, with week kWh joined in. Returns (rows, totals)."""
+    """Top N circuits by max(day, week/7) — surfaces consistent heavy users
+    even on quiet days while still ranking today's spikes. Returns (rows, totals)."""
+    today_map = {c["name"]: c["kwh"] for c in today_list}
     week_map = {c["name"]: c["kwh"] for c in week_list}
+    names = set(today_map) | set(week_map)
     rows = sorted(
-        ({"name": c["name"], "kwh_day": c["kwh"], "kwh_week": week_map.get(c["name"], 0.0)}
-         for c in today_list),
-        key=lambda r: r["kwh_day"], reverse=True,
+        [{"name": name,
+          "kwh_day": today_map.get(name, 0.0),
+          "kwh_week": week_map.get(name, 0.0)} for name in names],
+        key=lambda r: max(r["kwh_day"], r["kwh_week"] / 7.0),
+        reverse=True,
     )[:n]
     totals = {
         "kwh_day": sum(r["kwh_day"] for r in rows),
@@ -491,8 +496,16 @@ class ReportContext:
 
     @property
     def avg30_excl(self) -> float:
-        last = self.daily_excl[-30:]
+        # Drop target day from the average if it's still in progress
+        series = [(d, v) for d, v in self.daily_excl if d != self.target_date] \
+            if self.target_incomplete else self.daily_excl
+        last = series[-30:]
         return (sum(v for _, v in last) / len(last)) if last else 0.0
+
+    @property
+    def target_incomplete(self) -> bool:
+        """True when target_date is today (local), so its data is partial."""
+        return self.target_date == datetime.now(LOCAL_TZ).date()
 
     @property
     def show_monthly(self) -> bool:
@@ -521,7 +534,7 @@ def _event_time(e: dict) -> str:
 # ---------- sections ----------
 
 def section_summary(ctx: ReportContext) -> str:
-    delta = _delta_arrow(ctx.today.grid, ctx.prev_day_kwh)
+    delta = "" if ctx.target_incomplete else _delta_arrow(ctx.today.grid, ctx.prev_day_kwh)
     return f'''<h2>Energy Report &mdash; {ctx.date_str}</h2>
 
 <table class="summary">
@@ -555,7 +568,7 @@ def section_cost_breakdown(ctx: ReportContext) -> str:
     base = round(BASE_CHARGE_DAILY, 2)
     return f'''<h3>Cost Breakdown &mdash; today</h3>
 <table>
-<tr><td>Energy &mdash; {ctx.today.grid:.1f} kWh &times; ${ENERGY_RATE:.4f}</td><td>${energy:.2f}</td></tr>
+<tr><td>Energy &mdash; {ctx.today.grid:.2f} kWh &times; ${ENERGY_RATE:.4f}</td><td>${energy:.2f}</td></tr>
 <tr><td>Base service charge</td><td>${base:.2f}</td></tr>
 <tr><td><strong>Total</strong></td><td><strong>${ctx.today.cost:.2f}</strong></td></tr>
 </table>
@@ -580,7 +593,7 @@ def section_top_circuits(ctx: ReportContext) -> str:
     )
     return f'''<h3>Top 10 Circuits</h3>
 <table>
-<tr><th>Circuit</th><th>kWh (day)</th><th>$ (day)</th><th>kWh (7d)</th><th>$ (7d)</th></tr>
+<tr><th>Circuit</th><th>kWh&nbsp;(day)</th><th>$&nbsp;(day)</th><th>kWh&nbsp;(7d)</th><th>$&nbsp;(7d)</th></tr>
 {rows}{totals_row}
 </table>'''
 
