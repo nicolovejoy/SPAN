@@ -373,15 +373,11 @@ def render_monthly_chart(monthly_excl: list[tuple[tuple[int, int], float]],
     labels = [f"{calendar.month_abbr[m]} '{str(y)[2:]}" for (y, m), _ in monthly_excl]
     excl_values = [v for _, v in monthly_excl]
     ev_values = [monthly_ev.get(ym, 0.0) for ym, _ in monthly_excl]
-    totals = [e + v for e, v in zip(excl_values, ev_values)]
-    avg = sum(totals) / len(totals)
 
     x = list(range(len(excl_values)))
     fig, ax = plt.subplots(figsize=(7, 3.2), dpi=120)
     ax.bar(x, excl_values, width=0.7, color="#3498db", label="excl. car")
     ax.bar(x, ev_values, width=0.7, bottom=excl_values, color="#9b59b6", label="EV")
-    ax.axhline(avg, color="#e67e22", linewidth=2, linestyle="--",
-               label=f"12-mo avg total ({avg:.0f} kWh)")
     ax.set_xticks(x)
     ax.set_xticklabels(labels, fontsize=9, rotation=30, ha="right")
     ax.set_ylabel("kWh")
