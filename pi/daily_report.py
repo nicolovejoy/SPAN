@@ -35,7 +35,8 @@ RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 REPORT_EMAIL = os.getenv("REPORT_EMAIL")
 REPORT_FROM = os.getenv("REPORT_FROM", "SPAN Monitor <energy@span.pianohouseproject.org>")
 REPORT_HOUR = int(os.getenv("REPORT_HOUR", "7"))
-LOCAL_TZ = ZoneInfo(os.getenv("TZ", "America/Los_Angeles"))
+LOCAL_TZ_NAME = os.getenv("TZ", "America/Los_Angeles")
+LOCAL_TZ = ZoneInfo(LOCAL_TZ_NAME)
 
 
 def flux_ts(dt: datetime) -> str:
@@ -149,6 +150,60 @@ from(bucket: "{INFLUXDB_BUCKET}")
     return out
 
 
+def query_daily_panel_kwh(query_api, start: str, stop: str) -> list[tuple[date, float]]:
+    """Daily grid kWh via per-local-day integral. One record per local calendar day."""
+    flux = f'''
+import "timezone"
+option location = timezone.location(name: "{LOCAL_TZ_NAME}")
+
+from(bucket: "{INFLUXDB_BUCKET}")
+  |> range(start: {start}, stop: {stop})
+  |> filter(fn: (r) => r._measurement == "panel" and r._field == "grid_power_w")
+  |> aggregateWindow(
+       every: 1d,
+       fn: (column, tables=<-) => tables |> integral(unit: 1h, column: column),
+       createEmpty: true)
+  |> map(fn: (r) => ({{r with _value: (if exists r._value then r._value else 0.0) / 1000.0}}))
+'''
+    out: list[tuple[date, float]] = []
+    for table in query_api.query(flux, org=INFLUXDB_ORG):
+        for record in table.records:
+            t = record.get_time().astimezone(LOCAL_TZ)
+            # aggregateWindow stamps each window at its STOP, i.e. local midnight of the next day
+            day = (t - timedelta(seconds=1)).date()
+            out.append((day, record.get_value() or 0.0))
+    return out
+
+
+def query_daily_circuit_kwh(query_api, start: str, stop: str,
+                            name_filter: str) -> list[tuple[date, float]]:
+    """Daily kWh summed across circuits matching name_filter (case-insensitive)."""
+    flux = f'''
+import "timezone"
+option location = timezone.location(name: "{LOCAL_TZ_NAME}")
+
+from(bucket: "{INFLUXDB_BUCKET}")
+  |> range(start: {start}, stop: {stop})
+  |> filter(fn: (r) => r._measurement == "circuit" and r._field == "power_w")
+  |> filter(fn: (r) => r.name =~ /(?i){name_filter}/)
+  |> map(fn: (r) => ({{r with _value: if r._value < 0.0 then -r._value else r._value}}))
+  |> aggregateWindow(
+       every: 1d,
+       fn: (column, tables=<-) => tables |> integral(unit: 1h, column: column),
+       createEmpty: false)
+  |> map(fn: (r) => ({{r with _value: r._value / 1000.0}}))
+  |> group(columns: ["_time"])
+  |> sum()
+'''
+    out: list[tuple[date, float]] = []
+    for table in query_api.query(flux, org=INFLUXDB_ORG):
+        for record in table.records:
+            t = record.get_time().astimezone(LOCAL_TZ)
+            day = (t - timedelta(seconds=1)).date()
+            out.append((day, record.get_value() or 0.0))
+    return out
+
+
 def _localize(series: list[tuple[datetime, float]]) -> list[tuple[datetime, float]]:
     return [(t.astimezone(LOCAL_TZ), v) for t, v in series]
 
@@ -158,14 +213,6 @@ def _subtract_series(a: list[tuple[datetime, float]],
     """a - b, aligned by timestamp; missing b values treated as 0."""
     bmap = {t: v for t, v in b}
     return [(t, max(0.0, v - bmap.get(t, 0.0))) for t, v in a]
-
-
-def _daily_totals(series: list[tuple[datetime, float]]) -> list[tuple[date, float]]:
-    """Sum hourly series into per-local-date totals, sorted."""
-    by_day: dict[date, float] = {}
-    for t, v in series:
-        by_day[t.date()] = by_day.get(t.date(), 0.0) + v
-    return sorted(by_day.items())
 
 
 def _avg_by_hour(hourly: list[tuple[datetime, float]]) -> dict[int, float]:
@@ -204,23 +251,21 @@ def render_today_chart(today_hourly: list[tuple[datetime, float]],
     return _fig_to_b64(fig)
 
 
-def render_week_daily_chart(month_hourly_excl: list[tuple[datetime, float]]) -> str:
-    """Grouped daily bars: last 7 days actual vs 5-week-same-weekday avg."""
-    local = _localize(month_hourly_excl)
-    if not local:
-        return ""
+def render_week_daily_chart(daily_excl: list[tuple[date, float]]) -> str:
+    """Grouped daily bars: last 7 days actual vs 5-week-same-weekday avg.
 
-    daily = _daily_totals(local)
-    if not daily:
+    `daily_excl` is the full lookback window (e.g. 35 days), one entry per local day.
+    """
+    if not daily_excl:
         return ""
 
     # 5-week avg per weekday from full history
     by_wd: dict[int, list[float]] = {}
-    for d, v in daily:
+    for d, v in daily_excl:
         by_wd.setdefault(d.weekday(), []).append(v)
     wd_avg = {wd: sum(vs) / len(vs) for wd, vs in by_wd.items() if vs}
 
-    last7 = daily[-7:]
+    last7 = daily_excl[-7:]
     days = [d for d, _ in last7]
     actual = [v for _, v in last7]
     avg = [wd_avg.get(d.weekday(), 0.0) for d in days]
@@ -483,7 +528,6 @@ def generate_report(client: InfluxDBClient, target_date: date):
     ev_pat = ev_circuit_pattern().pattern
     car_today_series = query_hourly_circuit_kwh(query_api, start_str, end_str, ev_pat)
     car_week_series = query_hourly_circuit_kwh(query_api, week_start_str, end_str, ev_pat)
-    car_fivewk_series = query_hourly_circuit_kwh(query_api, fivewk_start_str, end_str, ev_pat)
     car_kwh_today = sum(v for _, v in car_today_series)
     car_kwh_week = sum(v for _, v in car_week_series)
 
@@ -508,24 +552,26 @@ def generate_report(client: InfluxDBClient, target_date: date):
     charge_today_summary = {"kwh": car_kwh_today, "cost": round(car_kwh_today * ENERGY_RATE, 2)}
     charge_week_summary = {"kwh": car_kwh_week, "cost": round(car_kwh_week * ENERGY_RATE, 2)}
 
-    # Chart hourly series (excl. car)
+    # Today chart still needs hourly series (24 points subtracted hourly)
     today_hourly_total = query_hourly_kwh(query_api, start_str, end_str)
     week_hourly_total = query_hourly_kwh(query_api, week_start_str, end_str)
-    fivewk_hourly_total = query_hourly_kwh(query_api, fivewk_start_str, end_str)
     today_hourly_excl = _subtract_series(today_hourly_total, car_today_series)
     week_hourly_excl = _subtract_series(week_hourly_total, car_week_series)
-    fivewk_hourly_excl = _subtract_series(fivewk_hourly_total, car_fivewk_series)
+
+    # Daily totals via per-local-day integral (matches the summary's exact-energy path).
+    # One query for grid, one for EV; subtract by date.
+    daily_grid = dict(query_daily_panel_kwh(query_api, fivewk_start_str, end_str))
+    daily_ev = dict(query_daily_circuit_kwh(query_api, fivewk_start_str, end_str, ev_pat))
+    daily_excl = sorted(
+        (d, max(0.0, kwh - daily_ev.get(d, 0.0))) for d, kwh in daily_grid.items()
+    )
 
     # 30-day daily avg (excl. car) for the helper line under the summary table
-    month_hourly_total = query_hourly_kwh(query_api, month_start_str, end_str)
-    car_month_series = query_hourly_circuit_kwh(query_api, month_start_str, end_str, ev_pat)
-    month_hourly_excl = _subtract_series(month_hourly_total, car_month_series)
-    month_daily_excl = _daily_totals(_localize(month_hourly_excl))
-    avg30_excl_per_day = (sum(v for _, v in month_daily_excl) / len(month_daily_excl)) \
-        if month_daily_excl else 0.0
+    last30 = daily_excl[-30:] if len(daily_excl) >= 30 else daily_excl
+    avg30_excl_per_day = (sum(v for _, v in last30) / len(last30)) if last30 else 0.0
 
     today_chart_b64 = render_today_chart(today_hourly_excl, week_hourly_excl)
-    week_daily_chart_b64 = render_week_daily_chart(fivewk_hourly_excl)
+    week_daily_chart_b64 = render_week_daily_chart(daily_excl)
 
     html = build_html(
         date_str=date_str,
