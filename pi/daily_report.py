@@ -176,15 +176,6 @@ def _avg_by_hour(hourly: list[tuple[datetime, float]]) -> dict[int, float]:
     return {h: sum(vs) / len(vs) for h, vs in by_h.items() if vs}
 
 
-def _three_hour_bins_by_date(hourly: list[tuple[datetime, float]]) -> dict[date, list[float]]:
-    """{date: [bin0..bin7]} where each bin = sum of kWh in that 3-hour slot of the local day."""
-    by_day: dict[date, list[float]] = {}
-    for t, v in hourly:
-        bins = by_day.setdefault(t.date(), [0.0] * 8)
-        bins[t.hour // 3] += v
-    return by_day
-
-
 def render_today_chart(today_hourly: list[tuple[datetime, float]],
                        week_hourly: list[tuple[datetime, float]]) -> str:
     """Today hourly bars + 7-day same-hour avg line."""
@@ -213,42 +204,37 @@ def render_today_chart(today_hourly: list[tuple[datetime, float]],
     return _fig_to_b64(fig)
 
 
-def render_week_3h_chart(month_hourly_excl: list[tuple[datetime, float]]) -> str:
-    """One chart, two lines: last 7 days vs 5-week-same-weekday avg, in 3h buckets."""
+def render_week_daily_chart(month_hourly_excl: list[tuple[datetime, float]]) -> str:
+    """Grouped daily bars: last 7 days actual vs 5-week-same-weekday avg."""
     local = _localize(month_hourly_excl)
     if not local:
         return ""
 
-    by_day_bin = _three_hour_bins_by_date(local)
-    if not by_day_bin:
+    daily = _daily_totals(local)
+    if not daily:
         return ""
 
-    # 5-week avg per (weekday, 3h-bin)
-    by_wd_bin: dict[tuple[int, int], list[float]] = {}
-    for d, bins in by_day_bin.items():
-        for i, kwh in enumerate(bins):
-            by_wd_bin.setdefault((d.weekday(), i), []).append(kwh)
-    wd_avg = {k: sum(v) / len(v) for k, v in by_wd_bin.items() if v}
+    # 5-week avg per weekday from full history
+    by_wd: dict[int, list[float]] = {}
+    for d, v in daily:
+        by_wd.setdefault(d.weekday(), []).append(v)
+    wd_avg = {wd: sum(vs) / len(vs) for wd, vs in by_wd.items() if vs}
 
-    # Most recent 7 days in chronological order
-    last7 = sorted(by_day_bin)[-7:]
-    actual: list[float] = []
-    avg: list[float] = []
-    for d in last7:
-        actual.extend(by_day_bin[d])
-        avg.extend(wd_avg.get((d.weekday(), i), 0.0) for i in range(8))
+    last7 = daily[-7:]
+    days = [d for d, _ in last7]
+    actual = [v for _, v in last7]
+    avg = [wd_avg.get(d.weekday(), 0.0) for d in days]
+    labels = [d.strftime("%a %-m/%-d") for d in days]
 
-    x = list(range(len(actual)))
-
+    x = list(range(len(days)))
+    width = 0.4
     fig, ax = plt.subplots(figsize=(7, 3.2), dpi=120)
-    ax.plot(x, actual, color="#3498db", linewidth=2, label="Last 7 days (3h)")
-    ax.plot(x, avg, color="#e67e22", linewidth=2, linestyle="--",
-            label="5-week avg (same weekday, same 3h)")
-    ax.set_xticks([i * 8 for i in range(len(last7))])
-    ax.set_xticklabels([d.strftime("%a %-m/%-d") for d in last7], fontsize=9)
-    for i in range(1, len(last7)):
-        ax.axvline(i * 8 - 0.5, color="#ddd", linewidth=0.5)
-    ax.set_ylabel("kWh per 3h")
+    ax.bar([i - width / 2 for i in x], actual, width, color="#3498db", label="Day total")
+    ax.bar([i + width / 2 for i in x], avg, width, color="#e67e22",
+           label="5-week avg (same weekday)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontsize=9)
+    ax.set_ylabel("kWh")
     ax.grid(True, alpha=0.3, axis="y")
     ax.legend(loc="upper left", fontsize=9)
     fig.tight_layout()
@@ -310,7 +296,7 @@ def build_html(date_str, kwh_today, kwh_week, kwh_today_excl, kwh_week_excl,
                circuit_rows_data, circuit_totals,
                baths_today, baths_week_summary,
                charges_today, charge_today_summary, charge_week_summary,
-               today_chart_b64, week_3h_chart_b64):
+               today_chart_b64, week_daily_chart_b64):
     """Build HTML email body."""
 
     def delta(current, baseline):
@@ -396,10 +382,10 @@ def build_html(date_str, kwh_today, kwh_week, kwh_today_excl, kwh_week_excl,
     today_chart_img = (f'<img src="data:image/png;base64,{today_chart_b64}" '
                        f'alt="Today hourly" style="width:100%;max-width:560px;display:block;margin:8px 0;">') \
         if today_chart_b64 else ''
-    week_3h_chart_img = (f'<img src="data:image/png;base64,{week_3h_chart_b64}" '
-                         f'alt="Last 7 days vs 5-week avg, 3h buckets" '
+    week_daily_chart_img = (f'<img src="data:image/png;base64,{week_daily_chart_b64}" '
+                         f'alt="Last 7 days vs 5-week avg, daily" '
                          f'style="width:100%;max-width:560px;display:block;margin:8px 0;">') \
-        if week_3h_chart_b64 else ''
+        if week_daily_chart_b64 else ''
 
     return f'''<!DOCTYPE html>
 <html><head><style>
@@ -428,8 +414,8 @@ table.summary th:first-child, table.summary td:first-child {{ text-align: left; 
 <h3>Today &mdash; hourly (excl. car)</h3>
 {today_chart_img}
 
-<h3>Last 7 days vs 5-week avg &mdash; 3h buckets (excl. car)</h3>
-{week_3h_chart_img}
+<h3>Last 7 days vs 5-week avg &mdash; daily (excl. car)</h3>
+{week_daily_chart_img}
 
 <h3>Cost Breakdown &mdash; today</h3>
 <table>
@@ -539,7 +525,7 @@ def generate_report(client: InfluxDBClient, target_date: date):
         if month_daily_excl else 0.0
 
     today_chart_b64 = render_today_chart(today_hourly_excl, week_hourly_excl)
-    week_3h_chart_b64 = render_week_3h_chart(fivewk_hourly_excl)
+    week_daily_chart_b64 = render_week_daily_chart(fivewk_hourly_excl)
 
     html = build_html(
         date_str=date_str,
@@ -554,7 +540,7 @@ def generate_report(client: InfluxDBClient, target_date: date):
         charge_today_summary=charge_today_summary,
         charge_week_summary=charge_week_summary,
         today_chart_b64=today_chart_b64,
-        week_3h_chart_b64=week_3h_chart_b64,
+        week_daily_chart_b64=week_daily_chart_b64,
     )
     send_email(html, date_str)
 
