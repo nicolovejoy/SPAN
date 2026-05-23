@@ -16,6 +16,11 @@ export type DashState = {
   groupBy: GroupBy;
   categories: string[];
   rangePreset: RangePreset | null;
+  /** Subset of categories to show in the chart. Empty = show all.
+   * Distinct from `categories` (the Influx-side filter): `show` operates
+   * client-side on already-fetched per-category series, so the breakdown
+   * table stays complete while the chart visibly narrows. */
+  show: string[];
 };
 
 const GROUP_BYS: GroupBy[] = ["all", "category", "circuit"];
@@ -78,7 +83,10 @@ export function parseState(
   const catsRaw = get("categories");
   const categories = catsRaw ? catsRaw.split(",").filter(Boolean) : [];
 
-  return { fromMs, toMs, interval, intervalAuto, groupBy, categories, rangePreset };
+  const showRaw = get("show");
+  const show = showRaw ? showRaw.split(",").filter(Boolean) : [];
+
+  return { fromMs, toMs, interval, intervalAuto, groupBy, categories, rangePreset, show };
 }
 
 export function serializeState(s: Partial<DashState>): URLSearchParams {
@@ -92,5 +100,6 @@ export function serializeState(s: Partial<DashState>): URLSearchParams {
   if (s.interval && !s.intervalAuto) out.set("interval", s.interval);
   if (s.groupBy && s.groupBy !== "category") out.set("groupBy", s.groupBy);
   if (s.categories?.length) out.set("categories", s.categories.join(","));
+  if (s.show?.length) out.set("show", s.show.join(","));
   return out;
 }

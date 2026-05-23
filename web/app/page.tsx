@@ -1,8 +1,9 @@
 import { Suspense } from "react";
 import { Filters } from "@/components/Filters";
 import { PowerChart } from "@/components/PowerChart";
+import { QuickFilters } from "@/components/QuickFilters";
 import { BreakdownTable } from "@/components/BreakdownTable";
-import { queryEnergyByCategory, queryPower } from "@/lib/influx";
+import { queryEnergyByCategory } from "@/lib/influx";
 import { parseState } from "@/lib/url-state";
 
 type SP = Promise<Record<string, string | string[] | undefined>>;
@@ -28,32 +29,18 @@ export default async function Home({ searchParams }: { searchParams: SP }) {
         categories={state.categories}
       />
 
-      <Suspense
-        key={JSON.stringify(state)}
-        fallback={<div className="h-[360px] animate-pulse rounded-md bg-zinc-100 dark:bg-zinc-900" />}
-      >
-        <ChartPanel state={state} />
-      </Suspense>
+      <QuickFilters show={state.show} />
+
+      <PowerChart state={state} />
 
       <Suspense
-        key={JSON.stringify(state) + ":table"}
+        key={`${state.fromMs}-${state.toMs}-${state.categories.join(",")}-table`}
         fallback={<div className="h-32 animate-pulse rounded-md bg-zinc-100 dark:bg-zinc-900" />}
       >
         <TablePanel state={state} />
       </Suspense>
     </main>
   );
-}
-
-async function ChartPanel({ state }: { state: ReturnType<typeof parseState> }) {
-  const data = await queryPower({
-    fromMs: state.fromMs,
-    toMs: state.toMs,
-    interval: state.interval,
-    groupBy: state.groupBy,
-    categories: state.categories.length ? state.categories : undefined,
-  });
-  return <PowerChart data={data} />;
 }
 
 async function TablePanel({ state }: { state: ReturnType<typeof parseState> }) {
