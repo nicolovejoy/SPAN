@@ -41,6 +41,11 @@ REPORT_HOUR = int(os.getenv("REPORT_HOUR", "7"))
 LOCAL_TZ_NAME = os.getenv("TZ", "America/Los_Angeles")
 LOCAL_TZ = ZoneInfo(LOCAL_TZ_NAME)
 
+# Banner + subject-prefix when the Auxiliary/Heat Pump circuit (electric
+# resistance backup on the Steibel Eltron) draws above this for the report day.
+AUX_HEAT_ALARM_KWH = float(os.getenv("AUX_HEAT_ALARM_KWH", "0.5"))
+AUX_CIRCUIT_PATTERN = re.compile(r"Auxiliary", re.IGNORECASE)
+
 
 def flux_ts(dt: datetime) -> str:
     """Format datetime as Flux-compatible UTC timestamp."""
@@ -96,7 +101,7 @@ _BUCKET_DEFAULT: str = "Else"
 
 _FALLBACK_RULES = [
     ("Lights",     r"Light"),
-    ("HVAC",       r"Heat pump|Auxiliary|Water Heater"),
+    ("HVAC",       r"Heat pump|Auxiliary"),
     ("Car",        r"Tesla|Car Charger|\bEV\b"),
     ("Appliances", r"Kitchen|Oven|Dishwasher|Refrigerator|Fridge|Microwave|Range|Washer|Dryer|Laundry|Beverage|Freezer"),
 ]
@@ -518,6 +523,7 @@ class ReportContext:
     baths_today: list[dict]
     baths_week_summary: dict
     charges_today: list[dict]
+    aux_heat_kwh: float = 0.0
 
     @property
     def date_str(self) -> str:
@@ -547,6 +553,10 @@ class ReportContext:
     def show_monthly(self) -> bool:
         return self.force_monthly or self.target_date.weekday() == 6
 
+    @property
+    def aux_alarm(self) -> bool:
+        return self.aux_heat_kwh >= AUX_HEAT_ALARM_KWH
+
 
 def _chart_img(b64: str, alt: str) -> str:
     return (f'<img src="data:image/png;base64,{b64}" alt="{alt}" '
@@ -568,6 +578,23 @@ def _event_time(e: dict) -> str:
 
 
 # ---------- sections ----------
+
+def section_aux_alarm(ctx: ReportContext) -> str:
+    if not ctx.aux_alarm:
+        return ""
+    cost = ctx.aux_heat_kwh * ENERGY_RATE
+    # 5kW resistance element ≈ 0.083 kWh/min, so kWh ÷ 0.083 ≈ minutes
+    approx_min = ctx.aux_heat_kwh / (5.0 / 60.0)
+    return (
+        '<div style="background:#fee2e2;border-left:4px solid #dc2626;'
+        'padding:12px 16px;margin:0 0 16px;border-radius:4px;color:#991b1b;">'
+        f'<strong>&#9888; Auxiliary heat used</strong> &mdash; '
+        f'{ctx.aux_heat_kwh:.2f} kWh (~{approx_min:.0f} min, ${cost:.2f}). '
+        'This is the Steibel Eltron electric resistance backup; '
+        'normal in cold snaps, concerning otherwise.'
+        '</div>'
+    )
+
 
 def section_summary(ctx: ReportContext) -> str:
     delta = "" if ctx.target_incomplete else _delta_arrow(ctx.today.grid, ctx.prev_day_kwh)
@@ -690,6 +717,7 @@ def section_charges(ctx: ReportContext) -> str:
 
 
 SECTIONS = [
+    section_aux_alarm,
     section_summary,
     section_today_chart,
     section_week_chart,
@@ -723,7 +751,7 @@ def build_html(ctx: ReportContext) -> str:
 </body></html>'''
 
 
-def send_email(html: str, date_str: str):
+def send_email(html: str, subject: str):
     """Send report email via Resend API."""
     resp = httpx.post(
         "https://api.resend.com/emails",
@@ -731,7 +759,7 @@ def send_email(html: str, date_str: str):
         json={
             "from": REPORT_FROM,
             "to": [REPORT_EMAIL],
-            "subject": f"Energy Report \u2014 {date_str}",
+            "subject": subject,
             "html": html,
         },
         timeout=30.0,
@@ -855,6 +883,10 @@ def build_context(query_api, target_date: date, force_monthly: bool) -> ReportCo
     circuits_today = query_circuit_energy(query_api, today_start, today_end)
     circuits_week = query_circuit_energy(query_api, week_start, today_end)
     top10, totals = merge_circuits(circuits_today, circuits_week, n=10)
+    aux_heat_kwh = sum(
+        c["kwh"] for c in circuits_today
+        if AUX_CIRCUIT_PATTERN.search(c["name"])
+    )
 
     # Events
     baths_today = query_events(query_api, "bath_event", today_start, today_end)
@@ -877,13 +909,16 @@ def build_context(query_api, target_date: date, force_monthly: bool) -> ReportCo
         baths_today=baths_today,
         baths_week_summary=event_summary(baths_week),
         charges_today=charges_today,
+        aux_heat_kwh=aux_heat_kwh,
     )
 
 
 def generate_report(client: InfluxDBClient, target_date: date, force_monthly: bool = False):
     """Build the email for `target_date` (local) and send via Resend."""
     ctx = build_context(client.query_api(), target_date, force_monthly)
-    send_email(build_html(ctx), ctx.date_str)
+    prefix = "⚠ Aux heat — " if ctx.aux_alarm else ""
+    subject = f"{prefix}Energy Report — {ctx.date_str}"
+    send_email(build_html(ctx), subject)
 
 
 def seconds_until_hour(hour: int) -> float:

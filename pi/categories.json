@@ -3,7 +3,7 @@
   "default": "Else",
   "rules": [
     { "category": "Lights",     "pattern": "Light" },
-    { "category": "HVAC",       "pattern": "Heat pump|Auxiliary|Water Heater" },
+    { "category": "HVAC",       "pattern": "Heat pump|Auxiliary" },
     { "category": "Car",        "pattern": "Tesla|Car Charger|\\bEV\\b" },
     { "category": "Appliances", "pattern": "Kitchen|Oven|Dishwasher|Refrigerator|Fridge|Microwave|Range|Washer|Dryer|Laundry|Beverage|Freezer" }
   ]
