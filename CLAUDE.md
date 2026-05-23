@@ -53,12 +53,11 @@ routed through the same `phrpi` Cloudflare tunnel, gated by Cloudflare Access
 
 ## Next Steps
 
-- **Vercel cleanup:** remove `span.pianohouseproject.org` as a custom domain from the Vercel project (no longer the origin); optionally pause/delete the Vercel project entirely or keep dormant for previews.
-- **Confirm SCL plan** — bill shows "Small General Energy" flat $0.1241/kWh + $0.83/day base. Check whether residential RSC tiered rate (or a TOU plan) would be cheaper; current model in `rates.py` assumes the small-general flat schedule.
-- **First auto-fired monthly email** — Mon 2026-05-18 7am should deliver the trailing-12-month section for Sun 5/17. Skim for any layout issues that didn't show during manual `--monthly` testing.
-- **Grafana cost panel** — point any cost-related Grafana queries at the flat rate too (currently still PG&E-shaped if they exist).
-- Deploy sentiment-arbitrage worker to Pi: push systemd files, run setup-pi.sh, fill .env, start timer
-- Create Grafana alert rules via UI: grid >10kW, collector down >5min, heat pump >4hr
+- **Verify lightweight-charts dashboard on iPad** — pan, pinch-zoom (re-buckets on zoom-end), URL updates only on gesture release. QuickFilters chips (Lights/HVAC/Car/Appliances/Else + All) toggle visibility; sum line appears with 2+ selected; dotted total reference always shown.
+- **Watch for first aux-heat alarm fire** — Auxiliary/Heat Pump > 0.5 kWh/day triggers red banner + `⚠ Aux heat —` subject prefix. Cold-weather suppression tracked at issue #3.
+- **EV monthly + annual cost rollup** in daily report (request #3 from 2026-05-23 list — final unaddressed item). Bundle with SCL plan confirmation so cost isn't computed against two rate models.
+- **Confirm SCL plan** — bill shows "Small General Energy" flat $0.1241/kWh + $0.83/day base. Check whether residential RSC tiered or TOU would be cheaper; align Grafana cost panel once decided.
+- **Vercel cleanup** — remove `span.pianohouseproject.org` custom domain from Vercel project; optionally pause/delete or keep dormant for previews.
 
 ## SPAN API
 
