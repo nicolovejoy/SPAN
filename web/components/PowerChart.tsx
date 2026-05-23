@@ -69,6 +69,7 @@ export function PowerChart({ state }: { state: DashState }) {
   const totalSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const gestureTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const externalUpdate = useRef(false);
+  const lastPushedRef = useRef<{ from: number; to: number }>({ from: 0, to: 0 });
   const [loading, setLoading] = useState(true);
 
   // Create chart + series once
@@ -145,6 +146,18 @@ export function PowerChart({ state }: { state: DashState }) {
         const from = fromSec * 1000;
         const to = toSec * 1000;
         if (!(from < to)) return;
+        // Suppress sub-2% wobble — lightweight-charts emits range-change events
+        // after our own setVisibleRange settle that differ slightly due to
+        // bar-snap; without this we get a feedback loop of URL self-updates.
+        const span = to - from;
+        const last = lastPushedRef.current;
+        if (last.from > 0 && last.to > 0) {
+          const fromDelta = Math.abs(from - last.from) / span;
+          const toDelta = Math.abs(to - last.to) / span;
+          const spanDelta = Math.abs(span - (last.to - last.from)) / span;
+          if (fromDelta < 0.02 && toDelta < 0.02 && spanDelta < 0.02) return;
+        }
+        lastPushedRef.current = { from, to };
         const newInterval = autoInterval(from, to);
         const next = new URLSearchParams(params.toString());
         next.delete("range");
@@ -221,13 +234,15 @@ export function PowerChart({ state }: { state: DashState }) {
             from: ((state.fromMs / 1000) | 0) as UTCTimestamp,
             to: ((state.toMs / 1000) | 0) as UTCTimestamp,
           });
+          lastPushedRef.current = { from: state.fromMs, to: state.toMs };
         } finally {
           setLoading(false);
-          // Release on the next macrotask so any range-change echo from
-          // setVisibleRange is suppressed.
+          // Hold for 150ms — gives lightweight-charts enough time to emit
+          // its post-setVisibleRange snap-aligned range-change without us
+          // mistaking it for a real gesture.
           setTimeout(() => {
             externalUpdate.current = false;
-          }, 0);
+          }, 150);
         }
       })
       .catch((e) => {

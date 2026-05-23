@@ -53,11 +53,11 @@ routed through the same `phrpi` Cloudflare tunnel, gated by Cloudflare Access
 
 ## Next Steps
 
-- **Verify lightweight-charts dashboard on iPad** — pan, pinch-zoom (re-buckets on zoom-end), URL updates only on gesture release. QuickFilters chips (Lights/HVAC/Car/Appliances/Else + All) toggle visibility; sum line appears with 2+ selected; dotted total reference always shown.
-- **Watch for first aux-heat alarm fire** — Auxiliary/Heat Pump > 0.5 kWh/day triggers red banner + `⚠ Aux heat —` subject prefix. Cold-weather suppression tracked at issue #3.
-- **EV monthly + annual cost rollup** in daily report (request #3 from 2026-05-23 list — final unaddressed item). Bundle with SCL plan confirmation so cost isn't computed against two rate models.
+- **Verify chart-stability hotfix** — 2026-05-23 patch suppresses sub-2% range-change echoes from lightweight-charts (was causing the page to inch forward + re-render on its own). Confirm next iPad visit that the chart sits still until you actually pan/pinch.
+- **Dashboard UX polish queue** — PWA + full-screen (#4), polling cadence (#5), relax CF Access login (#6), 1m smoothing (#7). All from first-real-use feedback on 2026-05-23; lean UX-first per memory `feedback_dashboard_personal_use`.
+- **Watch for first aux-heat alarm fire** — Auxiliary/Heat Pump > 0.5 kWh/day triggers red banner + `⚠ Aux heat —` subject prefix. Cold-weather suppression at #3.
+- **EV monthly + annual cost rollup** in daily report (request #3 from 2026-05-23 batch — last unaddressed item). Bundle with SCL plan confirmation so cost isn't computed against two rate models.
 - **Confirm SCL plan** — bill shows "Small General Energy" flat $0.1241/kWh + $0.83/day base. Check whether residential RSC tiered or TOU would be cheaper; align Grafana cost panel once decided.
-- **Vercel cleanup** — remove `span.pianohouseproject.org` custom domain from Vercel project; optionally pause/delete or keep dormant for previews.
 
 ## SPAN API
 
