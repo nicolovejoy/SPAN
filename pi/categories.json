@@ -1,11 +1,10 @@
 {
-  "version": 1,
-  "default": "Other",
+  "version": 2,
+  "default": "Else",
   "rules": [
-    { "category": "HVAC",    "pattern": "Heat pump|Auxiliary|Water Heater" },
-    { "category": "EV",      "pattern": "Tesla|Car Charger|EV " },
-    { "category": "Kitchen", "pattern": "Kitchen|Oven|Dishwasher|Refrigerator|Microwave|Range" },
-    { "category": "Laundry", "pattern": "Washer|Dryer|Laundry" },
-    { "category": "Lights",  "pattern": "Light" }
+    { "category": "Lights",     "pattern": "Light" },
+    { "category": "HVAC",       "pattern": "Heat pump|Auxiliary|Water Heater" },
+    { "category": "Car",        "pattern": "Tesla|Car Charger|\\bEV\\b" },
+    { "category": "Appliances", "pattern": "Kitchen|Oven|Dishwasher|Refrigerator|Fridge|Microwave|Range|Washer|Dryer|Laundry|Beverage|Freezer" }
   ]
 }

@@ -91,26 +91,43 @@ from(bucket: "{INFLUXDB_BUCKET}")
     return results
 
 
-_EV_PATTERN: re.Pattern | None = None
+_BUCKET_RULES: list[tuple[str, re.Pattern]] | None = None
+_BUCKET_DEFAULT: str = "Else"
+
+_FALLBACK_RULES = [
+    ("Lights",     r"Light"),
+    ("HVAC",       r"Heat pump|Auxiliary|Water Heater"),
+    ("Car",        r"Tesla|Car Charger|\bEV\b"),
+    ("Appliances", r"Kitchen|Oven|Dishwasher|Refrigerator|Fridge|Microwave|Range|Washer|Dryer|Laundry|Beverage|Freezer"),
+]
 
 
-def ev_circuit_pattern() -> re.Pattern:
-    """Compile the EV-category regex from categories.json (cached)."""
-    global _EV_PATTERN
-    if _EV_PATTERN is not None:
-        return _EV_PATTERN
+def _load_bucket_rules() -> tuple[list[tuple[str, re.Pattern]], str]:
+    """Load (compiled) bucket rules from categories.json, with a fallback."""
+    global _BUCKET_RULES, _BUCKET_DEFAULT
+    if _BUCKET_RULES is not None:
+        return _BUCKET_RULES, _BUCKET_DEFAULT
     cats_path = Path(__file__).parent / "categories.json"
-    pat = "Tesla|Car Charger|EV "  # fallback
     try:
-        rules = json.loads(cats_path.read_text()).get("rules", [])
-        for r in rules:
-            if r.get("category") == "EV":
-                pat = r.get("pattern", pat)
-                break
-    except (OSError, json.JSONDecodeError) as e:
-        logger.warning(f"categories.json unavailable, using default EV pattern: {e}")
-    _EV_PATTERN = re.compile(pat, re.IGNORECASE)
-    return _EV_PATTERN
+        cfg = json.loads(cats_path.read_text())
+        _BUCKET_DEFAULT = cfg.get("default", "Else")
+        _BUCKET_RULES = [
+            (r["category"], re.compile(r["pattern"], re.IGNORECASE))
+            for r in cfg.get("rules", [])
+        ]
+    except (OSError, json.JSONDecodeError, KeyError) as e:
+        logger.warning(f"categories.json unavailable, using fallback buckets: {e}")
+        _BUCKET_RULES = [(c, re.compile(p, re.IGNORECASE)) for c, p in _FALLBACK_RULES]
+    return _BUCKET_RULES, _BUCKET_DEFAULT
+
+
+def car_circuit_pattern() -> re.Pattern:
+    """Compile the Car-category regex from categories.json (cached)."""
+    rules, _ = _load_bucket_rules()
+    for category, pat in rules:
+        if category == "Car":
+            return pat
+    return re.compile(r"Tesla|Car Charger|\bEV\b", re.IGNORECASE)
 
 
 def query_circuit_kwh_by_name(query_api, start: str, stop: str) -> dict[str, float]:
@@ -403,12 +420,31 @@ def cost_n_days(kwh: float, days: int) -> float:
     return round(kwh * ENERGY_RATE + days * BASE_CHARGE_DAILY, 2)
 
 
+def display_bucket(name: str) -> str:
+    """Roll up raw circuit name into a coarse display bucket (categories.json)."""
+    rules, default = _load_bucket_rules()
+    for category, pat in rules:
+        if pat.search(name):
+            return category
+    return default
+
+
+def _aggregate_by_bucket(circuits: list[dict]) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for c in circuits:
+        bucket = display_bucket(c["name"])
+        out[bucket] = out.get(bucket, 0.0) + c["kwh"]
+    return out
+
+
 def merge_circuits(today_list: list[dict], week_list: list[dict],
                    n: int = 10) -> tuple[list[dict], dict]:
-    """Top N circuits by max(day, week/7) — surfaces consistent heavy users
-    even on quiet days while still ranking today's spikes. Returns (rows, totals)."""
-    today_map = {c["name"]: c["kwh"] for c in today_list}
-    week_map = {c["name"]: c["kwh"] for c in week_list}
+    """Top N display buckets by max(day, week/7) — surfaces consistent heavy
+    users even on quiet days while still ranking today's spikes. Raw circuits
+    are first aggregated into coarse buckets (see display_bucket).
+    Returns (rows, totals)."""
+    today_map = _aggregate_by_bucket(today_list)
+    week_map = _aggregate_by_bucket(week_list)
     names = set(today_map) | set(week_map)
     rows = sorted(
         [{"name": name,
@@ -587,13 +623,13 @@ def section_top_circuits(ctx: ReportContext) -> str:
     t = ctx.circuits_totals
     totals_row = (
         f'<tr style="background:#f8f9fa;font-weight:600;">'
-        f'<td>Total (top 10)</td>'
+        f'<td>Total</td>'
         f'<td>{t["kwh_day"]:.2f}</td><td>${t["kwh_day"] * ENERGY_RATE:.2f}</td>'
         f'<td>{t["kwh_week"]:.2f}</td><td>${t["kwh_week"] * ENERGY_RATE:.2f}</td></tr>'
     )
-    return f'''<h3>Top 10 Circuits</h3>
+    return f'''<h3>Usage by Category</h3>
 <table>
-<tr><th>Circuit</th><th>kWh&nbsp;(day)</th><th>$&nbsp;(day)</th><th>kWh&nbsp;(7d)</th><th>$&nbsp;(7d)</th></tr>
+<tr><th>Category</th><th>kWh&nbsp;(day)</th><th>$&nbsp;(day)</th><th>kWh&nbsp;(7d)</th><th>$&nbsp;(7d)</th></tr>
 {rows}{totals_row}
 </table>'''
 
@@ -715,7 +751,7 @@ def build_monthly_section(query_api, target_date: date) -> str:
     start_str = flux_ts(start_dt.astimezone(timezone.utc))
     stop_str = flux_ts(end_dt.astimezone(timezone.utc))
 
-    ev_pat = ev_circuit_pattern().pattern
+    ev_pat = car_circuit_pattern().pattern
     grid = dict(query_monthly_panel_kwh(query_api, start_str, stop_str))
     ev = dict(query_monthly_circuit_kwh(query_api, start_str, stop_str, ev_pat))
 
@@ -785,7 +821,7 @@ def build_context(query_api, target_date: date, force_monthly: bool) -> ReportCo
     week_start = flux_ts(local_day_utc_range(target_date - timedelta(days=6))[0])
     fivewk_start = flux_ts(local_day_utc_range(target_date - timedelta(days=34))[0])
 
-    ev_pat = ev_circuit_pattern().pattern
+    ev_pat = car_circuit_pattern().pattern
 
     # Today + week Periods (grid total + EV total)
     today_ev_series = query_hourly_circuit_kwh(query_api, today_start, today_end, ev_pat)

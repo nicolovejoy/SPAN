@@ -14,11 +14,10 @@ import type { SeriesPoint } from "@/lib/influx";
 
 const CATEGORY_COLORS: Record<string, string> = {
   HVAC: "#ef4444",
-  EV: "#3b82f6",
-  Kitchen: "#f59e0b",
-  Laundry: "#a855f7",
+  Car: "#3b82f6",
   Lights: "#eab308",
-  Other: "#6b7280",
+  Appliances: "#f59e0b",
+  Else: "#6b7280",
   Total: "#0ea5e9",
 };
 
