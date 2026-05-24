@@ -95,13 +95,19 @@ export async function queryEnergyByCategory(opts: {
   // Integrate each circuit separately to Wh, derive category, then sum by
   // category. Regex after integral() keeps it cheap. integral() requires
   // _start/_stop in the group key.
+  // Defensive: skip null/non-finite samples in raw data (one bad point can
+  // make integral() emit a huge spurious value), and drop any per-circuit
+  // integrals that come out negative (shouldn't happen after abs(), but has
+  // been seen on wide ranges — likely sparse-data interpolation artifact).
   const flux = `
 from(bucket: "${BUCKET}")
   |> range(start: ${fluxDate(fromMs)}, stop: ${fluxDate(toMs)})
   |> filter(fn: (r) => ${POWER_FILTER})
+  |> filter(fn: (r) => exists r._value)
   |> map(fn: (r) => ({ r with _value: if r._value < 0.0 then -r._value else r._value }))
   |> group(columns: ["name", "_start", "_stop"])
   |> integral(unit: 1h)
+  |> filter(fn: (r) => r._value >= 0.0)
   |> ${categoryFromNameFlux()}
   |> group(columns: ["category"])
   |> sum()

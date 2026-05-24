@@ -3,7 +3,9 @@ export function BreakdownTable({
 }: {
   rows: Array<{ category: string; kwh: number }>;
 }) {
-  const total = rows.reduce((acc, r) => acc + r.kwh, 0);
+  // Only include non-negative kWh in the total — a negative would mean
+  // bad upstream data and would poison the Share column.
+  const total = rows.reduce((acc, r) => (r.kwh > 0 ? acc + r.kwh : acc), 0);
   return (
     <div className="overflow-hidden rounded-md border border-zinc-200 dark:border-zinc-800">
       <table className="w-full text-sm">
