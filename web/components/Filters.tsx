@@ -6,16 +6,6 @@ import { CATEGORIES } from "@/lib/categories";
 import { INTERVAL_ORDER, type IntervalKey } from "@/lib/interval";
 import type { GroupBy } from "@/lib/influx";
 
-const RANGE_OPTIONS = [
-  { key: "1h", label: "1h" },
-  { key: "6h", label: "6h" },
-  { key: "24h", label: "24h" },
-  { key: "7d", label: "7d" },
-  { key: "30d", label: "30d" },
-  { key: "90d", label: "90d" },
-  { key: "1y", label: "1y" },
-] as const;
-
 const GROUP_OPTIONS: { key: GroupBy; label: string }[] = [
   { key: "all", label: "All" },
   { key: "category", label: "Category" },
@@ -23,13 +13,11 @@ const GROUP_OPTIONS: { key: GroupBy; label: string }[] = [
 ];
 
 export function Filters({
-  range,
   interval,
   intervalAuto,
   groupBy,
   categories,
 }: {
-  range: string | null;
   interval: IntervalKey;
   intervalAuto: boolean;
   groupBy: GroupBy;
@@ -63,18 +51,6 @@ export function Filters({
 
   return (
     <div className="flex flex-col gap-3 text-sm">
-      <FilterRow label="Range">
-        {RANGE_OPTIONS.map((r) => (
-          <Pill
-            key={r.key}
-            active={range === r.key}
-            onClick={() => update({ range: r.key })}
-          >
-            {r.label}
-          </Pill>
-        ))}
-      </FilterRow>
-
       <FilterRow label="Bucket">
         <Pill
           active={intervalAuto}

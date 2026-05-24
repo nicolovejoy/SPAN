@@ -15,7 +15,6 @@ import {
 import { autoInterval, type IntervalKey } from "@/lib/interval";
 import type { SeriesPoint } from "@/lib/influx";
 import type { DashState } from "@/lib/url-state";
-import { JogPad } from "@/components/JogPad";
 
 const CATEGORY_COLORS: Record<string, string> = {
   HVAC: "#ef4444",
@@ -30,7 +29,9 @@ const TOTAL_COLOR = "#9ca3af";  // dotted reference, intentionally low-contrast
 
 // Fetch this many spans on each side beyond the visible range, so small
 // pan/zoom gestures stay within loaded data and don't refetch.
-const BUFFER_PAD = 1;
+// 3 means a 24h visible window loads ~7 days total, so the user can pinch
+// out a fair bit before hitting the buffer wall.
+const BUFFER_PAD = 3;
 
 type Point = { time: UTCTimestamp; value: number };
 
@@ -353,19 +354,16 @@ export function PowerChart({ state }: { state: DashState }) {
   ]);
 
   return (
-    <div className="flex flex-col gap-2">
-      <div className="relative">
-        <div
-          ref={containerRef}
-          className="h-[55vh] min-h-[280px] w-full touch-none sm:h-[420px]"
-        />
-        {loading && (
-          <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-xs text-zinc-500">
-            loading…
-          </div>
-        )}
-      </div>
-      <JogPad chartRef={chartRef} />
+    <div className="relative">
+      <div
+        ref={containerRef}
+        className="h-[55vh] min-h-[280px] w-full touch-none sm:h-[420px]"
+      />
+      {loading && (
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-xs text-zinc-500">
+          loading…
+        </div>
+      )}
     </div>
   );
 }

@@ -4,6 +4,7 @@ import { PowerChart } from "@/components/PowerChart";
 import { QuickFilters } from "@/components/QuickFilters";
 import { BreakdownTable } from "@/components/BreakdownTable";
 import { FocusToggle } from "@/components/FocusToggle";
+import { TimeNav } from "@/components/TimeNav";
 import { queryEnergyByCategory } from "@/lib/influx";
 import { parseState } from "@/lib/url-state";
 
@@ -22,15 +23,18 @@ export default async function Home({ searchParams }: { searchParams: SP }) {
         </div>
       </header>
 
+      <div className="focus-hide">
+        <TimeNav range={state.rangePreset} fromMs={state.fromMs} toMs={state.toMs} />
+      </div>
+
       <details className="focus-hide group sm:hidden">
         <summary className="cursor-pointer text-xs uppercase tracking-wide text-zinc-500">
-          Filters
+          More filters
           <span className="ml-1 group-open:hidden">▸</span>
           <span className="ml-1 hidden group-open:inline">▾</span>
         </summary>
         <div className="mt-3">
           <Filters
-            range={state.rangePreset}
             interval={state.interval}
             intervalAuto={state.intervalAuto}
             groupBy={state.groupBy}
@@ -41,7 +45,6 @@ export default async function Home({ searchParams }: { searchParams: SP }) {
 
       <div className="focus-hide hidden sm:block">
         <Filters
-          range={state.rangePreset}
           interval={state.interval}
           intervalAuto={state.intervalAuto}
           groupBy={state.groupBy}
