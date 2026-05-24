@@ -1,4 +1,7 @@
 FROM node:20-alpine AS builder
+# tzdata so the build-time PT timestamp formatter actually resolves
+# America/Los_Angeles instead of silently falling back to UTC.
+RUN apk add --no-cache tzdata
 WORKDIR /repo
 
 COPY pi/categories.json /repo/pi/categories.json
