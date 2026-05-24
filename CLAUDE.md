@@ -53,10 +53,11 @@ routed through the same `phrpi` Cloudflare tunnel, gated by Cloudflare Access
 
 ## Next Steps
 
-- **iPhone PWA polish (#4) — shipped, expect follow-ups.** TimeNav segmented range bar + ←/→ pan buttons + chart pinch is the v1 control set. May want: bigger touch targets, sensitivity tuning of pan buttons (½-span hop may feel too big/small), iOS-style segmented control styling, custom icon (currently a generated "S" wordmark). Close #4 once smoke-tested on iPhone home screen.
+- **Chart-crop on wide ranges** — at 30d+, the chart only renders the data extent, not the requested window. Tried `aggregateWindow(createEmpty:true)` + `fill(0)` to backfill — caused `lightweight-charts: Value is null` crashes (reverted in `8e96659`). Next attempt: client-side sentinel zero points at the requested window boundaries so `setVisibleRange` can span the full ask without renderer null-deref. Also verify whether SPAN really has data gaps for the period in question (check `docker compose logs collector` for outage windows).
+- **Manifest CORS** — `/manifest.webmanifest` is gated by CF Access; browser fetches it without credentials and gets redirected to login (no CORS headers) → console error. Fix is a CF Access bypass policy for `/manifest.webmanifest`, `/icon*`, `/apple-icon*`, `/favicon.ico`. Configure in CF dashboard, not code.
 - **EV monthly + annual cost rollup** in daily report (request #3 from 2026-05-23 batch — last unaddressed item). Bundle with SCL plan confirmation so cost isn't computed against two rate models.
 - **Confirm SCL plan** — bill shows "Small General Energy" flat $0.1241/kWh + $0.83/day base. Check whether residential RSC tiered or TOU would be cheaper; align Grafana cost panel once decided.
-- **Dashboard UX backlog** — polling cadence (#5), relax CF Access login (#6, mostly Cloudflare-side), 1m smoothing (#7).
+- **Dashboard UX backlog** — polling cadence (#5), relax CF Access login (#6 — overlaps with manifest fix above), 1m smoothing (#7). Custom PWA icon (currently a generated "S" wordmark).
 - **Watch for first aux-heat alarm fire** — Auxiliary/Heat Pump > 0.5 kWh/day triggers red banner + `⚠ Aux heat —` subject prefix. Cold-weather suppression at #3.
 
 ## SPAN API
