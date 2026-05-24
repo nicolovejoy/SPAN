@@ -28,7 +28,12 @@ export default async function Home({ searchParams }: { searchParams: SP }) {
       </div>
 
       <div className="focus-hide">
-        <BucketSelector interval={state.interval} intervalAuto={state.intervalAuto} />
+        <BucketSelector
+          interval={state.interval}
+          intervalAuto={state.intervalAuto}
+          fromMs={state.fromMs}
+          toMs={state.toMs}
+        />
       </div>
 
       <div className="flex items-center justify-between gap-2">

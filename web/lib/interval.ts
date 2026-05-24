@@ -21,6 +21,10 @@ export const INTERVAL_ORDER: IntervalKey[] = [
 ];
 
 const TARGET_POINTS = 175;
+/** Hard upper bound on bucket count — any interval that would exceed this
+ * for the current span is disabled, to keep the Pi from OOMing on huge
+ * Influx queries (e.g. 90d × 1m = 129,600 buckets). */
+export const MAX_BUCKETS = 1000;
 
 /**
  * Pick the smallest interval that produces at most TARGET_POINTS buckets
@@ -32,6 +36,17 @@ export function autoInterval(fromMs: number, toMs: number): IntervalKey {
     if (spanSec / SECONDS[key] <= TARGET_POINTS) return key;
   }
   return "1w";
+}
+
+/** True if the bucket count for this interval over the span stays under
+ * MAX_BUCKETS — i.e. safe to query without melting the Pi. */
+export function isIntervalAllowed(
+  interval: IntervalKey,
+  fromMs: number,
+  toMs: number,
+): boolean {
+  const spanSec = Math.max(1, (toMs - fromMs) / 1000);
+  return spanSec / SECONDS[interval] <= MAX_BUCKETS;
 }
 
 export function intervalSeconds(key: IntervalKey): number {

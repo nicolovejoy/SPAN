@@ -5,6 +5,7 @@ import {
   INTERVAL_ORDER,
   autoInterval,
   intervalSeconds,
+  isIntervalAllowed,
 } from "./interval";
 
 export type DashState = {
@@ -44,7 +45,12 @@ function parseInterval(
   toMs: number,
 ): { interval: IntervalKey; intervalAuto: boolean } {
   const spanSec = Math.max(1, (toMs - fromMs) / 1000);
-  if (raw && isInterval(raw) && intervalSeconds(raw) < spanSec) {
+  if (
+    raw &&
+    isInterval(raw) &&
+    intervalSeconds(raw) < spanSec &&
+    isIntervalAllowed(raw, fromMs, toMs)
+  ) {
     return { interval: raw, intervalAuto: false };
   }
   return { interval: autoInterval(fromMs, toMs), intervalAuto: true };

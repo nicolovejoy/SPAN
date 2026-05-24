@@ -1,6 +1,10 @@
 "use client";
 
-import { INTERVAL_ORDER, type IntervalKey } from "@/lib/interval";
+import {
+  INTERVAL_ORDER,
+  isIntervalAllowed,
+  type IntervalKey,
+} from "@/lib/interval";
 import { useUpdateParams } from "@/components/hooks/useUpdateParams";
 
 const AUTO_KEY = "auto" as const;
@@ -9,9 +13,13 @@ type BucketKey = typeof AUTO_KEY | IntervalKey;
 export function BucketSelector({
   interval,
   intervalAuto,
+  fromMs,
+  toMs,
 }: {
   interval: IntervalKey;
   intervalAuto: boolean;
+  fromMs: number;
+  toMs: number;
 }) {
   const { update, pending } = useUpdateParams();
 
@@ -28,11 +36,20 @@ export function BucketSelector({
       <Chip active={active === AUTO_KEY} onClick={() => onSelect(AUTO_KEY)}>
         auto ({interval})
       </Chip>
-      {INTERVAL_ORDER.map((i) => (
-        <Chip key={i} active={active === i} onClick={() => onSelect(i)}>
-          {i}
-        </Chip>
-      ))}
+      {INTERVAL_ORDER.map((i) => {
+        const allowed = isIntervalAllowed(i, fromMs, toMs);
+        return (
+          <Chip
+            key={i}
+            active={active === i}
+            disabled={!allowed}
+            title={allowed ? undefined : "Too many buckets for this range"}
+            onClick={() => onSelect(i)}
+          >
+            {i}
+          </Chip>
+        );
+      })}
       {pending && <span className="text-xs text-zinc-400">updating…</span>}
     </div>
   );
@@ -40,10 +57,14 @@ export function BucketSelector({
 
 function Chip({
   active,
+  disabled,
+  title,
   onClick,
   children,
 }: {
   active: boolean;
+  disabled?: boolean;
+  title?: string;
   onClick: () => void;
   children: React.ReactNode;
 }) {
@@ -51,12 +72,16 @@ function Chip({
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
+      title={title}
       aria-pressed={active}
       className={[
         "rounded-full border px-3 py-1 text-xs transition-colors",
         active
           ? "border-zinc-900 bg-zinc-900 text-white dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-900"
-          : "border-zinc-300 text-zinc-700 hover:border-zinc-500 dark:border-zinc-700 dark:text-zinc-300",
+          : disabled
+            ? "cursor-not-allowed border-zinc-200 text-zinc-300 dark:border-zinc-800 dark:text-zinc-700"
+            : "border-zinc-300 text-zinc-700 hover:border-zinc-500 dark:border-zinc-700 dark:text-zinc-300",
       ].join(" ")}
     >
       {children}

@@ -27,11 +27,15 @@ const CATEGORY_ORDER = ["HVAC", "Car", "Lights", "Appliances", "Else"] as const;
 const SUM_COLOR = "#525252";    // neutral; reads as derived in light + dark
 const TOTAL_COLOR = "#9ca3af";  // dotted reference, intentionally low-contrast
 
-// Fetch this many spans on each side beyond the visible range, so small
-// pan/zoom gestures stay within loaded data and don't refetch.
-// 3 means a 24h visible window loads ~7 days total, so the user can pinch
-// out a fair bit before hitting the buffer wall.
-const BUFFER_PAD = 3;
+// Buffered fetch — load extra data on each side of the visible window so
+// small pan/zoom gestures stay within loaded data and don't refetch.
+// Additive (not multiplicative) so wide ranges don't explode: at 1h we
+// preload 4h total, at 90d we preload ~94d. Was previously a 3× multiplier
+// which loaded 630d for a 90d view and crashed the Pi.
+const BUFFER_MS = 2 * 24 * 60 * 60 * 1000; // 2 days
+function bufferFor(spanMs: number): number {
+  return Math.min(BUFFER_MS, spanMs);
+}
 
 type Point = { time: UTCTimestamp; value: number };
 
@@ -63,6 +67,32 @@ function pointsFor(
 ): Point[] {
   if (!source) return [];
   return times.map((time) => ({ time, value: source.get(time) ?? 0 }));
+}
+
+function Spinner() {
+  return (
+    <svg
+      className="h-4 w-4 animate-spin text-zinc-500 dark:text-zinc-400"
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden
+    >
+      <circle
+        cx="12"
+        cy="12"
+        r="10"
+        stroke="currentColor"
+        strokeOpacity="0.25"
+        strokeWidth="3"
+      />
+      <path
+        d="M22 12a10 10 0 0 1-10 10"
+        stroke="currentColor"
+        strokeWidth="3"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
 }
 
 export function PowerChart({ state }: { state: DashState }) {
@@ -242,13 +272,14 @@ export function PowerChart({ state }: { state: DashState }) {
       return;
     }
 
-    // Slow path — fetch with a buffer extending BUFFER_PAD × span on each side.
+    // Slow path — fetch with an additive buffer (capped at BUFFER_MS / span).
     let cancelled = false;
     setLoading(true);
     const span = state.toMs - state.fromMs;
     const now = Date.now();
-    const fetchFromMs = Math.max(0, state.fromMs - span * BUFFER_PAD);
-    const fetchToMs = Math.min(now, state.toMs + span * BUFFER_PAD);
+    const pad = bufferFor(span);
+    const fetchFromMs = Math.max(0, state.fromMs - pad);
+    const fetchToMs = Math.min(now, state.toMs + pad);
 
     const url = new URL("/api/power", window.location.origin);
     url.searchParams.set("from", String(fetchFromMs));
@@ -351,8 +382,11 @@ export function PowerChart({ state }: { state: DashState }) {
         className="h-[55vh] min-h-[280px] w-full touch-none sm:h-[420px]"
       />
       {loading && (
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-xs text-zinc-500">
-          loading…
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-zinc-50/60 backdrop-blur-[1px] dark:bg-zinc-950/60">
+          <div className="flex items-center gap-2 rounded-full border border-zinc-300 bg-white/90 px-3 py-1.5 text-xs text-zinc-700 shadow-sm dark:border-zinc-700 dark:bg-zinc-900/90 dark:text-zinc-200">
+            <Spinner />
+            loading…
+          </div>
         </div>
       )}
     </div>
