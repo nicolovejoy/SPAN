@@ -24,7 +24,7 @@ export default async function Home({ searchParams }: { searchParams: SP }) {
       </header>
 
       <div className="focus-hide">
-        <TimeNav range={state.rangePreset} fromMs={state.fromMs} toMs={state.toMs} />
+        <TimeNav range={state.rangePreset} />
       </div>
 
       <div className="focus-hide">

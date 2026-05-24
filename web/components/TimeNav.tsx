@@ -1,7 +1,5 @@
 "use client";
 
-import { autoInterval } from "@/lib/interval";
-import { SegmentedControl } from "@/components/SegmentedControl";
 import { useUpdateParams } from "@/components/hooks/useUpdateParams";
 
 const RANGE_OPTIONS = [
@@ -16,82 +14,53 @@ const RANGE_OPTIONS = [
 
 type RangeKey = (typeof RANGE_OPTIONS)[number]["key"];
 
-/** Slide the window by `fraction` of its current span, clamped so it never
- * extends past `now`. Returns the new ms-epoch window. */
-function panBy(
-  fromMs: number,
-  toMs: number,
-  fraction: number,
-  now: number,
-): { fromMs: number; toMs: number } {
-  const span = Math.max(60_000, toMs - fromMs);
-  const shift = Math.round(span * fraction);
-  let newFrom = fromMs + shift;
-  let newTo = toMs + shift;
-  if (newTo > now) {
-    const overshoot = newTo - now;
-    newTo -= overshoot;
-    newFrom -= overshoot;
-  }
-  return { fromMs: newFrom, toMs: newTo };
-}
-
-export function TimeNav({
-  range,
-  fromMs,
-  toMs,
-}: {
-  range: string | null;
-  fromMs: number;
-  toMs: number;
-}) {
+export function TimeNav({ range }: { range: string | null }) {
   const { update, pending } = useUpdateParams();
 
   const setRange = (rangeKey: RangeKey) =>
     update({ range: rangeKey, from: null, to: null, interval: null });
 
-  const pan = (fraction: number) => {
-    const w = panBy(fromMs, toMs, fraction, Date.now());
-    update({
-      range: null,
-      from: String(w.fromMs),
-      to: String(w.toMs),
-      interval: autoInterval(w.fromMs, w.toMs),
-    });
-  };
-
-  const atNow = Math.abs(toMs - Date.now()) < 60_000;
-  const buttonCls =
-    "flex-1 rounded-lg border border-zinc-300 bg-white py-2.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50 active:bg-zinc-100 disabled:opacity-40 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-200 dark:hover:bg-zinc-900";
-
   return (
-    <div className="flex flex-col gap-2">
-      <SegmentedControl
-        options={RANGE_OPTIONS}
-        active={(range as RangeKey | null) ?? null}
-        onSelect={setRange}
-        size="md"
-      />
-      <div className="flex items-stretch gap-2">
-        <button
-          type="button"
-          onClick={() => pan(-0.5)}
-          className={buttonCls}
-          aria-label="Pan backward half a window"
+    <div className="flex flex-wrap items-center gap-1.5 text-sm">
+      <span className="w-16 shrink-0 text-xs uppercase tracking-wide text-zinc-500">
+        Range
+      </span>
+      {RANGE_OPTIONS.map((r) => (
+        <Chip
+          key={r.key}
+          active={range === r.key}
+          onClick={() => setRange(r.key)}
         >
-          ← back
-        </button>
-        <button
-          type="button"
-          onClick={() => pan(0.5)}
-          disabled={atNow}
-          className={buttonCls}
-          aria-label="Pan forward half a window"
-        >
-          fwd →
-        </button>
-      </div>
-      {pending && <div className="text-xs text-zinc-400">updating…</div>}
+          {r.label}
+        </Chip>
+      ))}
+      {pending && <span className="text-xs text-zinc-400">updating…</span>}
     </div>
+  );
+}
+
+function Chip({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={[
+        "rounded-full border px-3 py-1 text-xs transition-colors",
+        active
+          ? "border-zinc-900 bg-zinc-900 text-white dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-900"
+          : "border-zinc-300 text-zinc-700 hover:border-zinc-500 dark:border-zinc-700 dark:text-zinc-300",
+      ].join(" ")}
+    >
+      {children}
+    </button>
   );
 }
