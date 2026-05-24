@@ -75,3 +75,22 @@ export const RANGE_PRESETS: Record<RangePreset, number> = {
   "90d": 90 * 24 * 60 * 60 * 1000,
   "1y": 365 * 24 * 60 * 60 * 1000,
 };
+
+/** Pick the preset whose duration is closest (in log space) to spanMs.
+ * Used to soft-highlight a pill when the user has panned/zoomed off the
+ * nearest preset — clicking the soft-highlighted pill snaps to exact. */
+export function closestPreset(spanMs: number): RangePreset {
+  const logSpan = Math.log(Math.max(1, spanMs));
+  let best: RangePreset = "24h";
+  let bestDist = Infinity;
+  for (const [key, ms] of Object.entries(RANGE_PRESETS) as Array<
+    [RangePreset, number]
+  >) {
+    const d = Math.abs(logSpan - Math.log(ms));
+    if (d < bestDist) {
+      bestDist = d;
+      best = key;
+    }
+  }
+  return best;
+}
