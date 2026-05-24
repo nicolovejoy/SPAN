@@ -1,8 +1,8 @@
 "use client";
 
-import { useRouter, useSearchParams } from "next/navigation";
-import { useTransition } from "react";
 import { autoInterval } from "@/lib/interval";
+import { SegmentedControl } from "@/components/SegmentedControl";
+import { useUpdateParams } from "@/components/hooks/useUpdateParams";
 
 const RANGE_OPTIONS = [
   { key: "1h", label: "1h" },
@@ -14,6 +14,28 @@ const RANGE_OPTIONS = [
   { key: "1y", label: "1y" },
 ] as const;
 
+type RangeKey = (typeof RANGE_OPTIONS)[number]["key"];
+
+/** Slide the window by `fraction` of its current span, clamped so it never
+ * extends past `now`. Returns the new ms-epoch window. */
+function panBy(
+  fromMs: number,
+  toMs: number,
+  fraction: number,
+  now: number,
+): { fromMs: number; toMs: number } {
+  const span = Math.max(60_000, toMs - fromMs);
+  const shift = Math.round(span * fraction);
+  let newFrom = fromMs + shift;
+  let newTo = toMs + shift;
+  if (newTo > now) {
+    const overshoot = newTo - now;
+    newTo -= overshoot;
+    newFrom -= overshoot;
+  }
+  return { fromMs: newFrom, toMs: newTo };
+}
+
 export function TimeNav({
   range,
   fromMs,
@@ -23,76 +45,38 @@ export function TimeNav({
   fromMs: number;
   toMs: number;
 }) {
-  const router = useRouter();
-  const params = useSearchParams();
-  const [pending, startTransition] = useTransition();
+  const { update, pending } = useUpdateParams();
 
-  function setRange(rangeKey: string) {
-    const next = new URLSearchParams(params.toString());
-    next.set("range", rangeKey);
-    next.delete("from");
-    next.delete("to");
-    next.delete("interval");
-    startTransition(() => {
-      router.replace(`/?${next.toString()}`);
-    });
-  }
+  const setRange = (rangeKey: RangeKey) =>
+    update({ range: rangeKey, from: null, to: null, interval: null });
 
-  // Pan by a fraction of the current visible span.
-  function pan(fraction: number) {
-    const span = Math.max(60_000, toMs - fromMs);
-    const shift = Math.round(span * fraction);
-    let newFrom = fromMs + shift;
-    let newTo = toMs + shift;
-    const now = Date.now();
-    if (newTo > now) {
-      const overshoot = newTo - now;
-      newTo -= overshoot;
-      newFrom -= overshoot;
-    }
-    const next = new URLSearchParams(params.toString());
-    next.delete("range");
-    next.set("from", String(newFrom));
-    next.set("to", String(newTo));
-    next.set("interval", autoInterval(newFrom, newTo));
-    startTransition(() => {
-      router.replace(`/?${next.toString()}`);
+  const pan = (fraction: number) => {
+    const w = panBy(fromMs, toMs, fraction, Date.now());
+    update({
+      range: null,
+      from: String(w.fromMs),
+      to: String(w.toMs),
+      interval: autoInterval(w.fromMs, w.toMs),
     });
-  }
+  };
 
   const atNow = Math.abs(toMs - Date.now()) < 60_000;
+  const buttonCls =
+    "flex-1 rounded-lg border border-zinc-300 bg-white py-2.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50 active:bg-zinc-100 disabled:opacity-40 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-200 dark:hover:bg-zinc-900";
 
   return (
     <div className="flex flex-col gap-2">
-      <div className="flex w-full overflow-hidden rounded-lg border border-zinc-300 bg-zinc-100 text-sm dark:border-zinc-700 dark:bg-zinc-900">
-        {RANGE_OPTIONS.map((r, i) => {
-          const active = range === r.key;
-          return (
-            <button
-              key={r.key}
-              type="button"
-              onClick={() => setRange(r.key)}
-              className={[
-                "flex-1 px-2 py-2.5 text-sm font-medium transition-colors",
-                i > 0 && "border-l border-zinc-300 dark:border-zinc-700",
-                active
-                  ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
-                  : "text-zinc-600 hover:bg-zinc-200 dark:text-zinc-300 dark:hover:bg-zinc-800",
-              ]
-                .filter(Boolean)
-                .join(" ")}
-            >
-              {r.label}
-            </button>
-          );
-        })}
-      </div>
-
+      <SegmentedControl
+        options={RANGE_OPTIONS}
+        active={(range as RangeKey | null) ?? null}
+        onSelect={setRange}
+        size="md"
+      />
       <div className="flex items-stretch gap-2">
         <button
           type="button"
           onClick={() => pan(-0.5)}
-          className="flex-1 rounded-lg border border-zinc-300 bg-white py-2.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50 active:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-200 dark:hover:bg-zinc-900"
+          className={buttonCls}
           aria-label="Pan backward half a window"
         >
           ← back
@@ -101,7 +85,7 @@ export function TimeNav({
           type="button"
           onClick={() => pan(0.5)}
           disabled={atNow}
-          className="flex-1 rounded-lg border border-zinc-300 bg-white py-2.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50 active:bg-zinc-100 disabled:opacity-40 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-200 dark:hover:bg-zinc-900"
+          className={buttonCls}
           aria-label="Pan forward half a window"
         >
           fwd →

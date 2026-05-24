@@ -82,7 +82,6 @@ export function PowerChart({ state }: { state: DashState }) {
     fromSec: number;
     toSec: number;
     interval: IntervalKey;
-    categoriesKey: string;
   } | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -212,13 +211,11 @@ export function PowerChart({ state }: { state: DashState }) {
   useEffect(() => {
     const wantFromSec = (state.fromMs / 1000) | 0;
     const wantToSec = (state.toMs / 1000) | 0;
-    const categoriesKey = state.categories.join(",");
 
     const loaded = loadedRef.current;
     const fitsBuffer =
       loaded &&
       loaded.interval === state.interval &&
-      loaded.categoriesKey === categoriesKey &&
       wantFromSec >= loaded.fromSec &&
       wantToSec <= loaded.toSec;
 
@@ -257,10 +254,6 @@ export function PowerChart({ state }: { state: DashState }) {
     url.searchParams.set("from", String(fetchFromMs));
     url.searchParams.set("to", String(fetchToMs));
     url.searchParams.set("interval", state.interval);
-    url.searchParams.set("groupBy", "category");
-    if (state.categories.length) {
-      url.searchParams.set("categories", state.categories.join(","));
-    }
 
     fetch(url.toString())
       .then((r) => r.json())
@@ -323,7 +316,6 @@ export function PowerChart({ state }: { state: DashState }) {
             fromSec: dataFromSec,
             toSec: dataToSec,
             interval: state.interval,
-            categoriesKey,
           };
           lastPushedRef.current = { from: state.fromMs, to: state.toMs };
         } catch (e) {
@@ -349,7 +341,6 @@ export function PowerChart({ state }: { state: DashState }) {
     state.fromMs,
     state.toMs,
     state.interval,
-    state.categories.join(","),
     state.show.join(","),
   ]);
 

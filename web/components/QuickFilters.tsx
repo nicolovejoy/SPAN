@@ -1,60 +1,45 @@
 "use client";
 
-import { useRouter, useSearchParams } from "next/navigation";
-import { useTransition } from "react";
+import { useUpdateParams } from "@/components/hooks/useUpdateParams";
 
 const CHIPS = ["Lights", "HVAC", "Car", "Appliances", "Else"] as const;
 
+function nextShow(current: string[], cat: string): string[] {
+  const allActive = current.length === 0;
+  if (allActive) return [cat]; // first click after "All" isolates
+  const set = new Set(current);
+  if (set.has(cat)) set.delete(cat);
+  else set.add(cat);
+  return Array.from(set);
+}
+
 export function QuickFilters({ show }: { show: string[] }) {
-  const router = useRouter();
-  const params = useSearchParams();
-  const [pending, startTransition] = useTransition();
+  const { update, pending } = useUpdateParams();
 
-  const selected = new Set(show);
+  const navigate = (next: string[] | null) =>
+    update({ show: next === null || next.length === 0 ? null : next.join(",") });
+
   const allActive = show.length === 0;
-
-  function navigate(nextShow: string[] | null) {
-    const next = new URLSearchParams(params.toString());
-    if (nextShow === null || nextShow.length === 0) next.delete("show");
-    else next.set("show", nextShow.join(","));
-    startTransition(() => {
-      router.replace(`/?${next.toString()}`);
-    });
-  }
-
-  function toggle(cat: string) {
-    if (allActive) {
-      // First click after "All": isolate just this one.
-      navigate([cat]);
-      return;
-    }
-    const set = new Set(show);
-    if (set.has(cat)) set.delete(cat);
-    else set.add(cat);
-    navigate(Array.from(set));
-  }
+  const selected = new Set(show);
 
   return (
     <div className="flex flex-wrap items-center gap-1.5 text-sm">
-      <span className="w-20 shrink-0 text-xs uppercase tracking-wide text-zinc-500">
+      <span className="w-16 shrink-0 text-xs uppercase tracking-wide text-zinc-500">
         Show
       </span>
-
       <Chip active={allActive} onClick={() => navigate(null)}>
         All
       </Chip>
-
       {CHIPS.map((cat) => (
         <Chip
           key={cat}
           active={!allActive && selected.has(cat)}
           dim={!allActive && !selected.has(cat)}
-          onClick={() => toggle(cat)}
+          onClick={() => navigate(nextShow(show, cat))}
         >
           {cat}
         </Chip>
       ))}
-
       {pending && <span className="text-xs text-zinc-400">updating…</span>}
     </div>
   );
@@ -73,7 +58,9 @@ function Chip({
 }) {
   return (
     <button
+      type="button"
       onClick={onClick}
+      aria-pressed={active}
       className={[
         "rounded-full border px-3 py-1 text-xs transition-colors",
         active

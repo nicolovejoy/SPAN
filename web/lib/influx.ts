@@ -1,7 +1,7 @@
 import { InfluxDB } from "@influxdata/influxdb-client";
 import type { IntervalKey } from "./interval";
 import { fluxEvery } from "./interval";
-import { categoryFromNameFlux, nameMatchesCategoriesFlux } from "./categories";
+import { categoryFromNameFlux } from "./categories";
 
 const URL = process.env.INFLUX_URL!;
 const TOKEN = process.env.INFLUX_TOKEN!;
@@ -31,71 +31,42 @@ function makeClient() {
   });
 }
 
-export type GroupBy = "all" | "category" | "circuit";
-
 export type SeriesPoint = { time: string; series: string; watts: number };
 
 const fluxDate = (ms: number) => new Date(ms).toISOString();
 
+const POWER_FILTER = `r._measurement == "circuit" and r._field == "power_w"`;
+
 /**
- * Query mean power per bucket grouped by the chosen dimension.
- * Returns one row per (time, series) — easy to pivot client-side.
+ * Mean power per bucket, grouped by derived category. One row per
+ * (time, category) — pivot client-side.
  */
 export async function queryPower(opts: {
   fromMs: number;
   toMs: number;
   interval: IntervalKey;
-  groupBy: GroupBy;
-  categories?: string[];
-  circuits?: string[];
 }): Promise<SeriesPoint[]> {
-  const { fromMs, toMs, interval, groupBy, categories, circuits } = opts;
-  const client = makeClient();
-  const queryApi = client.getQueryApi(ORG);
+  const { fromMs, toMs, interval } = opts;
+  const queryApi = makeClient().getQueryApi(ORG);
 
-  const filters: string[] = [
-    `r._measurement == "circuit"`,
-    `r._field == "power_w"`,
-  ];
-  if (categories?.length) {
-    filters.push(nameMatchesCategoriesFlux(categories));
-  }
-  if (circuits?.length) {
-    const set = circuits.map((c) => `r.name == "${c}"`).join(" or ");
-    filters.push(`(${set})`);
-  }
-
-  const groupCol =
-    groupBy === "all" ? null : groupBy === "category" ? "category" : "name";
-
-  // Strategy: per-circuit aggregateWindow first (mean watts in each bucket
-  // per circuit), then sum across circuits within the chosen group at each
-  // bucket boundary. This gives total instantaneous power for the group.
-  // The `category` tag wasn't written before commit a806090, so derive it
-  // from `name` — but do it AFTER aggregateWindow so we run the regex on
-  // ~30×buckets rows instead of every raw point (multi-million on a 7d range).
-  const synthCategory =
-    groupBy === "category" ? `|> ${categoryFromNameFlux()}` : "";
+  // Per-circuit aggregateWindow first, then derive category from name (so
+  // historical rows written before category was tagged still group correctly),
+  // then sum across circuits per category at each bucket boundary. The regex
+  // runs on ~30×buckets rows instead of every raw point.
   const flux = `
 import "math"
 
 from(bucket: "${BUCKET}")
   |> range(start: ${fluxDate(fromMs)}, stop: ${fluxDate(toMs)})
-  |> filter(fn: (r) => ${filters.join(" and ")})
+  |> filter(fn: (r) => ${POWER_FILTER})
   |> map(fn: (r) => ({ r with _value: if r._value < 0.0 then -r._value else r._value }))
   |> aggregateWindow(every: ${fluxEvery(interval)}, fn: mean, createEmpty: false)
   |> fill(value: 0.0)
-  ${synthCategory}
-  ${
-    groupCol
-      ? `|> group(columns: ["_time", "${groupCol}"])
+  |> ${categoryFromNameFlux()}
+  |> group(columns: ["_time", "category"])
   |> sum()
-  |> group(columns: ["${groupCol}"])`
-      : `|> group(columns: ["_time"])
-  |> sum()
-  |> group()`
-  }
-  |> keep(columns: ["_time", "_value"${groupCol ? `, "${groupCol}"` : ""}])
+  |> group(columns: ["category"])
+  |> keep(columns: ["_time", "_value", "category"])
 `;
 
   const out: SeriesPoint[] = [];
@@ -103,7 +74,7 @@ from(bucket: "${BUCKET}")
     const o = row.tableMeta.toObject(row.values) as Record<string, unknown>;
     out.push({
       time: String(o._time),
-      series: groupCol ? String(o[groupCol] ?? "Other") : "Total",
+      series: String(o.category ?? "Other"),
       watts: Number(o._value) || 0,
     });
   }
@@ -111,34 +82,23 @@ from(bucket: "${BUCKET}")
 }
 
 /**
- * Energy (kWh) per series across the entire range — one number per series.
- * Used for the breakdown table.
+ * Energy (kWh) per category across the range — one number per category.
+ * Drives the breakdown table.
  */
 export async function queryEnergyByCategory(opts: {
   fromMs: number;
   toMs: number;
-  categories?: string[];
 }): Promise<Array<{ category: string; kwh: number }>> {
-  const { fromMs, toMs, categories } = opts;
-  const client = makeClient();
-  const queryApi = client.getQueryApi(ORG);
+  const { fromMs, toMs } = opts;
+  const queryApi = makeClient().getQueryApi(ORG);
 
-  const filters = [
-    `r._measurement == "circuit"`,
-    `r._field == "power_w"`,
-  ];
-  if (categories?.length) {
-    filters.push(nameMatchesCategoriesFlux(categories));
-  }
-
-  // Integrate each circuit's power separately to get Wh, then derive category
-  // from name (collapses pre/post-cutover rows for the same circuit), then
-  // sum by category. Running the regex AFTER integral keeps it ~30 rows
-  // instead of millions. integral() requires _start/_stop in the group key.
+  // Integrate each circuit separately to Wh, derive category, then sum by
+  // category. Regex after integral() keeps it cheap. integral() requires
+  // _start/_stop in the group key.
   const flux = `
 from(bucket: "${BUCKET}")
   |> range(start: ${fluxDate(fromMs)}, stop: ${fluxDate(toMs)})
-  |> filter(fn: (r) => ${filters.join(" and ")})
+  |> filter(fn: (r) => ${POWER_FILTER})
   |> map(fn: (r) => ({ r with _value: if r._value < 0.0 then -r._value else r._value }))
   |> group(columns: ["name", "_start", "_stop"])
   |> integral(unit: 1h)

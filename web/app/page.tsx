@@ -1,10 +1,10 @@
 import { Suspense } from "react";
-import { Filters } from "@/components/Filters";
 import { PowerChart } from "@/components/PowerChart";
 import { QuickFilters } from "@/components/QuickFilters";
 import { BreakdownTable } from "@/components/BreakdownTable";
 import { FocusToggle } from "@/components/FocusToggle";
 import { TimeNav } from "@/components/TimeNav";
+import { BucketSelector } from "@/components/BucketSelector";
 import { queryEnergyByCategory } from "@/lib/influx";
 import { parseState } from "@/lib/url-state";
 
@@ -27,29 +27,8 @@ export default async function Home({ searchParams }: { searchParams: SP }) {
         <TimeNav range={state.rangePreset} fromMs={state.fromMs} toMs={state.toMs} />
       </div>
 
-      <details className="focus-hide group sm:hidden">
-        <summary className="cursor-pointer text-xs uppercase tracking-wide text-zinc-500">
-          More filters
-          <span className="ml-1 group-open:hidden">▸</span>
-          <span className="ml-1 hidden group-open:inline">▾</span>
-        </summary>
-        <div className="mt-3">
-          <Filters
-            interval={state.interval}
-            intervalAuto={state.intervalAuto}
-            groupBy={state.groupBy}
-            categories={state.categories}
-          />
-        </div>
-      </details>
-
-      <div className="focus-hide hidden sm:block">
-        <Filters
-          interval={state.interval}
-          intervalAuto={state.intervalAuto}
-          groupBy={state.groupBy}
-          categories={state.categories}
-        />
+      <div className="focus-hide">
+        <BucketSelector interval={state.interval} intervalAuto={state.intervalAuto} />
       </div>
 
       <div className="flex items-center justify-between gap-2">
@@ -62,7 +41,7 @@ export default async function Home({ searchParams }: { searchParams: SP }) {
       <PowerChart state={state} />
 
       <Suspense
-        key={`${state.fromMs}-${state.toMs}-${state.categories.join(",")}-table`}
+        key={`${state.fromMs}-${state.toMs}-table`}
         fallback={<div className="focus-hide h-32 animate-pulse rounded-md bg-zinc-100 dark:bg-zinc-900" />}
       >
         <TablePanel state={state} />
@@ -75,11 +54,13 @@ async function TablePanel({ state }: { state: ReturnType<typeof parseState> }) {
   const rows = await queryEnergyByCategory({
     fromMs: state.fromMs,
     toMs: state.toMs,
-    categories: state.categories.length ? state.categories : undefined,
   });
+  const filtered = state.show.length === 0
+    ? rows
+    : rows.filter((r) => state.show.includes(r.category));
   return (
     <div className="focus-hide">
-      <BreakdownTable rows={rows} />
+      <BreakdownTable rows={filtered} />
     </div>
   );
 }
