@@ -143,9 +143,18 @@ export function PowerChart({ state }: { state: DashState }) {
       if (!Number.isFinite(fromSec) || !Number.isFinite(toSec)) return;
       if (gestureTimer.current) clearTimeout(gestureTimer.current);
       gestureTimer.current = setTimeout(() => {
-        const from = fromSec * 1000;
-        const to = toSec * 1000;
+        let from = fromSec * 1000;
+        let to = toSec * 1000;
         if (!(from < to)) return;
+        // Don't push URLs into the future — Influx returns no data past now,
+        // and lightweight-charts can hit null-autoscale paths when the
+        // visible range extends past the data extent.
+        const now = Date.now();
+        if (to > now) {
+          const span = to - from;
+          to = now;
+          from = Math.max(0, now - span);
+        }
         // Suppress sub-2% wobble — lightweight-charts emits range-change events
         // after our own setVisibleRange settle that differ slightly due to
         // bar-snap; without this we get a feedback loop of URL self-updates.
@@ -204,19 +213,37 @@ export function PowerChart({ state }: { state: DashState }) {
       .then((r) => r.json())
       .then((json: { data: SeriesPoint[] }) => {
         if (cancelled || !chartRef.current) return;
+
+        // Empty response — leave the chart's prior state alone rather than
+        // wiping all series, which can trigger renderer null-derefs.
+        if (!json.data || json.data.length === 0) {
+          setLoading(false);
+          return;
+        }
+
         const { byCat, totalByTime, sortedTimes } = shapeData(json.data);
+        if (sortedTimes.length === 0) {
+          setLoading(false);
+          return;
+        }
 
         externalUpdate.current = true;
         try {
           for (const cat of CATEGORY_ORDER) {
             const series = catSeriesRef.current.get(cat);
             if (!series) continue;
-            series.setData(pointsFor(sortedTimes, byCat.get(cat)));
+            const data = pointsFor(sortedTimes, byCat.get(cat));
+            try { series.setData(data); }
+            catch (e) { console.warn(`setData failed for ${cat}`, e); }
             const visible = state.show.length === 0 || state.show.includes(cat);
             series.applyOptions({ visible });
           }
 
-          totalSeriesRef.current?.setData(pointsFor(sortedTimes, totalByTime));
+          try {
+            totalSeriesRef.current?.setData(pointsFor(sortedTimes, totalByTime));
+          } catch (e) {
+            console.warn("setData failed for Total", e);
+          }
 
           const selected = new Set(state.show);
           const showSum = selected.size >= 2;
@@ -226,15 +253,26 @@ export function PowerChart({ state }: { state: DashState }) {
               for (const cat of selected) v += byCat.get(cat)?.get(time) ?? 0;
               return { time, value: v };
             });
-            sumSeriesRef.current?.setData(sumData);
+            try { sumSeriesRef.current?.setData(sumData); }
+            catch (e) { console.warn("setData failed for Sum", e); }
           }
           sumSeriesRef.current?.applyOptions({ visible: showSum });
 
-          chartRef.current.timeScale().setVisibleRange({
-            from: ((state.fromMs / 1000) | 0) as UTCTimestamp,
-            to: ((state.toMs / 1000) | 0) as UTCTimestamp,
-          });
+          // Clamp setVisibleRange to within the data extent — past the
+          // data on either side, the line renderer can null-deref.
+          const dataFromSec = sortedTimes[0]!;
+          const dataToSec = sortedTimes[sortedTimes.length - 1]!;
+          const wantFromSec = Math.max(dataFromSec, (state.fromMs / 1000) | 0);
+          const wantToSec = Math.min(dataToSec, (state.toMs / 1000) | 0);
+          if (wantFromSec < wantToSec) {
+            chartRef.current.timeScale().setVisibleRange({
+              from: wantFromSec as UTCTimestamp,
+              to: wantToSec as UTCTimestamp,
+            });
+          }
           lastPushedRef.current = { from: state.fromMs, to: state.toMs };
+        } catch (e) {
+          console.error("PowerChart apply failed", e);
         } finally {
           setLoading(false);
           // Hold for 150ms — gives lightweight-charts enough time to emit
