@@ -18,8 +18,15 @@ export default async function Home({ searchParams }: { searchParams: SP }) {
     <main className="mx-auto flex w-full max-w-6xl flex-col gap-4 p-3 sm:gap-6 sm:p-6">
       <header className="focus-hide flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between">
         <h1 className="text-xl font-semibold tracking-tight">SPAN — power explorer</h1>
-        <div className="text-xs text-zinc-500">
-          {new Date(state.fromMs).toLocaleString()} → {new Date(state.toMs).toLocaleString()}
+        <div className="flex flex-col text-xs text-zinc-500 sm:items-end">
+          <div>
+            {new Date(state.fromMs).toLocaleString()} → {new Date(state.toMs).toLocaleString()}
+          </div>
+          {process.env.NEXT_PUBLIC_BUILD_TIME && (
+            <div className="text-[10px] text-zinc-400">
+              build {process.env.NEXT_PUBLIC_BUILD_TIME} PT
+            </div>
+          )}
         </div>
       </header>
 
