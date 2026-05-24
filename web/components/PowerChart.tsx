@@ -13,7 +13,7 @@ import {
   type UTCTimestamp,
   type WhitespaceData,
 } from "lightweight-charts";
-import { autoInterval, type IntervalKey } from "@/lib/interval";
+import { autoInterval, intervalSeconds, type IntervalKey } from "@/lib/interval";
 import type { SeriesPoint } from "@/lib/influx";
 import type { DashState } from "@/lib/url-state";
 
@@ -309,9 +309,17 @@ export function PowerChart({ state }: { state: DashState }) {
     const fetchFromMs = Math.max(0, state.fromMs - pad);
     const fetchToMs = Math.min(now, state.toMs + pad);
 
+    // Quantize to interval boundary so consecutive loads of the same view
+    // produce byte-identical URLs and hit the browser's HTTP cache. The
+    // chart's time axis still extends to the unquantized fetchToMs via the
+    // whitespace sentinels, so the visible window remains accurate.
+    const intervalMs = intervalSeconds(state.interval) * 1000;
+    const qFetchFromMs = Math.floor(fetchFromMs / intervalMs) * intervalMs;
+    const qFetchToMs = Math.floor(fetchToMs / intervalMs) * intervalMs;
+
     const url = new URL("/api/power", window.location.origin);
-    url.searchParams.set("from", String(fetchFromMs));
-    url.searchParams.set("to", String(fetchToMs));
+    url.searchParams.set("from", String(qFetchFromMs));
+    url.searchParams.set("to", String(qFetchToMs));
     url.searchParams.set("interval", state.interval);
 
     fetch(url.toString())
