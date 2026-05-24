@@ -11,6 +11,7 @@ import {
   type TimeRangeChangeEventHandler,
   type Time,
   type UTCTimestamp,
+  type WhitespaceData,
 } from "lightweight-charts";
 import { autoInterval, type IntervalKey } from "@/lib/interval";
 import type { SeriesPoint } from "@/lib/influx";
@@ -39,9 +40,33 @@ function bufferFor(spanMs: number): number {
 }
 
 type Point = { time: UTCTimestamp; value: number };
+type SeriesEntry = Point | WhitespaceData<UTCTimestamp>;
 
 function toUtc(iso: string): UTCTimestamp {
   return Math.floor(new Date(iso).getTime() / 1000) as UTCTimestamp;
+}
+
+// Flux `aggregateWindow` aligns buckets to epoch, so at wide ranges with
+// coarse buckets the first/last data points land *inside* the requested
+// window. Without sentinels, the chart's time axis collapses to the data
+// extent and setVisibleRange can't span the full ask. WhitespaceData is
+// `{time}` with no value — it extends the time axis without drawing zeros
+// (which is what crashed lightweight-charts when we tried createEmpty:true).
+function padBounds(
+  points: Point[],
+  outerFromSec: UTCTimestamp,
+  outerToSec: UTCTimestamp,
+): SeriesEntry[] {
+  if (points.length === 0) {
+    return [{ time: outerFromSec }, { time: outerToSec }];
+  }
+  const out: SeriesEntry[] = [];
+  const first = points[0]!.time;
+  const last = points[points.length - 1]!.time;
+  if (outerFromSec < first) out.push({ time: outerFromSec });
+  for (const p of points) out.push(p);
+  if (outerToSec > last) out.push({ time: outerToSec });
+  return out;
 }
 
 function shapeData(data: SeriesPoint[]) {
@@ -308,12 +333,22 @@ export function PowerChart({ state }: { state: DashState }) {
           return;
         }
 
+        // Sentinel bounds — extend the time axis to the full fetched range so
+        // bucket-alignment gaps at wide ranges don't crop the visible window,
+        // and pans within the buffer can fast-path setVisibleRange.
+        const outerFromSec = Math.floor(fetchFromMs / 1000) as UTCTimestamp;
+        const outerToSec = Math.floor(fetchToMs / 1000) as UTCTimestamp;
+
         externalUpdate.current = true;
         try {
           for (const cat of CATEGORY_ORDER) {
             const series = catSeriesRef.current.get(cat);
             if (!series) continue;
-            const data = pointsFor(sortedTimes, byCat.get(cat));
+            const data = padBounds(
+              pointsFor(sortedTimes, byCat.get(cat)),
+              outerFromSec,
+              outerToSec,
+            );
             try { series.setData(data); }
             catch (e) { console.warn(`setData failed for ${cat}`, e); }
             const visible = state.show.length === 0 || state.show.includes(cat);
@@ -321,7 +356,9 @@ export function PowerChart({ state }: { state: DashState }) {
           }
 
           try {
-            totalSeriesRef.current?.setData(pointsFor(sortedTimes, totalByTime));
+            totalSeriesRef.current?.setData(
+              padBounds(pointsFor(sortedTimes, totalByTime), outerFromSec, outerToSec),
+            );
           } catch (e) {
             console.warn("setData failed for Total", e);
           }
@@ -334,24 +371,21 @@ export function PowerChart({ state }: { state: DashState }) {
               for (const cat of selected) v += byCat.get(cat)?.get(time) ?? 0;
               return { time, value: v };
             });
-            try { sumSeriesRef.current?.setData(sumData); }
-            catch (e) { console.warn("setData failed for Sum", e); }
+            try {
+              sumSeriesRef.current?.setData(
+                padBounds(sumData, outerFromSec, outerToSec),
+              );
+            } catch (e) { console.warn("setData failed for Sum", e); }
           }
           sumSeriesRef.current?.applyOptions({ visible: showSum });
 
-          const dataFromSec = sortedTimes[0]!;
-          const dataToSec = sortedTimes[sortedTimes.length - 1]!;
-          const clampFromSec = Math.max(dataFromSec, wantFromSec);
-          const clampToSec = Math.min(dataToSec, wantToSec);
-          if (clampFromSec < clampToSec) {
-            chartRef.current.timeScale().setVisibleRange({
-              from: clampFromSec as UTCTimestamp,
-              to: clampToSec as UTCTimestamp,
-            });
-          }
+          chartRef.current.timeScale().setVisibleRange({
+            from: wantFromSec as UTCTimestamp,
+            to: wantToSec as UTCTimestamp,
+          });
           loadedRef.current = {
-            fromSec: dataFromSec,
-            toSec: dataToSec,
+            fromSec: outerFromSec,
+            toSec: outerToSec,
             interval: state.interval,
           };
           lastPushedRef.current = { from: state.fromMs, to: state.toMs };
