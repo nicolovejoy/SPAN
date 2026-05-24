@@ -53,11 +53,11 @@ routed through the same `phrpi` Cloudflare tunnel, gated by Cloudflare Access
 
 ## Next Steps
 
-- **iPhone + PWA + full-screen (#4) — next major sprint.** Tier 1: viewport meta + touch-action + responsive layout + safe-area insets. Tier 2: app/manifest.ts + icons + iOS standalone polish. Tier 3: focus-mode toggle. Goal: "tap home-screen icon → full chart, zero chrome." Lean UX-first per memory `feedback_dashboard_personal_use`.
-- **Dashboard UX backlog** — polling cadence (#5), relax CF Access login (#6, mostly Cloudflare-side), 1m smoothing (#7).
-- **Watch for first aux-heat alarm fire** — Auxiliary/Heat Pump > 0.5 kWh/day triggers red banner + `⚠ Aux heat —` subject prefix. Cold-weather suppression at #3.
+- **iPhone PWA polish (#4) — shipped, expect follow-ups.** TimeNav segmented range bar + ←/→ pan buttons + chart pinch is the v1 control set. May want: bigger touch targets, sensitivity tuning of pan buttons (½-span hop may feel too big/small), iOS-style segmented control styling, custom icon (currently a generated "S" wordmark). Close #4 once smoke-tested on iPhone home screen.
 - **EV monthly + annual cost rollup** in daily report (request #3 from 2026-05-23 batch — last unaddressed item). Bundle with SCL plan confirmation so cost isn't computed against two rate models.
 - **Confirm SCL plan** — bill shows "Small General Energy" flat $0.1241/kWh + $0.83/day base. Check whether residential RSC tiered or TOU would be cheaper; align Grafana cost panel once decided.
+- **Dashboard UX backlog** — polling cadence (#5), relax CF Access login (#6, mostly Cloudflare-side), 1m smoothing (#7).
+- **Watch for first aux-heat alarm fire** — Auxiliary/Heat Pump > 0.5 kWh/day triggers red banner + `⚠ Aux heat —` subject prefix. Cold-weather suppression at #3.
 
 ## SPAN API
 
