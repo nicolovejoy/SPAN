@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { queryPower } from "@/lib/influx";
+import { cachedQueryPower } from "@/lib/queryCache";
 import { INTERVAL_ORDER, intervalSeconds, type IntervalKey } from "@/lib/interval";
 
 export const runtime = "nodejs";
@@ -29,7 +29,7 @@ export async function GET(request: Request) {
   const qFromMs = Math.floor(fromMs / intervalMs) * intervalMs;
   const qToMs = Math.floor(toMs / intervalMs) * intervalMs;
 
-  const data = await queryPower({ fromMs: qFromMs, toMs: qToMs, interval: intervalRaw });
+  const data = await cachedQueryPower({ fromMs: qFromMs, toMs: qToMs, interval: intervalRaw });
 
   // Trailing-bucket queries (to ≈ now) change as time passes; cap cache at
   // one bucket. Historical queries (to is well in the past) are immutable.
