@@ -55,18 +55,17 @@ export async function queryPower(opts: {
   // historical rows written before category was tagged still group correctly),
   // then sum across circuits per category at each bucket boundary. The regex
   // runs on ~30×buckets rows instead of every raw point.
-  // createEmpty: true so missing buckets become explicit zero rows. Without
-  // this, a circuit/period with no source samples emits no row, and the
-  // chart shows the window cropped to the data extent rather than the
-  // requested window. fill(0) replaces the resulting nulls.
+  // createEmpty: false — emitting synthetic rows for empty buckets caused
+  // lightweight-charts to throw "Value is null" in its line renderer (it
+  // assumes contiguous numeric data and our synthetic-row pipeline must
+  // have been leaving a column null). We backfill gaps client-side instead.
   const flux = `
 from(bucket: "${BUCKET}")
   |> range(start: ${fluxDate(fromMs)}, stop: ${fluxDate(toMs)})
   |> filter(fn: (r) => ${POWER_FILTER})
   |> filter(fn: (r) => exists r._value)
   |> map(fn: (r) => ({ r with _value: if r._value < 0.0 then -r._value else r._value }))
-  |> aggregateWindow(every: ${fluxEvery(interval)}, fn: mean, createEmpty: true)
-  |> fill(value: 0.0)
+  |> aggregateWindow(every: ${fluxEvery(interval)}, fn: mean, createEmpty: false)
   |> ${categoryFromNameFlux()}
   |> group(columns: ["_time", "category"])
   |> sum()
