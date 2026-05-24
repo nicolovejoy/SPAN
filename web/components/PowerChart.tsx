@@ -29,11 +29,12 @@ const TOTAL_COLOR = "#9ca3af";  // dotted reference, intentionally low-contrast
 
 // Buffered fetch — load extra data on each side of the visible window so
 // small pan/zoom gestures stay within loaded data and don't refetch.
-// Additive (not multiplicative) so wide ranges don't explode: at 1h we
-// preload 4h total, at 90d we preload ~94d. Was previously a 3× multiplier
-// which loaded 630d for a 90d view and crashed the Pi.
-const BUFFER_MS = 2 * 24 * 60 * 60 * 1000; // 2 days
+// Additive (not multiplicative). Beyond 7d the user is in overview mode
+// and won't pinch much, so skip the buffer to keep Influx queries fast.
+const BUFFER_MS = 1 * 24 * 60 * 60 * 1000; // 1 day
+const SKIP_BUFFER_ABOVE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 function bufferFor(spanMs: number): number {
+  if (spanMs > SKIP_BUFFER_ABOVE_MS) return 0;
   return Math.min(BUFFER_MS, spanMs);
 }
 
@@ -114,6 +115,7 @@ export function PowerChart({ state }: { state: DashState }) {
     interval: IntervalKey;
   } | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   // Create chart + series once
   useEffect(() => {
@@ -275,6 +277,7 @@ export function PowerChart({ state }: { state: DashState }) {
     // Slow path — fetch with an additive buffer (capped at BUFFER_MS / span).
     let cancelled = false;
     setLoading(true);
+    setError(null);
     const span = state.toMs - state.fromMs;
     const now = Date.now();
     const pad = bufferFor(span);
@@ -287,7 +290,10 @@ export function PowerChart({ state }: { state: DashState }) {
     url.searchParams.set("interval", state.interval);
 
     fetch(url.toString())
-      .then((r) => r.json())
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json() as Promise<{ data: SeriesPoint[] }>;
+      })
       .then((json: { data: SeriesPoint[] }) => {
         if (cancelled || !chartRef.current) return;
 
@@ -361,6 +367,9 @@ export function PowerChart({ state }: { state: DashState }) {
       .catch((e) => {
         if (cancelled) return;
         console.error("PowerChart fetch failed:", e);
+        setError(
+          "Couldn't load this range — try a narrower window or coarser bucket.",
+        );
         setLoading(false);
         externalUpdate.current = false;
       });
@@ -386,6 +395,13 @@ export function PowerChart({ state }: { state: DashState }) {
           <div className="flex items-center gap-2 rounded-full border border-zinc-300 bg-white/90 px-3 py-1.5 text-xs text-zinc-700 shadow-sm dark:border-zinc-700 dark:bg-zinc-900/90 dark:text-zinc-200">
             <Spinner />
             loading…
+          </div>
+        </div>
+      )}
+      {error && !loading && (
+        <div className="pointer-events-none absolute inset-x-2 top-2 flex justify-center">
+          <div className="rounded-md border border-red-300 bg-red-50/95 px-3 py-1.5 text-xs text-red-800 shadow-sm dark:border-red-900/60 dark:bg-red-950/80 dark:text-red-200">
+            {error}
           </div>
         </div>
       )}

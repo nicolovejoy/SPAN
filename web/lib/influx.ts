@@ -21,6 +21,8 @@ function makeClient() {
   return new InfluxDB({
     url: URL,
     token: TOKEN,
+    // Pi takes a while on wide-range queries (~30d+). Default 10s isn't enough.
+    timeout: 120_000,
     headers:
       CF_ID && CF_SECRET
         ? {
