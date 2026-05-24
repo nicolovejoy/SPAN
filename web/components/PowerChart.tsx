@@ -12,9 +12,10 @@ import {
   type Time,
   type UTCTimestamp,
 } from "lightweight-charts";
-import { autoInterval } from "@/lib/interval";
+import { autoInterval, type IntervalKey } from "@/lib/interval";
 import type { SeriesPoint } from "@/lib/influx";
 import type { DashState } from "@/lib/url-state";
+import { JogPad } from "@/components/JogPad";
 
 const CATEGORY_COLORS: Record<string, string> = {
   HVAC: "#ef4444",
@@ -26,6 +27,10 @@ const CATEGORY_COLORS: Record<string, string> = {
 const CATEGORY_ORDER = ["HVAC", "Car", "Lights", "Appliances", "Else"] as const;
 const SUM_COLOR = "#525252";    // neutral; reads as derived in light + dark
 const TOTAL_COLOR = "#9ca3af";  // dotted reference, intentionally low-contrast
+
+// Fetch this many spans on each side beyond the visible range, so small
+// pan/zoom gestures stay within loaded data and don't refetch.
+const BUFFER_PAD = 1;
 
 type Point = { time: UTCTimestamp; value: number };
 
@@ -70,6 +75,14 @@ export function PowerChart({ state }: { state: DashState }) {
   const gestureTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const externalUpdate = useRef(false);
   const lastPushedRef = useRef<{ from: number; to: number }>({ from: 0, to: 0 });
+  // What's currently in chart memory — used to skip refetch when a pan/zoom
+  // stays within the loaded buffer.
+  const loadedRef = useRef<{
+    fromSec: number;
+    toSec: number;
+    interval: IntervalKey;
+    categoriesKey: string;
+  } | null>(null);
   const [loading, setLoading] = useState(true);
 
   // Create chart + series once
@@ -137,7 +150,6 @@ export function PowerChart({ state }: { state: DashState }) {
 
     const onRangeChange: TimeRangeChangeEventHandler<Time> = (range) => {
       if (!range || externalUpdate.current) return;
-      // Range times are UTCTimestamp (seconds) for our number-time series.
       const fromSec = Number(range.from);
       const toSec = Number(range.to);
       if (!Number.isFinite(fromSec) || !Number.isFinite(toSec)) return;
@@ -146,9 +158,7 @@ export function PowerChart({ state }: { state: DashState }) {
         let from = fromSec * 1000;
         let to = toSec * 1000;
         if (!(from < to)) return;
-        // Don't push URLs into the future — Influx returns no data past now,
-        // and lightweight-charts can hit null-autoscale paths when the
-        // visible range extends past the data extent.
+        // Don't push URLs into the future — Influx returns no data past now.
         const now = Date.now();
         if (to > now) {
           const span = to - from;
@@ -156,8 +166,7 @@ export function PowerChart({ state }: { state: DashState }) {
           from = Math.max(0, now - span);
         }
         // Suppress sub-2% wobble — lightweight-charts emits range-change events
-        // after our own setVisibleRange settle that differ slightly due to
-        // bar-snap; without this we get a feedback loop of URL self-updates.
+        // after our own setVisibleRange settle that differ slightly.
         const span = to - from;
         const last = lastPushedRef.current;
         if (last.from > 0 && last.to > 0) {
@@ -191,18 +200,61 @@ export function PowerChart({ state }: { state: DashState }) {
       sumSeriesRef.current = null;
       totalSeriesRef.current = null;
     };
-    // intentionally empty: we want a stable chart instance; router/params
-    // are read via ref-like closures at fire time via useSearchParams() reactivity
+    // intentionally empty: stable chart instance; router/params read via closures
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Fetch + apply data whenever the relevant state changes
+  // Fetch + apply data, OR fast-path: if the request fits inside loaded data
+  // with the same bucket + filters, just call setVisibleRange. This is what
+  // makes pinch/jog-pad feel instant — only crossing the loaded extent or
+  // changing bucket triggers an actual Influx round-trip.
   useEffect(() => {
+    const wantFromSec = (state.fromMs / 1000) | 0;
+    const wantToSec = (state.toMs / 1000) | 0;
+    const categoriesKey = state.categories.join(",");
+
+    const loaded = loadedRef.current;
+    const fitsBuffer =
+      loaded &&
+      loaded.interval === state.interval &&
+      loaded.categoriesKey === categoriesKey &&
+      wantFromSec >= loaded.fromSec &&
+      wantToSec <= loaded.toSec;
+
+    if (fitsBuffer && chartRef.current) {
+      externalUpdate.current = true;
+      try {
+        chartRef.current.timeScale().setVisibleRange({
+          from: wantFromSec as UTCTimestamp,
+          to: wantToSec as UTCTimestamp,
+        });
+      } catch (e) {
+        console.warn("setVisibleRange (fast path) failed", e);
+      }
+      // Also reapply per-series visibility — state.show may have changed.
+      for (const cat of CATEGORY_ORDER) {
+        const series = catSeriesRef.current.get(cat);
+        if (!series) continue;
+        const visible = state.show.length === 0 || state.show.includes(cat);
+        series.applyOptions({ visible });
+      }
+      sumSeriesRef.current?.applyOptions({ visible: state.show.length >= 2 });
+      lastPushedRef.current = { from: state.fromMs, to: state.toMs };
+      setTimeout(() => { externalUpdate.current = false; }, 150);
+      return;
+    }
+
+    // Slow path — fetch with a buffer extending BUFFER_PAD × span on each side.
     let cancelled = false;
     setLoading(true);
+    const span = state.toMs - state.fromMs;
+    const now = Date.now();
+    const fetchFromMs = Math.max(0, state.fromMs - span * BUFFER_PAD);
+    const fetchToMs = Math.min(now, state.toMs + span * BUFFER_PAD);
+
     const url = new URL("/api/power", window.location.origin);
-    url.searchParams.set("from", String(state.fromMs));
-    url.searchParams.set("to", String(state.toMs));
+    url.searchParams.set("from", String(fetchFromMs));
+    url.searchParams.set("to", String(fetchToMs));
     url.searchParams.set("interval", state.interval);
     url.searchParams.set("groupBy", "category");
     if (state.categories.length) {
@@ -214,8 +266,6 @@ export function PowerChart({ state }: { state: DashState }) {
       .then((json: { data: SeriesPoint[] }) => {
         if (cancelled || !chartRef.current) return;
 
-        // Empty response — leave the chart's prior state alone rather than
-        // wiping all series, which can trigger renderer null-derefs.
         if (!json.data || json.data.length === 0) {
           setLoading(false);
           return;
@@ -258,26 +308,27 @@ export function PowerChart({ state }: { state: DashState }) {
           }
           sumSeriesRef.current?.applyOptions({ visible: showSum });
 
-          // Clamp setVisibleRange to within the data extent — past the
-          // data on either side, the line renderer can null-deref.
           const dataFromSec = sortedTimes[0]!;
           const dataToSec = sortedTimes[sortedTimes.length - 1]!;
-          const wantFromSec = Math.max(dataFromSec, (state.fromMs / 1000) | 0);
-          const wantToSec = Math.min(dataToSec, (state.toMs / 1000) | 0);
-          if (wantFromSec < wantToSec) {
+          const clampFromSec = Math.max(dataFromSec, wantFromSec);
+          const clampToSec = Math.min(dataToSec, wantToSec);
+          if (clampFromSec < clampToSec) {
             chartRef.current.timeScale().setVisibleRange({
-              from: wantFromSec as UTCTimestamp,
-              to: wantToSec as UTCTimestamp,
+              from: clampFromSec as UTCTimestamp,
+              to: clampToSec as UTCTimestamp,
             });
           }
+          loadedRef.current = {
+            fromSec: dataFromSec,
+            toSec: dataToSec,
+            interval: state.interval,
+            categoriesKey,
+          };
           lastPushedRef.current = { from: state.fromMs, to: state.toMs };
         } catch (e) {
           console.error("PowerChart apply failed", e);
         } finally {
           setLoading(false);
-          // Hold for 150ms — gives lightweight-charts enough time to emit
-          // its post-setVisibleRange snap-aligned range-change without us
-          // mistaking it for a real gesture.
           setTimeout(() => {
             externalUpdate.current = false;
           }, 150);
@@ -302,16 +353,19 @@ export function PowerChart({ state }: { state: DashState }) {
   ]);
 
   return (
-    <div className="relative">
-      <div
-        ref={containerRef}
-        className="h-[55vh] min-h-[280px] w-full touch-none sm:h-[420px]"
-      />
-      {loading && (
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-xs text-zinc-500">
-          loading…
-        </div>
-      )}
+    <div className="flex flex-col gap-2">
+      <div className="relative">
+        <div
+          ref={containerRef}
+          className="h-[55vh] min-h-[280px] w-full touch-none sm:h-[420px]"
+        />
+        {loading && (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-xs text-zinc-500">
+            loading…
+          </div>
+        )}
+      </div>
+      <JogPad chartRef={chartRef} />
     </div>
   );
 }
