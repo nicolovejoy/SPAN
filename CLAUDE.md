@@ -53,7 +53,7 @@ routed through the same `phrpi` Cloudflare tunnel, gated by Cloudflare Access
 
 ## Next Steps
 
-- **Manifest CORS** — `/manifest.webmanifest` is gated by CF Access; browser fetches it without credentials and gets redirected to login (no CORS headers) → console error. Fix is a CF Access bypass policy for `/manifest.webmanifest`, `/icon*`, `/apple-icon*`, `/favicon.ico`. Configure in CF dashboard, not code.
+- **Manifest CORS** — *Decided 2026-05-24 to live with it.* `/manifest.webmanifest` is gated by CF Access; browser fetches it without credentials and gets redirected to login → console error. The fix (separate CF Access app with Bypass policy for the four asset paths) is blocked by CF's no-overlapping-destinations rule and would require enumerating every dashboard route. Cosmetic-only — dashboard works; PWA install persists once configured. Revisit only if CF adds path-exclusion or if the noise becomes actively annoying.
 - **EV monthly + annual cost rollup** in daily report (request #3 from 2026-05-23 batch — last unaddressed item). Bundle with SCL plan confirmation so cost isn't computed against two rate models.
 - **Confirm SCL plan** — bill shows "Small General Energy" flat $0.1241/kWh + $0.83/day base. Check whether residential RSC tiered or TOU would be cheaper; align Grafana cost panel once decided.
 - **Dashboard UX backlog** — polling cadence (#5), relax CF Access login (#6 — overlaps with manifest fix above), 1m smoothing (#7). Custom PWA icon (currently a generated "S" wordmark).
