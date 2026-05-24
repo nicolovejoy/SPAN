@@ -53,8 +53,8 @@ routed through the same `phrpi` Cloudflare tunnel, gated by Cloudflare Access
 
 ## Next Steps
 
-- **Verify chart-stability hotfix** — 2026-05-23 patch suppresses sub-2% range-change echoes from lightweight-charts (was causing the page to inch forward + re-render on its own). Confirm next iPad visit that the chart sits still until you actually pan/pinch.
-- **Dashboard UX polish queue** — PWA + full-screen (#4), polling cadence (#5), relax CF Access login (#6), 1m smoothing (#7). All from first-real-use feedback on 2026-05-23; lean UX-first per memory `feedback_dashboard_personal_use`.
+- **iPhone + PWA + full-screen (#4) — next major sprint.** Tier 1: viewport meta + touch-action + responsive layout + safe-area insets. Tier 2: app/manifest.ts + icons + iOS standalone polish. Tier 3: focus-mode toggle. Goal: "tap home-screen icon → full chart, zero chrome." Lean UX-first per memory `feedback_dashboard_personal_use`.
+- **Dashboard UX backlog** — polling cadence (#5), relax CF Access login (#6, mostly Cloudflare-side), 1m smoothing (#7).
 - **Watch for first aux-heat alarm fire** — Auxiliary/Heat Pump > 0.5 kWh/day triggers red banner + `⚠ Aux heat —` subject prefix. Cold-weather suppression at #3.
 - **EV monthly + annual cost rollup** in daily report (request #3 from 2026-05-23 batch — last unaddressed item). Bundle with SCL plan confirmation so cost isn't computed against two rate models.
 - **Confirm SCL plan** — bill shows "Small General Energy" flat $0.1241/kWh + $0.83/day base. Check whether residential RSC tiered or TOU would be cheaper; align Grafana cost panel once decided.
