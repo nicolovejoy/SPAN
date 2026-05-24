@@ -305,7 +305,7 @@ export function PowerChart({ state }: { state: DashState }) {
     <div className="relative">
       <div
         ref={containerRef}
-        className="h-[420px] w-full touch-pan-y"
+        className="h-[55vh] min-h-[280px] w-full touch-none sm:h-[420px]"
       />
       {loading && (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-xs text-zinc-500">
