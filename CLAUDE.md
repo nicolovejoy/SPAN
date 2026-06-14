@@ -56,8 +56,9 @@ routed through the same `phrpi` Cloudflare tunnel, gated by Cloudflare Access
 - **Manifest CORS** — *Decided 2026-05-24 to live with it.* `/manifest.webmanifest` is gated by CF Access; browser fetches it without credentials and gets redirected to login → console error. The fix (separate CF Access app with Bypass policy for the four asset paths) is blocked by CF's no-overlapping-destinations rule and would require enumerating every dashboard route. Cosmetic-only — dashboard works; PWA install persists once configured. Revisit only if CF adds path-exclusion or if the noise becomes actively annoying.
 - **EV monthly + annual cost rollup** in daily report (request #3 from 2026-05-23 batch — last unaddressed item). Bundle with SCL plan confirmation so cost isn't computed against two rate models.
 - **Confirm SCL plan** — bill shows "Small General Energy" flat $0.1241/kWh + $0.83/day base. Check whether residential RSC tiered or TOU would be cheaper; align Grafana cost panel once decided.
-- **Dashboard UX backlog** — polling cadence (#5), relax CF Access login (#6 — overlaps with manifest fix above), 1m smoothing (#7). Custom PWA icon (currently a generated "S" wordmark).
-- **Watch for first aux-heat alarm fire** — Auxiliary/Heat Pump > 0.5 kWh/day triggers red banner + `⚠ Aux heat —` subject prefix. Cold-weather suppression at #3.
+- **In-email settings link** (#8) — clickable link in the daily email to change report cadence + aux-heat threshold without redeploying. Deferred 2026-06-14 (needs persistent store + web page + report-loop rework). Cadence stays daily for now.
+- **Dashboard UX backlog** — web app: time range in PST, a time-nav control beyond swiping, all-axes labels (2026-06-14 feedback); polling cadence (#5), relax CF Access login (#6), 1m smoothing (#7). Custom PWA icon. Optional: de-group HVAC into per-circuit lines in the explorer (low priority).
+- **HVAC cooling watch** — cooling fault found 2026-06-14 (aux resistance firing + compressor short-cycling on a hot day); turning off the HRV apparently fixed it. Confirm with a 3–6h `pi/hvac_probe.py` run during active cooling. Aux-heat alarm: Auxiliary/Heat Pump > 0.5 kWh/day → red banner + `⚠ Aux heat —` subject; cold-weather suppression at #3.
 
 ## SPAN API
 
