@@ -433,13 +433,15 @@ def render_today_chart(series: dict) -> str:
     if series.get("aux"):
         ax.plot(times, series["aux"], color="#c0392b", linewidth=1.4,
                 linestyle="--", label="Aux heat")
-    ax.set_xlabel("Time of day (local)")
+    ax.set_xlabel("Time of day (PST)")
     ax.set_ylabel("kWh per 15 min")
     ax.set_ylim(bottom=0)
+    ax.set_xlim(times[0], times[-1])
     ax.grid(True, alpha=0.3)
     ax.legend(loc="upper left", fontsize=8, ncol=2)
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%-I %p", tz=LOCAL_TZ))
-    ax.xaxis.set_major_locator(mdates.HourLocator(interval=3, tz=LOCAL_TZ))
+    # Pin ticks to fixed clock hours (0,3,6,…) so labels land on midnight, not the view edge.
+    ax.xaxis.set_major_locator(mdates.HourLocator(byhour=range(0, 24, 3), tz=LOCAL_TZ))
     fig.autofmt_xdate()
     fig.tight_layout()
     return _fig_to_b64(fig)
@@ -454,7 +456,7 @@ def render_week_chart(series: dict) -> str:
     ax.plot(times, series["rolling_avg"], color="#e67e22", linewidth=1.4,
             linestyle=":", label="5-week avg (same time)")
     ax.plot(times, series["actual"], color="#3498db", linewidth=1.8, label="This week")
-    ax.set_xlabel("Day (local)")
+    ax.set_xlabel("Day (PST)")
     ax.set_ylabel("kWh per 2 h")
     ax.set_ylim(bottom=0)
     ax.grid(True, alpha=0.3)
