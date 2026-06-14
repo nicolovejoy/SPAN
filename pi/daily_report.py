@@ -20,6 +20,7 @@ import httpx
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 from influxdb_client import InfluxDBClient
 
 from rates import ENERGY_RATE, BASE_CHARGE_DAILY
@@ -140,22 +141,6 @@ def query_circuit_kwh_by_name(query_api, start: str, stop: str) -> dict[str, flo
     return {c["name"]: c["kwh"] for c in query_circuit_energy(query_api, start, stop)}
 
 
-def query_hourly_kwh(query_api, start: str, stop: str) -> list[tuple[datetime, float]]:
-    """Hourly grid kWh (mean power per hour, treated as kWh since window=1h)."""
-    flux = f'''
-from(bucket: "{INFLUXDB_BUCKET}")
-  |> range(start: {start}, stop: {stop})
-  |> filter(fn: (r) => r._measurement == "panel" and r._field == "grid_power_w")
-  |> aggregateWindow(every: 1h, fn: mean, createEmpty: true)
-  |> map(fn: (r) => ({{r with _value: (if exists r._value then r._value else 0.0) / 1000.0}}))
-'''
-    out = []
-    for table in query_api.query(flux, org=INFLUXDB_ORG):
-        for record in table.records:
-            out.append((record.get_time(), record.get_value() or 0.0))
-    return out
-
-
 def query_hourly_circuit_kwh(query_api, start: str, stop: str,
                              name_filter: str) -> list[tuple[datetime, float]]:
     """Hourly kWh summed across circuits matching name_filter regex (case-insensitive)."""
@@ -174,6 +159,49 @@ from(bucket: "{INFLUXDB_BUCKET}")
     for table in query_api.query(flux, org=INFLUXDB_ORG):
         for record in table.records:
             out.append((record.get_time(), record.get_value() or 0.0))
+    return out
+
+
+def query_interval_panel_kwh(query_api, start: str, stop: str,
+                             every: str) -> list[tuple[datetime, float]]:
+    """Grid kWh per `every`-window (integral, exact). Stop-stamped UTC times."""
+    flux = f'''
+from(bucket: "{INFLUXDB_BUCKET}")
+  |> range(start: {start}, stop: {stop})
+  |> filter(fn: (r) => r._measurement == "panel" and r._field == "grid_power_w")
+  |> aggregateWindow(
+       every: {every},
+       fn: (column, tables=<-) => tables |> integral(unit: 1h, column: column),
+       createEmpty: true)
+  |> map(fn: (r) => ({{r with _value: (if exists r._value then r._value else 0.0) / 1000.0}}))
+'''
+    out: list[tuple[datetime, float]] = []
+    for table in query_api.query(flux, org=INFLUXDB_ORG):
+        for record in table.records:
+            out.append((record.get_time(), record.get_value() or 0.0))
+    return out
+
+
+def query_interval_circuit_kwh(query_api, start: str, stop: str, every: str,
+                               name_filter: str | None = None) -> list[tuple[str, datetime, float]]:
+    """Per-circuit kWh per `every`-window (integral). Returns (name, utc_stop, kwh)."""
+    nf = f'  |> filter(fn: (r) => r.name =~ /(?i){name_filter}/)\n' if name_filter else ''
+    flux = f'''
+from(bucket: "{INFLUXDB_BUCKET}")
+  |> range(start: {start}, stop: {stop})
+  |> filter(fn: (r) => r._measurement == "circuit" and r._field == "power_w")
+{nf}  |> map(fn: (r) => ({{r with _value: if r._value < 0.0 then -r._value else r._value}}))
+  |> aggregateWindow(
+       every: {every},
+       fn: (column, tables=<-) => tables |> integral(unit: 1h, column: column),
+       createEmpty: false)
+  |> map(fn: (r) => ({{r with _value: r._value / 1000.0}}))
+'''
+    out: list[tuple[str, datetime, float]] = []
+    for table in query_api.query(flux, org=INFLUXDB_ORG):
+        for record in table.records:
+            out.append((record.values.get("name", "Unknown"),
+                        record.get_time(), record.get_value() or 0.0))
     return out
 
 
@@ -298,94 +326,141 @@ def latest_complete_month(target_date: date) -> tuple[int, int]:
     return add_months(target_date.year, target_date.month, -1)
 
 
-def _localize(series: list[tuple[datetime, float]]) -> list[tuple[datetime, float]]:
-    return [(t.astimezone(LOCAL_TZ), v) for t, v in series]
+# Per-category line colors (keys = categories.json buckets). Total/avg/aux fixed.
+CATEGORY_COLORS = {
+    "Lights": "#f1c40f",
+    "HVAC": "#e74c3c",
+    "Car": "#3498db",
+    "Appliances": "#e67e22",
+    "Else": "#16a085",
+}
+_FALLBACK_CYCLE = ["#8e44ad", "#2980b9", "#27ae60", "#d35896"]
 
 
-def _subtract_series(a: list[tuple[datetime, float]],
-                     b: list[tuple[datetime, float]]) -> list[tuple[datetime, float]]:
-    """a - b, aligned by timestamp; missing b values treated as 0."""
-    bmap = {t: v for t, v in b}
-    return [(t, max(0.0, v - bmap.get(t, 0.0))) for t, v in a]
+def build_today_series(query_api, today_start: str, today_end: str,
+                       week_start: str, aux_alarm: bool, every: str = "15m") -> dict:
+    """Assemble the today line-chart data: total + top-3 category lines +
+    dotted 7-day same-slot total average (+ aux-heat line if alarming).
+
+    All series are aligned on the canonical bucket grid (x = local bucket start)."""
+    every_min = 15
+    every_td = timedelta(minutes=every_min)
+    total = query_interval_panel_kwh(query_api, today_start, today_end, every)
+    if not total:
+        return {"times": []}
+
+    stops = [t for t, _ in total]               # UTC stop stamps, canonical order
+    idx = {t: i for i, t in enumerate(stops)}
+    n = len(stops)
+    times = [t.astimezone(LOCAL_TZ) - every_td for t in stops]   # x = bucket start (local)
+    total_vals = [v for _, v in total]
+
+    # Per-circuit → roll up to category lines; pick top 3 by today's total.
+    cat_series: dict[str, list[float]] = {}
+    cat_total: dict[str, float] = {}
+    for name, t, v in query_interval_circuit_kwh(query_api, today_start, today_end, every):
+        i = idx.get(t)
+        if i is None:
+            continue
+        cat = display_bucket(name)
+        cat_series.setdefault(cat, [0.0] * n)[i] += v
+        cat_total[cat] = cat_total.get(cat, 0.0) + v
+    top3 = sorted(cat_total, key=lambda c: -cat_total[c])[:3]
+    cats = [(c, cat_series[c]) for c in top3]
+
+    # Dotted 7-day average of total, by 15-min slot-of-day.
+    slot_vals: dict[int, list[float]] = {}
+    for t, v in query_interval_panel_kwh(query_api, week_start, today_end, every):
+        st = t.astimezone(LOCAL_TZ) - every_td
+        slot_vals.setdefault(st.hour * 4 + st.minute // 15, []).append(v)
+    slot_avg = {s: sum(xs) / len(xs) for s, xs in slot_vals.items()}
+    avg_total = [slot_avg.get(lt.hour * 4 + lt.minute // 15, 0.0) for lt in times]
+
+    series = {"times": times, "total": total_vals, "cats": cats, "avg_total": avg_total}
+
+    if aux_alarm:
+        aux = [0.0] * n
+        for _, t, v in query_interval_circuit_kwh(query_api, today_start, today_end,
+                                                  every, name_filter="Auxiliary"):
+            i = idx.get(t)
+            if i is not None:
+                aux[i] += v
+        series["aux"] = aux
+    return series
 
 
-def _avg_by_hour(hourly: list[tuple[datetime, float]]) -> dict[int, float]:
-    """{hour-of-day: mean kWh} from a local-time hourly series."""
-    by_h: dict[int, list[float]] = {}
-    for t, v in hourly:
-        by_h.setdefault(t.hour, []).append(v)
-    return {h: sum(vs) / len(vs) for h, vs in by_h.items() if vs}
+def build_week_series(query_api, fivewk_start: str, today_end: str,
+                      target_date: date, every: str = "2h") -> dict:
+    """Last-7-days total at 2h grain vs the 5-week average for the same weekday+slot."""
+    every_td = timedelta(hours=2)
+    panel = query_interval_panel_kwh(query_api, fivewk_start, today_end, every)
+    if not panel:
+        return {"times": []}
+
+    key_vals: dict[tuple[int, int], list[float]] = {}
+    for t, v in panel:
+        st = t.astimezone(LOCAL_TZ) - every_td
+        key_vals.setdefault((st.weekday(), st.hour // 2), []).append(v)
+    key_avg = {k: sum(xs) / len(xs) for k, xs in key_vals.items()}
+
+    cutoff = local_day_utc_range(target_date - timedelta(days=6))[0].astimezone(LOCAL_TZ)
+    times, actual, rolling = [], [], []
+    for t, v in panel:
+        st = t.astimezone(LOCAL_TZ) - every_td
+        if st < cutoff:
+            continue
+        times.append(st)
+        actual.append(v)
+        rolling.append(key_avg.get((st.weekday(), st.hour // 2), 0.0))
+    return {"times": times, "actual": actual, "rolling_avg": rolling}
 
 
-def render_today_chart(today_hourly: list[tuple[datetime, float]],
-                       week_hourly: list[tuple[datetime, float]]) -> str:
-    """Today hourly bars + 7-day same-hour avg line."""
-    today_local = _localize(today_hourly)
-    week_local = _localize(week_hourly)
-    if not today_local:
+def render_today_chart(series: dict) -> str:
+    """Total + dotted 7-day avg + top-3 category lines (+ aux heat) at 15-min grain."""
+    times = series.get("times")
+    if not times:
         return ""
-
-    hours = sorted({t.hour for t, _ in today_local})
-    val_by_hour = {t.hour: v for t, v in today_local}
-    values = [val_by_hour.get(h, 0.0) for h in hours]
-
-    avg_by_hour = _avg_by_hour(week_local)
-    avg_line = [avg_by_hour.get(h, 0.0) for h in hours]
-
-    fig, ax = plt.subplots(figsize=(7, 3), dpi=120)
-    ax.bar(hours, values, width=0.8, color="#3498db", label="Today")
-    ax.plot(hours, avg_line, color="#e67e22", linewidth=2, linestyle="--",
-            label="7-day avg (same hour)")
-    ax.set_xlabel("Hour of day (local)")
-    ax.set_ylabel("kWh")
-    ax.set_xticks(range(0, 24, 3))
+    fig, ax = plt.subplots(figsize=(7, 3.4), dpi=120)
+    if series.get("avg_total"):
+        ax.plot(times, series["avg_total"], color="#7f8c8d", linewidth=1.4,
+                linestyle=":", label="Total · 7-day avg")
+    ax.plot(times, series["total"], color="#2c3e50", linewidth=2.2, label="Total", zorder=5)
+    fb = iter(_FALLBACK_CYCLE)
+    for name, vals in series.get("cats", []):
+        ax.plot(times, vals, linewidth=1.3,
+                color=CATEGORY_COLORS.get(name, next(fb, "#888")), label=name)
+    if series.get("aux"):
+        ax.plot(times, series["aux"], color="#c0392b", linewidth=1.4,
+                linestyle="--", label="Aux heat")
+    ax.set_xlabel("Time of day (local)")
+    ax.set_ylabel("kWh per 15 min")
+    ax.set_ylim(bottom=0)
     ax.grid(True, alpha=0.3)
-    ax.legend(loc="upper left", fontsize=9)
+    ax.legend(loc="upper left", fontsize=8, ncol=2)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%-I %p", tz=LOCAL_TZ))
+    ax.xaxis.set_major_locator(mdates.HourLocator(interval=3, tz=LOCAL_TZ))
+    fig.autofmt_xdate()
     fig.tight_layout()
     return _fig_to_b64(fig)
 
 
-def render_week_daily_chart(daily_excl: list[tuple[date, float]],
-                            daily_ev: dict[date, float]) -> str:
-    """Grouped daily bars (stacked excl + EV): last 7 days actual vs 5-week-same-weekday avg.
-
-    `daily_excl` is the full lookback window (e.g. 35 days), one entry per local day.
-    `daily_ev` covers the same window, keyed by local date.
-    """
-    if not daily_excl:
+def render_week_chart(series: dict) -> str:
+    """This week's total vs 5-week same-time average, 2-hour grain."""
+    times = series.get("times")
+    if not times:
         return ""
-
-    # 5-week avg per weekday from full history — excl and EV separately
-    by_wd_excl: dict[int, list[float]] = {}
-    by_wd_ev: dict[int, list[float]] = {}
-    for d, v in daily_excl:
-        by_wd_excl.setdefault(d.weekday(), []).append(v)
-        by_wd_ev.setdefault(d.weekday(), []).append(daily_ev.get(d, 0.0))
-    wd_avg_excl = {wd: sum(vs) / len(vs) for wd, vs in by_wd_excl.items() if vs}
-    wd_avg_ev = {wd: sum(vs) / len(vs) for wd, vs in by_wd_ev.items() if vs}
-
-    last7 = daily_excl[-7:]
-    days = [d for d, _ in last7]
-    actual_excl = [v for _, v in last7]
-    actual_ev = [daily_ev.get(d, 0.0) for d in days]
-    avg_excl = [wd_avg_excl.get(d.weekday(), 0.0) for d in days]
-    avg_ev = [wd_avg_ev.get(d.weekday(), 0.0) for d in days]
-    labels = [d.strftime("%a %-m/%-d") for d in days]
-
-    x = list(range(len(days)))
-    width = 0.4
-    left = [i - width / 2 for i in x]
-    right = [i + width / 2 for i in x]
-    fig, ax = plt.subplots(figsize=(7, 3.2), dpi=120)
-    ax.bar(left, actual_excl, width, color="#3498db", label="Day excl. car")
-    ax.bar(left, actual_ev, width, bottom=actual_excl, color="#9b59b6", label="Day EV")
-    ax.bar(right, avg_excl, width, color="#e67e22", label="5-week avg excl.")
-    ax.bar(right, avg_ev, width, bottom=avg_excl, color="#f0b27a", label="5-week avg EV")
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, fontsize=9)
-    ax.set_ylabel("kWh")
-    ax.grid(True, alpha=0.3, axis="y")
-    ax.legend(loc="upper left", fontsize=8, ncol=2)
+    fig, ax = plt.subplots(figsize=(7, 3.4), dpi=120)
+    ax.plot(times, series["rolling_avg"], color="#e67e22", linewidth=1.4,
+            linestyle=":", label="5-week avg (same time)")
+    ax.plot(times, series["actual"], color="#3498db", linewidth=1.8, label="This week")
+    ax.set_xlabel("Day (local)")
+    ax.set_ylabel("kWh per 2 h")
+    ax.set_ylim(bottom=0)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="upper left", fontsize=8)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%a %-m/%-d", tz=LOCAL_TZ))
+    ax.xaxis.set_major_locator(mdates.DayLocator(tz=LOCAL_TZ))
+    fig.autofmt_xdate()
     fig.tight_layout()
     return _fig_to_b64(fig)
 
@@ -516,8 +591,8 @@ class ReportContext:
     prev_day_kwh: float
     daily_grid: dict[date, float]  # 5wk window
     daily_ev: dict[date, float]    # 5wk window
-    today_hourly_excl: list[tuple[datetime, float]]
-    week_hourly_excl: list[tuple[datetime, float]]
+    today_series: dict             # today line chart (total + top-3 cats + 7d avg + aux)
+    week_series: dict              # week line chart (this week vs 5-week avg)
     circuits_top10: list[dict]
     circuits_totals: dict
     baths_today: list[dict]
@@ -590,8 +665,7 @@ def section_aux_alarm(ctx: ReportContext) -> str:
         'padding:12px 16px;margin:0 0 16px;border-radius:4px;color:#991b1b;">'
         f'<strong>&#9888; Auxiliary heat used</strong> &mdash; '
         f'{ctx.aux_heat_kwh:.2f} kWh (~{approx_min:.0f} min, ${cost:.2f}). '
-        'This is the Steibel Eltron electric resistance backup; '
-        'normal in cold snaps, concerning otherwise.'
+        'See the aux-heat line on the chart below.'
         '</div>'
     )
 
@@ -612,18 +686,19 @@ def section_summary(ctx: ReportContext) -> str:
 
 
 def section_today_chart(ctx: ReportContext) -> str:
-    b64 = render_today_chart(ctx.today_hourly_excl, ctx.week_hourly_excl)
+    b64 = render_today_chart(ctx.today_series)
     if not b64:
         return ""
-    return f'<h3>Today &mdash; hourly (excl. car)</h3>\n{_chart_img(b64, "Today hourly")}'
+    return (f'<h3>Today &mdash; 15-min (total &amp; top categories)</h3>\n'
+            f'{_chart_img(b64, "Today by 15 min")}')
 
 
 def section_week_chart(ctx: ReportContext) -> str:
-    b64 = render_week_daily_chart(ctx.daily_excl, ctx.daily_ev)
+    b64 = render_week_chart(ctx.week_series)
     if not b64:
         return ""
-    return (f'<h3>Last 7 days vs 5-week avg &mdash; daily (stacked: excl. car + EV)</h3>\n'
-            f'{_chart_img(b64, "Week daily")}')
+    return (f'<h3>This week vs 5-week average &mdash; 2-hour grain</h3>\n'
+            f'{_chart_img(b64, "This week vs average")}')
 
 
 def section_cost_breakdown(ctx: ReportContext) -> str:
@@ -869,15 +944,9 @@ def build_context(query_api, target_date: date, force_monthly: bool) -> ReportCo
     pstart, pend = local_day_utc_range(target_date - timedelta(days=1))
     prev_day_kwh = query_total_kwh(query_api, flux_ts(pstart), flux_ts(pend))
 
-    # 5-week daily series (drives week chart + 30d avg)
+    # 5-week daily series (drives 30d avg)
     daily_grid = dict(query_daily_panel_kwh(query_api, fivewk_start, today_end))
     daily_ev = dict(query_daily_circuit_kwh(query_api, fivewk_start, today_end, ev_pat))
-
-    # Hourly excl-EV series for today chart's bars + overlay
-    today_hourly_total = query_hourly_kwh(query_api, today_start, today_end)
-    week_hourly_total = query_hourly_kwh(query_api, week_start, today_end)
-    today_hourly_excl = _subtract_series(today_hourly_total, today_ev_series)
-    week_hourly_excl = _subtract_series(week_hourly_total, week_ev_series)
 
     # Circuit breakdown
     circuits_today = query_circuit_energy(query_api, today_start, today_end)
@@ -887,6 +956,12 @@ def build_context(query_api, target_date: date, force_monthly: bool) -> ReportCo
         c["kwh"] for c in circuits_today
         if AUX_CIRCUIT_PATTERN.search(c["name"])
     )
+
+    # Line-chart series (today 15-min + this-week-vs-avg 2-hour)
+    today_series = build_today_series(
+        query_api, today_start, today_end, week_start,
+        aux_alarm=aux_heat_kwh >= AUX_HEAT_ALARM_KWH)
+    week_series = build_week_series(query_api, fivewk_start, today_end, target_date)
 
     # Events
     baths_today = query_events(query_api, "bath_event", today_start, today_end)
@@ -902,8 +977,8 @@ def build_context(query_api, target_date: date, force_monthly: bool) -> ReportCo
         prev_day_kwh=prev_day_kwh,
         daily_grid=daily_grid,
         daily_ev=daily_ev,
-        today_hourly_excl=today_hourly_excl,
-        week_hourly_excl=week_hourly_excl,
+        today_series=today_series,
+        week_series=week_series,
         circuits_top10=top10,
         circuits_totals=totals,
         baths_today=baths_today,
