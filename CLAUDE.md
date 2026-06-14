@@ -58,7 +58,7 @@ routed through the same `phrpi` Cloudflare tunnel, gated by Cloudflare Access
 - **Confirm SCL plan** — bill shows "Small General Energy" flat $0.1241/kWh + $0.83/day base. Check whether residential RSC tiered or TOU would be cheaper; align Grafana cost panel once decided.
 - **In-email settings link** (#8) — clickable link in the daily email to change report cadence + aux-heat threshold without redeploying. Deferred 2026-06-14 (needs persistent store + web page + report-loop rework). Cadence stays daily for now.
 - **Dashboard UX backlog** — web app: time range in PST, a time-nav control beyond swiping, all-axes labels (2026-06-14 feedback); polling cadence (#5), relax CF Access login (#6), 1m smoothing (#7). Custom PWA icon. Optional: de-group HVAC into per-circuit lines in the explorer (low priority).
-- **HVAC cooling watch** — cooling fault found 2026-06-14 (aux resistance firing + compressor short-cycling on a hot day); turning off the HRV apparently fixed it. Confirm with a 3–6h `pi/hvac_probe.py` run during active cooling. Aux-heat alarm: Auxiliary/Heat Pump > 0.5 kWh/day → red banner + `⚠ Aux heat —` subject; cold-weather suppression at #3.
+- **HVAC cooling watch** — cooling fault found 2026-06-14 (aux resistance firing + compressor short-cycling on a hot day); turning off the HRV apparently fixed it. Confirm with a 3–6h `pi/hvac_probe.py` run during active cooling. Aux-heat alarm: Auxiliary/Heat Pump cost ≥ `$AUX_HEAT_ALARM_USD` (default $0.50/day, ≈4 kWh) → red banner + `⚠ Aux heat —` subject. Cost-based since that circuit also draws during cooling. Cold-weather suppression at #3.
 
 ## SPAN API
 

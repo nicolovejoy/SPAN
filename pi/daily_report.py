@@ -42,9 +42,10 @@ REPORT_HOUR = int(os.getenv("REPORT_HOUR", "7"))
 LOCAL_TZ_NAME = os.getenv("TZ", "America/Los_Angeles")
 LOCAL_TZ = ZoneInfo(LOCAL_TZ_NAME)
 
-# Banner + subject-prefix when the Auxiliary/Heat Pump circuit (electric
-# resistance backup on the Steibel Eltron) draws above this for the report day.
-AUX_HEAT_ALARM_KWH = float(os.getenv("AUX_HEAT_ALARM_KWH", "0.5"))
+# Banner + subject-prefix when the Auxiliary/Heat Pump circuit's draw for the
+# report day costs at least this much. Cost (not kWh) because that circuit also
+# draws during cooling — small amounts are normal noise; only flag real spend.
+AUX_HEAT_ALARM_USD = float(os.getenv("AUX_HEAT_ALARM_USD", "0.50"))
 AUX_CIRCUIT_PATTERN = re.compile(r"Auxiliary", re.IGNORECASE)
 
 
@@ -630,7 +631,7 @@ class ReportContext:
 
     @property
     def aux_alarm(self) -> bool:
-        return self.aux_heat_kwh >= AUX_HEAT_ALARM_KWH
+        return self.aux_heat_kwh * ENERGY_RATE >= AUX_HEAT_ALARM_USD
 
 
 def _chart_img(b64: str, alt: str) -> str:
@@ -960,7 +961,7 @@ def build_context(query_api, target_date: date, force_monthly: bool) -> ReportCo
     # Line-chart series (today 15-min + this-week-vs-avg 2-hour)
     today_series = build_today_series(
         query_api, today_start, today_end, week_start,
-        aux_alarm=aux_heat_kwh >= AUX_HEAT_ALARM_KWH)
+        aux_alarm=aux_heat_kwh * ENERGY_RATE >= AUX_HEAT_ALARM_USD)
     week_series = build_week_series(query_api, fivewk_start, today_end, target_date)
 
     # Events
