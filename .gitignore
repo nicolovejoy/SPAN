@@ -5,3 +5,6 @@ __pycache__/
 pi/collector.log
 pi/bath_detector.log
 pi/cloudflared/
+
+# Playwright MCP browser-automation scratch (console logs + page snapshots)
+.playwright-mcp/
