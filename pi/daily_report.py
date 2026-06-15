@@ -48,6 +48,17 @@ LOCAL_TZ = ZoneInfo(LOCAL_TZ_NAME)
 AUX_HEAT_ALARM_USD = float(os.getenv("AUX_HEAT_ALARM_USD", "0.50"))
 AUX_CIRCUIT_PATTERN = re.compile(r"Auxiliary", re.IGNORECASE)
 
+# EV charging is a single dedicated circuit. Pin EV accounting to its exact name
+# (same CHARGE_CIRCUIT env charge_detector uses) instead of the fuzzy Car regex
+# — exact, one source of truth, no false positives.
+EV_CIRCUIT = os.getenv("CHARGE_CIRCUIT", "Outdoor / Tesla Car Charger")
+
+
+def ev_name_filter() -> str:
+    """Flux `=~` regex matching the EV charger circuit name exactly: anchored,
+    escaped, with `/` escaped for the surrounding /.../ literal."""
+    return "^" + re.escape(EV_CIRCUIT).replace("/", r"\/") + "$"
+
 
 def flux_ts(dt: datetime) -> str:
     """Format datetime as Flux-compatible UTC timestamp."""
@@ -128,15 +139,6 @@ def _load_bucket_rules() -> tuple[list[tuple[str, re.Pattern]], str]:
     return _BUCKET_RULES, _BUCKET_DEFAULT
 
 
-def car_circuit_pattern() -> re.Pattern:
-    """Compile the Car-category regex from categories.json (cached)."""
-    rules, _ = _load_bucket_rules()
-    for category, pat in rules:
-        if category == "Car":
-            return pat
-    return re.compile(r"Tesla|Car Charger|\bEV\b", re.IGNORECASE)
-
-
 def query_circuit_kwh_by_name(query_api, start: str, stop: str) -> dict[str, float]:
     """{circuit_name: kWh} over [start, stop). Reuses query_circuit_energy shape."""
     return {c["name"]: c["kwh"] for c in query_circuit_energy(query_api, start, stop)}
@@ -203,6 +205,31 @@ from(bucket: "{INFLUXDB_BUCKET}")
         for record in table.records:
             out.append((record.values.get("name", "Unknown"),
                         record.get_time(), record.get_value() or 0.0))
+    return out
+
+
+def query_interval_circuit_kwh_summed(query_api, start: str, stop: str, every: str,
+                                      name_filter: str) -> list[tuple[datetime, float]]:
+    """Per-`every`-window kWh summed across circuits matching name_filter.
+    One (utc_stop, kwh) per window; same bucketing as query_interval_panel_kwh."""
+    flux = f'''
+from(bucket: "{INFLUXDB_BUCKET}")
+  |> range(start: {start}, stop: {stop})
+  |> filter(fn: (r) => r._measurement == "circuit" and r._field == "power_w")
+  |> filter(fn: (r) => r.name =~ /(?i){name_filter}/)
+  |> map(fn: (r) => ({{r with _value: if r._value < 0.0 then -r._value else r._value}}))
+  |> aggregateWindow(
+       every: {every},
+       fn: (column, tables=<-) => tables |> integral(unit: 1h, column: column),
+       createEmpty: false)
+  |> map(fn: (r) => ({{r with _value: r._value / 1000.0}}))
+  |> group(columns: ["_time"])
+  |> sum()
+'''
+    out: list[tuple[datetime, float]] = []
+    for table in query_api.query(flux, org=INFLUXDB_ORG):
+        for record in table.records:
+            out.append((record.get_time(), record.get_value() or 0.0))
     return out
 
 
@@ -390,30 +417,56 @@ def build_today_series(query_api, today_start: str, today_end: str,
     return series
 
 
-def build_week_series(query_api, fivewk_start: str, today_end: str,
+def build_week_series(query_api, start: str, today_end: str,
                       target_date: date, every: str = "2h") -> dict:
-    """Last-7-days total at 2h grain vs the 5-week average for the same weekday+slot."""
+    """Last-7-days load (EV-excluded) at 2h grain vs same-weekday+slot averages
+    over the trailing 5- and 12-week windows. EV (the dedicated charger circuit)
+    is subtracted per bucket. Also returns weekly-average EV (5/12-week, complete
+    weeks only) for the EV callout. `start` must cover ≥12 complete prior weeks."""
     every_td = timedelta(hours=2)
-    panel = query_interval_panel_kwh(query_api, fivewk_start, today_end, every)
+    panel = query_interval_panel_kwh(query_api, start, today_end, every)
     if not panel:
         return {"times": []}
+    ev_bkt = dict(query_interval_circuit_kwh_summed(
+        query_api, start, today_end, every, ev_name_filter()))
+    excl = [(t, max(0.0, v - ev_bkt.get(t, 0.0))) for t, v in panel]
 
-    key_vals: dict[tuple[int, int], list[float]] = {}
-    for t, v in panel:
-        st = t.astimezone(LOCAL_TZ) - every_td
-        key_vals.setdefault((st.weekday(), st.hour // 2), []).append(v)
-    key_avg = {k: sum(xs) / len(xs) for k, xs in key_vals.items()}
+    def slot_avg(since_day: date) -> dict[tuple[int, int], float]:
+        cut = local_day_utc_range(since_day)[0].astimezone(LOCAL_TZ)
+        acc: dict[tuple[int, int], list[float]] = {}
+        for t, v in excl:
+            st = t.astimezone(LOCAL_TZ) - every_td
+            if st >= cut:
+                acc.setdefault((st.weekday(), st.hour // 2), []).append(v)
+        return {k: sum(xs) / len(xs) for k, xs in acc.items()}
+
+    avg5 = slot_avg(target_date - timedelta(days=34))
+    avg12 = slot_avg(target_date - timedelta(days=83))
 
     cutoff = local_day_utc_range(target_date - timedelta(days=6))[0].astimezone(LOCAL_TZ)
-    times, actual, rolling = [], [], []
-    for t, v in panel:
+    times, actual, roll5, roll12 = [], [], [], []
+    for t, v in excl:
         st = t.astimezone(LOCAL_TZ) - every_td
         if st < cutoff:
             continue
+        key = (st.weekday(), st.hour // 2)
         times.append(st)
         actual.append(v)
-        rolling.append(key_avg.get((st.weekday(), st.hour // 2), 0.0))
-    return {"times": times, "actual": actual, "rolling_avg": rolling}
+        roll5.append(avg5.get(key, 0.0))
+        roll12.append(avg12.get(key, 0.0))
+
+    # Weekly-average EV over complete prior weeks (excludes the in-progress week).
+    daily_ev = dict(query_daily_circuit_kwh(query_api, start, today_end, ev_name_filter()))
+
+    def ev_week_avg(weeks: int) -> float:
+        hi = target_date - timedelta(days=7)            # last day before this week
+        lo = target_date - timedelta(days=6 + 7 * weeks)  # oldest counted day
+        return sum(v for d, v in daily_ev.items() if lo <= d <= hi) / weeks
+
+    return {
+        "times": times, "actual": actual, "avg5": roll5, "avg12": roll12,
+        "ev_avg5": ev_week_avg(5), "ev_avg12": ev_week_avg(12),
+    }
 
 
 def render_today_chart(series: dict) -> str:
@@ -447,15 +500,18 @@ def render_today_chart(series: dict) -> str:
     return _fig_to_b64(fig)
 
 
-def render_week_chart(series: dict) -> str:
-    """This week's total vs 5-week same-time average, 2-hour grain."""
+def render_week_compare(series: dict, avg_key: str, avg_label: str,
+                        avg_color: str, avg_style: str) -> str:
+    """This week's load (excl. car) vs one same-time average, 2-hour grain."""
     times = series.get("times")
-    if not times:
+    avg = series.get(avg_key)
+    if not times or not avg:
         return ""
     fig, ax = plt.subplots(figsize=(7, 3.4), dpi=120)
-    ax.plot(times, series["rolling_avg"], color="#e67e22", linewidth=1.4,
-            linestyle=":", label="5-week avg (same time)")
-    ax.plot(times, series["actual"], color="#3498db", linewidth=1.8, label="This week")
+    ax.plot(times, avg, color=avg_color, linewidth=1.4,
+            linestyle=avg_style, label=avg_label)
+    ax.plot(times, series["actual"], color="#3498db", linewidth=1.8,
+            label="This week (excl. car)")
     ax.set_xlabel("Day (PST)")
     ax.set_ylabel("kWh per 2 h")
     ax.set_ylim(bottom=0)
@@ -696,12 +752,42 @@ def section_today_chart(ctx: ReportContext) -> str:
             f'{_chart_img(b64, "Today by 15 min")}')
 
 
-def section_week_chart(ctx: ReportContext) -> str:
-    b64 = render_week_chart(ctx.week_series)
-    if not b64:
+def week_ev_line(ctx: ReportContext) -> str:
+    """EV charging this week vs the 5- and 12-week weekly averages."""
+    s = ctx.week_series
+    cur, a5, a12 = ctx.week.ev, s.get("ev_avg5", 0.0), s.get("ev_avg12", 0.0)
+    if cur == 0 and a5 == 0 and a12 == 0:
         return ""
-    return (f'<h3>This week vs 5-week average &mdash; 2-hour grain</h3>\n'
-            f'{_chart_img(b64, "This week vs average")}')
+
+    def vs(avg: float) -> str:
+        if avg <= 0:
+            return ""
+        pct = (cur - avg) / avg * 100
+        arrow, color = ("&uarr;", "#e74c3c") if pct >= 0 else ("&darr;", "#27ae60")
+        return (f' <span style="color:{color};font-size:12px;font-weight:500;">'
+                f'{arrow}{abs(pct):.0f}%</span>')
+
+    return (
+        f'<p style="font-size:13px;color:#444;margin:8px 0 16px;">'
+        f'EV charging: <strong>{cur:.1f} kWh</strong> this week vs '
+        f'<strong>{a5:.1f} kWh</strong> (5-wk avg){vs(a5)} &middot; '
+        f'<strong>{a12:.1f} kWh</strong> (12-wk avg){vs(a12)}</p>'
+    )
+
+
+def section_week_chart(ctx: ReportContext) -> str:
+    s = ctx.week_series
+    b5 = render_week_compare(s, "avg5", "5-week avg (same time)", "#e67e22", ":")
+    b12 = render_week_compare(s, "avg12", "12-week avg (same time)", "#16a085", "--")
+    if not b5 and not b12:
+        return ""
+    parts = ['<h3>This week vs average (excl. car) &mdash; 2-hour grain</h3>']
+    if b5:
+        parts.append(_chart_img(b5, "This week vs 5-week average"))
+    if b12:
+        parts.append(_chart_img(b12, "This week vs 12-week average"))
+    parts.append(week_ev_line(ctx))
+    return "\n".join(p for p in parts if p)
 
 
 def section_cost_breakdown(ctx: ReportContext) -> str:
@@ -857,7 +943,7 @@ def build_monthly_section(query_api, target_date: date) -> str:
     start_str = flux_ts(start_dt.astimezone(timezone.utc))
     stop_str = flux_ts(end_dt.astimezone(timezone.utc))
 
-    ev_pat = car_circuit_pattern().pattern
+    ev_pat = ev_name_filter()
     grid = dict(query_monthly_panel_kwh(query_api, start_str, stop_str))
     ev = dict(query_monthly_circuit_kwh(query_api, start_str, stop_str, ev_pat))
 
@@ -926,8 +1012,10 @@ def build_context(query_api, target_date: date, force_monthly: bool) -> ReportCo
     today_end = flux_ts(utc_end)
     week_start = flux_ts(local_day_utc_range(target_date - timedelta(days=6))[0])
     fivewk_start = flux_ts(local_day_utc_range(target_date - timedelta(days=34))[0])
+    # Week comparison averages over 12 weeks; need ≥12 complete prior weeks of history.
+    weekcmp_start = flux_ts(local_day_utc_range(target_date - timedelta(days=90))[0])
 
-    ev_pat = car_circuit_pattern().pattern
+    ev_pat = ev_name_filter()
 
     # Today + week Periods (grid total + EV total)
     today_ev_series = query_hourly_circuit_kwh(query_api, today_start, today_end, ev_pat)
@@ -964,7 +1052,7 @@ def build_context(query_api, target_date: date, force_monthly: bool) -> ReportCo
     today_series = build_today_series(
         query_api, today_start, today_end, week_start,
         aux_alarm=aux_heat_kwh * ENERGY_RATE >= AUX_HEAT_ALARM_USD)
-    week_series = build_week_series(query_api, fivewk_start, today_end, target_date)
+    week_series = build_week_series(query_api, weekcmp_start, today_end, target_date)
 
     # Events
     baths_today = query_events(query_api, "bath_event", today_start, today_end)
