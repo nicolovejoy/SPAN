@@ -55,9 +55,12 @@ EV_CIRCUIT = os.getenv("CHARGE_CIRCUIT", "Outdoor / Tesla Car Charger")
 
 
 def ev_name_filter() -> str:
-    """Flux `=~` regex matching the EV charger circuit name exactly: anchored,
-    escaped, with `/` escaped for the surrounding /.../ literal."""
-    return "^" + re.escape(EV_CIRCUIT).replace("/", r"\/") + "$"
+    """Flux `=~` regex matching the EV charger circuit name exactly. Anchored,
+    with regex metachars + `/` (the /.../ literal delimiter) escaped. Spaces stay
+    literal — RE2 rejects escaped spaces, so don't use re.escape here."""
+    specials = set(r".^$*+?()[]{}|\/")
+    escaped = "".join("\\" + c if c in specials else c for c in EV_CIRCUIT)
+    return "^" + escaped + "$"
 
 
 def flux_ts(dt: datetime) -> str:
