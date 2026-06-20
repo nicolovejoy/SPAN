@@ -6,6 +6,7 @@ import {
   createChart,
   LineSeries,
   LineStyle,
+  TickMarkType,
   type IChartApi,
   type ISeriesApi,
   type TimeRangeChangeEventHandler,
@@ -94,6 +95,35 @@ function toChartData(entries: SeriesEntry[]): SeriesEntry[] {
       ? { time: toDisplay(Number(e.time)), value: e.value }
       : { time: toDisplay(Number(e.time)) },
   );
+}
+
+// Axis formatting. Chart times are already Pacific-as-fake-UTC (see toDisplay),
+// so read them with getUTC* — the wall-clock is baked into the number.
+const WD = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MO = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const hhmm = (d: Date) => `${d.getUTCHours()}:${String(d.getUTCMinutes()).padStart(2, "0")}`;
+
+// Day boundaries (and month/year starts) render as a dated label so a window
+// spanning midnight gets a clear demarcation under the hours; intra-day ticks
+// stay HH:mm.
+function tickFmt(time: Time, type: TickMarkType): string {
+  const d = new Date(Number(time) * 1000);
+  switch (type) {
+    case TickMarkType.Year:
+      return String(d.getUTCFullYear());
+    case TickMarkType.Month:
+      return `${MO[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+    case TickMarkType.DayOfMonth:
+      return `${WD[d.getUTCDay()]} ${MO[d.getUTCMonth()]} ${d.getUTCDate()}`;
+    default:
+      return hhmm(d);
+  }
+}
+
+// Crosshair tooltip — full date + time, Pacific.
+function crosshairFmt(time: Time): string {
+  const d = new Date(Number(time) * 1000);
+  return `${WD[d.getUTCDay()]} ${MO[d.getUTCMonth()]} ${d.getUTCDate()}, ${hhmm(d)}`;
 }
 
 // Flux `aggregateWindow` aligns buckets to epoch, so at wide ranges with
@@ -207,11 +237,13 @@ export function PowerChart({ state }: { state: DashState }) {
         vertLines: { color: "rgba(120,120,120,0.1)" },
         horzLines: { color: "rgba(120,120,120,0.1)" },
       },
+      localization: { timeFormatter: crosshairFmt },
       rightPriceScale: { borderVisible: false },
       timeScale: {
         borderVisible: false,
         timeVisible: true,
         secondsVisible: false,
+        tickMarkFormatter: tickFmt,
       },
       handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
       handleScroll: {
@@ -482,6 +514,9 @@ export function PowerChart({ state }: { state: DashState }) {
         ref={containerRef}
         className="h-[55vh] min-h-[280px] w-full touch-none sm:h-[420px]"
       />
+      <div className="pointer-events-none absolute right-1 top-0 text-[10px] font-medium uppercase tracking-wide text-zinc-400 dark:text-zinc-500">
+        kW
+      </div>
       {loading && (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-zinc-50/60 backdrop-blur-[1px] dark:bg-zinc-950/60">
           <div className="flex items-center gap-2 rounded-full border border-zinc-300 bg-white/90 px-3 py-1.5 text-xs text-zinc-700 shadow-sm dark:border-zinc-700 dark:bg-zinc-900/90 dark:text-zinc-200">
