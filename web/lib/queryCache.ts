@@ -1,5 +1,7 @@
-import { queryPower, type SeriesPoint } from "./influx";
+import { queryPower, queryEnergyByCategory, type SeriesPoint } from "./influx";
 import { intervalSeconds, type IntervalKey } from "./interval";
+
+export type EnergyRow = { category: string; kwh: number };
 
 // In-memory LRU keyed by (interval, quantized from, quantized to). Lives in
 // the Node server module scope — survives across requests on the Pi (where
@@ -58,5 +60,53 @@ export async function cachedQueryPower(opts: {
     });
 
   inflight.set(key, promise);
+  return promise;
+}
+
+// Energy-by-category cache. Keyed by (from, to) only — energy is the integral
+// over the whole window, independent of the display bucket, so switching the
+// chart's interval must not invalidate the table.
+const energyCache = new Map<string, { data: EnergyRow[]; expiresAt: number }>();
+const energyInflight = new Map<string, Promise<EnergyRow[]>>();
+
+export async function cachedQueryEnergyByCategory(opts: {
+  fromMs: number;
+  toMs: number;
+}): Promise<EnergyRow[]> {
+  const key = `${opts.fromMs}|${opts.toMs}`;
+  const now = Date.now();
+
+  const hit = energyCache.get(key);
+  if (hit && hit.expiresAt > now) {
+    energyCache.delete(key);
+    energyCache.set(key, hit);
+    return hit.data;
+  }
+
+  const pending = energyInflight.get(key);
+  if (pending) return pending;
+
+  // Trailing window (ends ~now) keeps changing as 30s data lands → short TTL;
+  // historical is immutable → 24h.
+  const isTrailing = now - opts.toMs < 2 * 60_000;
+  const ttlMs = isTrailing ? 60_000 : 24 * 60 * 60 * 1000;
+
+  const promise = queryEnergyByCategory(opts)
+    .then((data) => {
+      energyCache.set(key, { data, expiresAt: Date.now() + ttlMs });
+      while (energyCache.size > MAX_ENTRIES) {
+        const oldest = energyCache.keys().next().value;
+        if (oldest === undefined) break;
+        energyCache.delete(oldest);
+      }
+      energyInflight.delete(key);
+      return data;
+    })
+    .catch((e) => {
+      energyInflight.delete(key);
+      throw e;
+    });
+
+  energyInflight.set(key, promise);
   return promise;
 }

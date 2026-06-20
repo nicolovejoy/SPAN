@@ -1,7 +1,6 @@
 "use client";
 
-import { useUpdateParams } from "@/components/hooks/useUpdateParams";
-import { closestPreset } from "@/lib/interval";
+import { closestPreset, type RangePreset } from "@/lib/interval";
 
 const RANGE_OPTIONS = [
   { key: "1h", label: "1h" },
@@ -13,24 +12,19 @@ const RANGE_OPTIONS = [
   { key: "1y", label: "1y" },
 ] as const;
 
-type RangeKey = (typeof RANGE_OPTIONS)[number]["key"];
-
 export function TimeNav({
   range,
   fromMs,
   toMs,
+  onPreset,
 }: {
-  range: string | null;
+  range: RangePreset | null;
   fromMs: number;
   toMs: number;
+  onPreset: (preset: RangePreset) => void;
 }) {
-  const { update, pending } = useUpdateParams();
-
-  const setRange = (rangeKey: RangeKey) =>
-    update({ range: rangeKey, from: null, to: null, interval: null });
-
-  // When the URL is panned/zoomed (no exact preset), soft-highlight the
-  // nearest preset so you see roughly where you are and can snap to it.
+  // When panned/zoomed (no exact preset), soft-highlight the nearest preset so
+  // you see roughly where you are and can snap to it.
   const nearest = range === null ? closestPreset(toMs - fromMs) : null;
 
   return (
@@ -43,12 +37,11 @@ export function TimeNav({
           key={r.key}
           active={range === r.key}
           nearest={nearest === r.key}
-          onClick={() => setRange(r.key)}
+          onClick={() => onPreset(r.key)}
         >
           {r.label}
         </Chip>
       ))}
-      {pending && <span className="text-xs text-zinc-400">updating…</span>}
     </div>
   );
 }

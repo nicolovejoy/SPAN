@@ -1,6 +1,5 @@
 "use client";
 
-import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import {
   createChart,
@@ -15,8 +14,13 @@ import {
   type WhitespaceData,
 } from "lightweight-charts";
 import { autoInterval, intervalSeconds, type IntervalKey } from "@/lib/interval";
+import { fetchSeriesCached } from "@/lib/clientFetch";
 import type { SeriesPoint } from "@/lib/influx";
 import type { DashState } from "@/lib/url-state";
+
+/** Called when a pan/zoom settles, with the new visible window + auto bucket.
+ *  The parent owns state; the chart never touches the URL. */
+export type ViewChange = (fromMs: number, toMs: number, interval: IntervalKey) => void;
 
 const CATEGORY_COLORS: Record<string, string> = {
   HVAC: "#ef4444",
@@ -201,9 +205,16 @@ function Spinner() {
   );
 }
 
-export function PowerChart({ state }: { state: DashState }) {
-  const router = useRouter();
-  const params = useSearchParams();
+export function PowerChart({
+  state,
+  onView,
+}: {
+  state: DashState;
+  onView: ViewChange;
+}) {
+  // Latest onView, read from the create-once chart effect without re-subscribing.
+  const onViewRef = useRef(onView);
+  onViewRef.current = onView;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const catSeriesRef = useRef<Map<string, ISeriesApi<"Line">>>(new Map());
@@ -313,12 +324,7 @@ export function PowerChart({ state }: { state: DashState }) {
         }
         lastPushedRef.current = { from, to };
         const newInterval = autoInterval(from, to);
-        const next = new URLSearchParams(params.toString());
-        next.delete("range");
-        next.set("from", String(Math.round(from)));
-        next.set("to", String(Math.round(to)));
-        next.set("interval", newInterval);
-        router.replace(`/?${next.toString()}`);
+        onViewRef.current(Math.round(from), Math.round(to), newInterval);
       }, 220);
     };
 
@@ -336,7 +342,7 @@ export function PowerChart({ state }: { state: DashState }) {
       sumSeriesRef.current = null;
       totalSeriesRef.current = null;
     };
-    // intentionally empty: stable chart instance; router/params read via closures
+    // intentionally empty: stable chart instance; onView read via onViewRef
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -396,25 +402,16 @@ export function PowerChart({ state }: { state: DashState }) {
     const qFetchFromMs = Math.floor(fetchFromMs / intervalMs) * intervalMs;
     const qFetchToMs = Math.floor(fetchToMs / intervalMs) * intervalMs;
 
-    const url = new URL("/api/power", window.location.origin);
-    url.searchParams.set("from", String(qFetchFromMs));
-    url.searchParams.set("to", String(qFetchToMs));
-    url.searchParams.set("interval", state.interval);
-
-    fetch(url.toString())
-      .then(async (r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json() as Promise<{ data: SeriesPoint[] }>;
-      })
-      .then((json: { data: SeriesPoint[] }) => {
+    fetchSeriesCached(qFetchFromMs, qFetchToMs, state.interval)
+      .then((data) => {
         if (cancelled || !chartRef.current) return;
 
-        if (!json.data || json.data.length === 0) {
+        if (!data || data.length === 0) {
           setLoading(false);
           return;
         }
 
-        const { byCat, totalByTime, sortedTimes } = shapeData(json.data);
+        const { byCat, totalByTime, sortedTimes } = shapeData(data);
         if (sortedTimes.length === 0) {
           setLoading(false);
           return;

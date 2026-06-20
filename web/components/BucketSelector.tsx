@@ -5,28 +5,24 @@ import {
   isIntervalAllowed,
   type IntervalKey,
 } from "@/lib/interval";
-import { useUpdateParams } from "@/components/hooks/useUpdateParams";
 
 const AUTO_KEY = "auto" as const;
-type BucketKey = typeof AUTO_KEY | IntervalKey;
+export type BucketKey = typeof AUTO_KEY | IntervalKey;
 
 export function BucketSelector({
   interval,
   intervalAuto,
   fromMs,
   toMs,
+  onSelect,
 }: {
   interval: IntervalKey;
   intervalAuto: boolean;
   fromMs: number;
   toMs: number;
+  onSelect: (key: BucketKey) => void;
 }) {
-  const { update, pending } = useUpdateParams();
-
   const active: BucketKey = intervalAuto ? AUTO_KEY : interval;
-
-  const onSelect = (key: BucketKey) =>
-    update({ interval: key === AUTO_KEY ? null : key });
 
   return (
     <div className="flex flex-wrap items-center gap-1.5 text-sm">
@@ -50,7 +46,6 @@ export function BucketSelector({
           </Chip>
         );
       })}
-      {pending && <span className="text-xs text-zinc-400">updating…</span>}
     </div>
   );
 }

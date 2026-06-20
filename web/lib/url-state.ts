@@ -19,6 +19,21 @@ export type DashState = {
   show: string[];
 };
 
+/**
+ * Build the intent-only search string for the URL: just the preset range and
+ * the visible-category filter — never the transient pan/zoom window. Commas in
+ * `show` are kept literal (URLSearchParams would emit %2C) for a readable URL.
+ */
+export function buildIntentSearch(
+  range: RangePreset | null,
+  show: string[],
+): string {
+  const parts: string[] = [];
+  if (range) parts.push(`range=${range}`);
+  if (show.length) parts.push(`show=${show.join(",")}`);
+  return parts.join("&");
+}
+
 const isRangePreset = (v: string): v is RangePreset => v in RANGE_PRESETS;
 const isInterval = (v: string): v is IntervalKey =>
   (INTERVAL_ORDER as string[]).includes(v);

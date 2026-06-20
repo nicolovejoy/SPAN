@@ -1,7 +1,5 @@
 "use client";
 
-import { useUpdateParams } from "@/components/hooks/useUpdateParams";
-
 const CHIPS = ["Lights", "HVAC", "Car", "Appliances", "Else"] as const;
 
 function nextShow(current: string[], cat: string): string[] {
@@ -13,11 +11,14 @@ function nextShow(current: string[], cat: string): string[] {
   return Array.from(set);
 }
 
-export function QuickFilters({ show }: { show: string[] }) {
-  const { update, pending } = useUpdateParams();
-
-  const navigate = (next: string[] | null) =>
-    update({ show: next === null || next.length === 0 ? null : next.join(",") });
+export function QuickFilters({
+  show,
+  onChange,
+}: {
+  show: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const navigate = (next: string[]) => onChange(next);
 
   const allActive = show.length === 0;
   const selected = new Set(show);
@@ -27,7 +28,7 @@ export function QuickFilters({ show }: { show: string[] }) {
       <span className="w-16 shrink-0 text-xs uppercase tracking-wide text-zinc-500">
         Show
       </span>
-      <Chip active={allActive} onClick={() => navigate(null)}>
+      <Chip active={allActive} onClick={() => navigate([])}>
         All
       </Chip>
       {CHIPS.map((cat) => (
@@ -40,7 +41,6 @@ export function QuickFilters({ show }: { show: string[] }) {
           {cat}
         </Chip>
       ))}
-      {pending && <span className="text-xs text-zinc-400">updating…</span>}
     </div>
   );
 }
