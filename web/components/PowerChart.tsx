@@ -262,7 +262,6 @@ export function PowerChart({ state }: { state: DashState }) {
       lineStyle: LineStyle.Dotted,
       priceLineVisible: false,
       lastValueVisible: false,
-      title: "Total",
     });
     totalSeriesRef.current = total;
 
@@ -272,7 +271,6 @@ export function PowerChart({ state }: { state: DashState }) {
       priceLineVisible: false,
       lastValueVisible: false,
       visible: false,
-      title: "Sum",
     });
     sumSeriesRef.current = sum;
 
@@ -282,7 +280,6 @@ export function PowerChart({ state }: { state: DashState }) {
         lineWidth: 2,
         priceLineVisible: false,
         lastValueVisible: false,
-        title: cat,
       });
       catSeriesRef.current.set(cat, s);
     }
@@ -508,12 +505,35 @@ export function PowerChart({ state }: { state: DashState }) {
     state.show.join(","),
   ]);
 
+  const legend: { label: string; color: string; dotted?: boolean }[] = [
+    { label: "Total", color: TOTAL_COLOR, dotted: true },
+    ...(state.show.length >= 2
+      ? [{ label: "Sum", color: SUM_COLOR }]
+      : []),
+    ...CATEGORY_ORDER.filter(
+      (c) => state.show.length === 0 || state.show.includes(c),
+    ).map((c) => ({ label: c, color: CATEGORY_COLORS[c] ?? "#888" })),
+  ];
+
   return (
     <div className="relative">
       <div
         ref={containerRef}
         className="h-[55vh] min-h-[280px] w-full touch-none sm:h-[420px]"
       />
+      <div className="pointer-events-none absolute left-2 top-1 flex flex-col gap-0.5 text-[11px]">
+        {legend.map((it) => (
+          <div key={it.label} className="flex items-center gap-1.5">
+            <span
+              className="inline-block h-0 w-3.5 shrink-0"
+              style={{
+                borderTop: `${it.dotted ? "1px dotted" : "2px solid"} ${it.color}`,
+              }}
+            />
+            <span className="text-zinc-500 dark:text-zinc-400">{it.label}</span>
+          </div>
+        ))}
+      </div>
       <div className="pointer-events-none absolute right-1 top-0 text-[10px] font-medium uppercase tracking-wide text-zinc-400 dark:text-zinc-500">
         kW
       </div>
