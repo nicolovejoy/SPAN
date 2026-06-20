@@ -13,14 +13,15 @@ import {
   type UTCTimestamp,
   type WhitespaceData,
 } from "lightweight-charts";
-import { autoInterval, intervalSeconds, type IntervalKey } from "@/lib/interval";
+import { intervalSeconds } from "@/lib/interval";
 import { fetchSeriesCached } from "@/lib/clientFetch";
 import type { SeriesPoint } from "@/lib/influx";
 import type { DashState } from "@/lib/url-state";
 
-/** Called when a pan/zoom settles, with the new visible window + auto bucket.
- *  The parent owns state; the chart never touches the URL. */
-export type ViewChange = (fromMs: number, toMs: number, interval: IntervalKey) => void;
+/** Called when a pan/zoom settles, with the visible sub-window (real-UTC ms).
+ *  Drives the table + header only — it never changes the chart's loaded
+ *  window, so there is no gesture→fetch→setVisibleRange feedback loop. */
+export type VisibleChange = (fromMs: number, toMs: number) => void;
 
 const CATEGORY_COLORS: Record<string, string> = {
   HVAC: "#ef4444",
@@ -32,17 +33,6 @@ const CATEGORY_COLORS: Record<string, string> = {
 const CATEGORY_ORDER = ["HVAC", "Car", "Lights", "Appliances", "Else"] as const;
 const SUM_COLOR = "#525252";    // neutral; reads as derived in light + dark
 const TOTAL_COLOR = "#9ca3af";  // dotted reference, intentionally low-contrast
-
-// Buffered fetch — load extra data on each side of the visible window so
-// small pan/zoom gestures stay within loaded data and don't refetch.
-// Additive (not multiplicative). Beyond 7d the user is in overview mode
-// and won't pinch much, so skip the buffer to keep Influx queries fast.
-const BUFFER_MS = 1 * 24 * 60 * 60 * 1000; // 1 day
-const SKIP_BUFFER_ABOVE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
-function bufferFor(spanMs: number): number {
-  if (spanMs > SKIP_BUFFER_ABOVE_MS) return 0;
-  return Math.min(BUFFER_MS, spanMs);
-}
 
 type Point = { time: UTCTimestamp; value: number };
 type SeriesEntry = Point | WhitespaceData<UTCTimestamp>;
@@ -207,31 +197,54 @@ function Spinner() {
 
 export function PowerChart({
   state,
-  onView,
+  onVisibleChange,
 }: {
   state: DashState;
-  onView: ViewChange;
+  onVisibleChange: VisibleChange;
 }) {
-  // Latest onView, read from the create-once chart effect without re-subscribing.
-  const onViewRef = useRef(onView);
-  onViewRef.current = onView;
+  // Latest onVisibleChange, read from the create-once chart effect without
+  // re-subscribing.
+  const onVisibleRef = useRef(onVisibleChange);
+  onVisibleRef.current = onVisibleChange;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const catSeriesRef = useRef<Map<string, ISeriesApi<"Line">>>(new Map());
   const sumSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const totalSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const gestureTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const externalUpdate = useRef(false);
-  const lastPushedRef = useRef<{ from: number; to: number }>({ from: 0, to: 0 });
-  // What's currently in chart memory — used to skip refetch when a pan/zoom
-  // stays within the loaded buffer.
-  const loadedRef = useRef<{
-    fromSec: number;
-    toSec: number;
-    interval: IntervalKey;
+  // Last loaded payload — kept so a Show-filter toggle can recompute the Sum
+  // series and per-series visibility without a refetch or a zoom reset.
+  const dataRef = useRef<{
+    byCat: Map<string, Map<UTCTimestamp, number>>;
+    sortedTimes: UTCTimestamp[];
+    outerFromSec: UTCTimestamp;
+    outerToSec: UTCTimestamp;
   } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Recompute the Sum series (sum of currently-selected categories) from the
+  // last loaded data. No refetch, no setVisibleRange — preserves zoom.
+  const applySum = (show: string[]) => {
+    const d = dataRef.current;
+    const sumSeries = sumSeriesRef.current;
+    if (!d || !sumSeries) return;
+    const selected = new Set(show);
+    const showSum = selected.size >= 2;
+    if (showSum) {
+      const sumData: Point[] = d.sortedTimes.map((time) => {
+        let v = 0;
+        for (const cat of selected) v += d.byCat.get(cat)?.get(time) ?? 0;
+        return { time, value: v };
+      });
+      try {
+        sumSeries.setData(toChartData(padBounds(sumData, d.outerFromSec, d.outerToSec)));
+      } catch (e) {
+        console.warn("setData failed for Sum", e);
+      }
+    }
+    sumSeries.applyOptions({ visible: showSum });
+  };
 
   // Create chart + series once
   useEffect(() => {
@@ -255,6 +268,13 @@ export function PowerChart({
         timeVisible: true,
         secondsVisible: false,
         tickMarkFormatter: tickFmt,
+        // Bound pan/zoom to the loaded data: you can explore within the window
+        // but can never scroll/zoom off into empty canvas (past `now`, or
+        // before the first point). This is what stops the blank-out.
+        fixLeftEdge: true,
+        fixRightEdge: true,
+        rightOffset: 0,
+        lockVisibleTimeRangeOnResize: true,
       },
       handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
       handleScroll: {
@@ -295,8 +315,11 @@ export function PowerChart({
       catSeriesRef.current.set(cat, s);
     }
 
+    // Report the visible sub-window outward (table + header follow pan/zoom).
+    // This never changes the chart's loaded window, so there's no feedback
+    // loop — fixLeftEdge/fixRightEdge already keep the range inside the data.
     const onRangeChange: TimeRangeChangeEventHandler<Time> = (range) => {
-      if (!range || externalUpdate.current) return;
+      if (!range) return;
       const fromSec = Number(range.from);
       const toSec = Number(range.to);
       if (!Number.isFinite(fromSec) || !Number.isFinite(toSec)) return;
@@ -305,27 +328,11 @@ export function PowerChart({
         let from = fromDisplay(fromSec) * 1000;
         let to = fromDisplay(toSec) * 1000;
         if (!(from < to)) return;
-        // Don't push URLs into the future — Influx returns no data past now.
         const now = Date.now();
-        if (to > now) {
-          const span = to - from;
-          to = now;
-          from = Math.max(0, now - span);
-        }
-        // Suppress sub-2% wobble — lightweight-charts emits range-change events
-        // after our own setVisibleRange settle that differ slightly.
-        const span = to - from;
-        const last = lastPushedRef.current;
-        if (last.from > 0 && last.to > 0) {
-          const fromDelta = Math.abs(from - last.from) / span;
-          const toDelta = Math.abs(to - last.to) / span;
-          const spanDelta = Math.abs(span - (last.to - last.from)) / span;
-          if (fromDelta < 0.02 && toDelta < 0.02 && spanDelta < 0.02) return;
-        }
-        lastPushedRef.current = { from, to };
-        const newInterval = autoInterval(from, to);
-        onViewRef.current(Math.round(from), Math.round(to), newInterval);
-      }, 220);
+        if (to > now) to = now;
+        if (from < 0) from = 0;
+        onVisibleRef.current(Math.round(from), Math.round(to));
+      }, 180);
     };
 
     chart.timeScale().subscribeVisibleTimeRangeChange(onRangeChange);
@@ -341,99 +348,51 @@ export function PowerChart({
       catSeriesRef.current.clear();
       sumSeriesRef.current = null;
       totalSeriesRef.current = null;
+      dataRef.current = null;
     };
-    // intentionally empty: stable chart instance; onView read via onViewRef
+    // intentionally empty: stable chart instance; callback read via onVisibleRef
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Fetch + apply data, OR fast-path: if the request fits inside loaded data
-  // with the same bucket + filters, just call setVisibleRange. This is what
-  // makes pinch/jog-pad feel instant — only crossing the loaded extent or
-  // changing bucket triggers an actual Influx round-trip.
+  // Load + render the window set by presets/bucket. Pan/zoom does NOT run this
+  // (it only moves the view within the already-loaded data) — so the fetch and
+  // the authoritative setVisibleRange happen only on a real window/bucket
+  // change. That is what removes the old gesture feedback loop.
   useEffect(() => {
-    const wantFromSec = (state.fromMs / 1000) | 0;
-    const wantToSec = (state.toMs / 1000) | 0;
-
-    const loaded = loadedRef.current;
-    const fitsBuffer =
-      loaded &&
-      loaded.interval === state.interval &&
-      wantFromSec >= loaded.fromSec &&
-      wantToSec <= loaded.toSec;
-
-    if (fitsBuffer && chartRef.current) {
-      externalUpdate.current = true;
-      try {
-        chartRef.current.timeScale().setVisibleRange({
-          from: toDisplay(wantFromSec),
-          to: toDisplay(wantToSec),
-        });
-      } catch (e) {
-        console.warn("setVisibleRange (fast path) failed", e);
-      }
-      // Also reapply per-series visibility — state.show may have changed.
-      for (const cat of CATEGORY_ORDER) {
-        const series = catSeriesRef.current.get(cat);
-        if (!series) continue;
-        const visible = state.show.length === 0 || state.show.includes(cat);
-        series.applyOptions({ visible });
-      }
-      sumSeriesRef.current?.applyOptions({ visible: state.show.length >= 2 });
-      lastPushedRef.current = { from: state.fromMs, to: state.toMs };
-      setTimeout(() => { externalUpdate.current = false; }, 150);
-      return;
-    }
-
-    // Slow path — fetch with an additive buffer (capped at BUFFER_MS / span).
     let cancelled = false;
     setLoading(true);
     setError(null);
-    const span = state.toMs - state.fromMs;
+
     const now = Date.now();
-    const pad = bufferFor(span);
-    const fetchFromMs = Math.max(0, state.fromMs - pad);
-    const fetchToMs = Math.min(now, state.toMs + pad);
-
-    // Quantize to interval boundary so consecutive loads of the same view
-    // produce byte-identical URLs and hit the browser's HTTP cache. The
-    // chart's time axis still extends to the unquantized fetchToMs via the
-    // whitespace sentinels, so the visible window remains accurate.
+    const fromMs = state.fromMs;
+    const toMs = Math.min(now, state.toMs);
     const intervalMs = intervalSeconds(state.interval) * 1000;
-    const qFetchFromMs = Math.floor(fetchFromMs / intervalMs) * intervalMs;
-    const qFetchToMs = Math.floor(fetchToMs / intervalMs) * intervalMs;
+    const qFrom = Math.floor(fromMs / intervalMs) * intervalMs;
+    const qTo = Math.floor(toMs / intervalMs) * intervalMs;
 
-    fetchSeriesCached(qFetchFromMs, qFetchToMs, state.interval)
+    fetchSeriesCached(qFrom, qTo, state.interval)
       .then((data) => {
         if (cancelled || !chartRef.current) return;
 
-        if (!data || data.length === 0) {
-          setLoading(false);
-          return;
-        }
-
         const { byCat, totalByTime, sortedTimes } = shapeData(data);
-        if (sortedTimes.length === 0) {
-          setLoading(false);
-          return;
-        }
 
-        // Sentinel bounds — extend the time axis to the full fetched range so
-        // bucket-alignment gaps at wide ranges don't crop the visible window,
-        // and pans within the buffer can fast-path setVisibleRange.
-        const outerFromSec = Math.floor(fetchFromMs / 1000) as UTCTimestamp;
-        const outerToSec = Math.floor(fetchToMs / 1000) as UTCTimestamp;
+        // Sentinels pin the axis to exactly [from, to] (capped at now) so the
+        // visible range spans the full requested window even when bucket
+        // alignment leaves the first/last point inside it.
+        const outerFromSec = Math.floor(fromMs / 1000) as UTCTimestamp;
+        const outerToSec = Math.floor(toMs / 1000) as UTCTimestamp;
+        dataRef.current = { byCat, sortedTimes, outerFromSec, outerToSec };
 
-        externalUpdate.current = true;
         try {
           for (const cat of CATEGORY_ORDER) {
             const series = catSeriesRef.current.get(cat);
             if (!series) continue;
-            const data = padBounds(
+            const pts = padBounds(
               pointsFor(sortedTimes, byCat.get(cat)),
               outerFromSec,
               outerToSec,
             );
-            try { series.setData(toChartData(data)); }
+            try { series.setData(toChartData(pts)); }
             catch (e) { console.warn(`setData failed for ${cat}`, e); }
             const visible = state.show.length === 0 || state.show.includes(cat);
             series.applyOptions({ visible });
@@ -447,39 +406,16 @@ export function PowerChart({
             console.warn("setData failed for Total", e);
           }
 
-          const selected = new Set(state.show);
-          const showSum = selected.size >= 2;
-          if (showSum) {
-            const sumData: Point[] = sortedTimes.map((time) => {
-              let v = 0;
-              for (const cat of selected) v += byCat.get(cat)?.get(time) ?? 0;
-              return { time, value: v };
-            });
-            try {
-              sumSeriesRef.current?.setData(
-                toChartData(padBounds(sumData, outerFromSec, outerToSec)),
-              );
-            } catch (e) { console.warn("setData failed for Sum", e); }
-          }
-          sumSeriesRef.current?.applyOptions({ visible: showSum });
+          applySum(state.show);
 
           chartRef.current.timeScale().setVisibleRange({
-            from: toDisplay(wantFromSec),
-            to: toDisplay(wantToSec),
+            from: toDisplay(outerFromSec),
+            to: toDisplay(outerToSec),
           });
-          loadedRef.current = {
-            fromSec: outerFromSec,
-            toSec: outerToSec,
-            interval: state.interval,
-          };
-          lastPushedRef.current = { from: state.fromMs, to: state.toMs };
         } catch (e) {
           console.error("PowerChart apply failed", e);
         } finally {
           setLoading(false);
-          setTimeout(() => {
-            externalUpdate.current = false;
-          }, 150);
         }
       })
       .catch((e) => {
@@ -489,18 +425,29 @@ export function PowerChart({
           "Couldn't load this range — try a narrower window or coarser bucket.",
         );
         setLoading(false);
-        externalUpdate.current = false;
       });
 
     return () => {
       cancelled = true;
     };
-  }, [
-    state.fromMs,
-    state.toMs,
-    state.interval,
-    state.show.join(","),
-  ]);
+    // applySum + state.show read fresh each run; not deps (window/bucket only).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.fromMs, state.toMs, state.interval]);
+
+  // Show-filter toggle: recompute Sum + per-series visibility from the already
+  // loaded data — no refetch, no setVisibleRange, so the current zoom is kept.
+  useEffect(() => {
+    if (!dataRef.current) return;
+    for (const cat of CATEGORY_ORDER) {
+      const series = catSeriesRef.current.get(cat);
+      if (!series) continue;
+      series.applyOptions({
+        visible: state.show.length === 0 || state.show.includes(cat),
+      });
+    }
+    applySum(state.show);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.show.join(",")]);
 
   const legend: { label: string; color: string; dotted?: boolean }[] = [
     { label: "Total", color: TOTAL_COLOR, dotted: true },

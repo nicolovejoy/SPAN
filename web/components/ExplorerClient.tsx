@@ -1,18 +1,13 @@
 "use client";
 
 import { useEffect, useReducer, useRef, useState } from "react";
-import { PowerChart, type ViewChange } from "./PowerChart";
+import { PowerChart, type VisibleChange } from "./PowerChart";
 import { TimeNav } from "./TimeNav";
 import { BucketSelector, type BucketKey } from "./BucketSelector";
 import { QuickFilters } from "./QuickFilters";
 import { FocusToggle } from "./FocusToggle";
 import { BreakdownTable } from "./BreakdownTable";
-import {
-  autoInterval,
-  RANGE_PRESETS,
-  type IntervalKey,
-  type RangePreset,
-} from "@/lib/interval";
+import { autoInterval, RANGE_PRESETS, type RangePreset } from "@/lib/interval";
 import { buildIntentSearch, type DashState } from "@/lib/url-state";
 import { fetchEnergyCached, seedEnergy } from "@/lib/clientFetch";
 import type { EnergyRow } from "@/lib/queryCache";
@@ -29,11 +24,13 @@ const headerFmt = (ms: number) =>
     minute: "2-digit",
   }).format(new Date(ms));
 
+// Actions only change the *loaded* window (what's fetched). Pan/zoom never
+// dispatches here — it explores within the loaded window and reports a visible
+// sub-range separately (see `visible` below).
 type Action =
   | { type: "preset"; preset: RangePreset; now: number }
   | { type: "bucket"; key: BucketKey }
-  | { type: "show"; show: string[] }
-  | { type: "view"; fromMs: number; toMs: number; interval: IntervalKey };
+  | { type: "show"; show: string[] };
 
 function reducer(s: DashState, a: Action): DashState {
   switch (a.type) {
@@ -54,16 +51,6 @@ function reducer(s: DashState, a: Action): DashState {
         : { ...s, interval: a.key, intervalAuto: false };
     case "show":
       return { ...s, show: a.show };
-    case "view":
-      // A pan/zoom drops the preset and re-derives the auto bucket.
-      return {
-        ...s,
-        fromMs: a.fromMs,
-        toMs: a.toMs,
-        interval: a.interval,
-        intervalAuto: true,
-        rangePreset: null,
-      };
   }
 }
 
@@ -86,6 +73,21 @@ export function ExplorerClient({
     seeded.current = true;
   }
 
+  // Visible sub-window — what the chart currently shows. Equals the loaded
+  // window on a preset/bucket change; pan/zoom narrows it. Drives the header +
+  // table so both follow your zoom.
+  const [visible, setVisible] = useState({
+    fromMs: initial.fromMs,
+    toMs: initial.toMs,
+  });
+  // Reset the visible window to the full loaded window whenever the loaded
+  // window or bucket changes (preset/bucket click).
+  useEffect(() => {
+    setVisible({ fromMs: view.fromMs, toMs: view.toMs });
+  }, [view.fromMs, view.toMs, view.interval]);
+  const onVisibleChange: VisibleChange = (fromMs, toMs) =>
+    setVisible({ fromMs, toMs });
+
   // Intent-only URL — preset + filter, never the pan/zoom window. replaceState
   // (not router) so there's no server navigation.
   useEffect(() => {
@@ -93,13 +95,13 @@ export function ExplorerClient({
     window.history.replaceState(null, "", search ? `/?${search}` : "/");
   }, [view.rangePreset, view.show]);
 
-  // Breakdown table — cache-backed energy fetch for the current window.
+  // Breakdown table — cache-backed energy fetch for the visible window.
   const [rows, setRows] = useState<EnergyRow[]>(initialEnergy);
   const [tableLoading, setTableLoading] = useState(false);
   useEffect(() => {
     let cancelled = false;
     setTableLoading(true);
-    fetchEnergyCached(view.fromMs, view.toMs)
+    fetchEnergyCached(visible.fromMs, visible.toMs)
       .then((r) => {
         if (!cancelled) setRows(r);
       })
@@ -112,15 +114,12 @@ export function ExplorerClient({
     return () => {
       cancelled = true;
     };
-  }, [view.fromMs, view.toMs]);
+  }, [visible.fromMs, visible.toMs]);
 
   const filtered =
     view.show.length === 0
       ? rows
       : rows.filter((r) => view.show.includes(r.category));
-
-  const onView: ViewChange = (fromMs, toMs, interval) =>
-    dispatch({ type: "view", fromMs, toMs, interval });
 
   return (
     <main className="mx-auto flex w-full max-w-6xl flex-col gap-4 p-3 sm:gap-6 sm:p-6">
@@ -128,7 +127,7 @@ export function ExplorerClient({
         <h1 className="text-xl font-semibold tracking-tight">SPAN — power explorer</h1>
         <div className="flex flex-col text-xs text-zinc-500 sm:items-end">
           <div>
-            {headerFmt(view.fromMs)} → {headerFmt(view.toMs)}
+            {headerFmt(visible.fromMs)} → {headerFmt(visible.toMs)}
           </div>
           {buildTime && (
             <div className="text-[10px] text-zinc-400">build {buildTime} PT</div>
@@ -167,7 +166,7 @@ export function ExplorerClient({
         <FocusToggle />
       </div>
 
-      <PowerChart state={view} onView={onView} />
+      <PowerChart state={view} onVisibleChange={onVisibleChange} />
 
       <div className="focus-hide">
         {tableLoading && rows.length === 0 ? (
