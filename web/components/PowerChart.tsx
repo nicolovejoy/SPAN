@@ -46,6 +46,56 @@ function toUtc(iso: string): UTCTimestamp {
   return Math.floor(new Date(iso).getTime() / 1000) as UTCTimestamp;
 }
 
+// lightweight-charts has no timezone support — it renders every timestamp as
+// UTC. To put Pacific wall-clock on the axis we shift each real-UTC second by
+// that instant's Pacific offset before handing it to the chart, so the
+// library's "UTC" clock reads as Seattle local. All navigation / fetch / URL
+// math stays in true UTC; only values crossing the chart boundary are
+// transformed (toChartData / setVisibleRange out, fromDisplay back in).
+const DISPLAY_TZ = "America/Los_Angeles";
+
+// Seconds to add to a real-UTC instant so it reads as Pacific wall-clock.
+// Computed per-instant via Intl so DST flips across a wide range stay correct
+// (e.g. -8h in winter, -7h in summer). Negative west of UTC.
+function tzOffsetSec(utcMs: number): number {
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone: DISPLAY_TZ,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+  const p: Record<string, string> = {};
+  for (const part of dtf.formatToParts(new Date(utcMs))) p[part.type] = part.value;
+  const asUtc = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second);
+  return Math.round((asUtc - utcMs) / 1000);
+}
+
+// real UTC second → chart "display" second (Pacific wall-clock as fake-UTC).
+function toDisplay(realSec: number): UTCTimestamp {
+  return (realSec + tzOffsetSec(realSec * 1000)) as UTCTimestamp;
+}
+
+// chart "display" second → real UTC second. One refine pass nails the DST edge.
+function fromDisplay(dispSec: number): number {
+  let real = dispSec - tzOffsetSec(dispSec * 1000);
+  real = dispSec - tzOffsetSec(real * 1000);
+  return real;
+}
+
+// Shift a built series array onto the chart's Pacific-as-UTC clock right before
+// setData. Whitespace sentinels ({time} only) carry through without a value.
+function toChartData(entries: SeriesEntry[]): SeriesEntry[] {
+  return entries.map((e) =>
+    "value" in e
+      ? { time: toDisplay(Number(e.time)), value: e.value }
+      : { time: toDisplay(Number(e.time)) },
+  );
+}
+
 // Flux `aggregateWindow` aligns buckets to epoch, so at wide ranges with
 // coarse buckets the first/last data points land *inside* the requested
 // window. Without sentinels, the chart's time axis collapses to the data
@@ -212,8 +262,8 @@ export function PowerChart({ state }: { state: DashState }) {
       if (!Number.isFinite(fromSec) || !Number.isFinite(toSec)) return;
       if (gestureTimer.current) clearTimeout(gestureTimer.current);
       gestureTimer.current = setTimeout(() => {
-        let from = fromSec * 1000;
-        let to = toSec * 1000;
+        let from = fromDisplay(fromSec) * 1000;
+        let to = fromDisplay(toSec) * 1000;
         if (!(from < to)) return;
         // Don't push URLs into the future — Influx returns no data past now.
         const now = Date.now();
@@ -280,8 +330,8 @@ export function PowerChart({ state }: { state: DashState }) {
       externalUpdate.current = true;
       try {
         chartRef.current.timeScale().setVisibleRange({
-          from: wantFromSec as UTCTimestamp,
-          to: wantToSec as UTCTimestamp,
+          from: toDisplay(wantFromSec),
+          to: toDisplay(wantToSec),
         });
       } catch (e) {
         console.warn("setVisibleRange (fast path) failed", e);
@@ -357,7 +407,7 @@ export function PowerChart({ state }: { state: DashState }) {
               outerFromSec,
               outerToSec,
             );
-            try { series.setData(data); }
+            try { series.setData(toChartData(data)); }
             catch (e) { console.warn(`setData failed for ${cat}`, e); }
             const visible = state.show.length === 0 || state.show.includes(cat);
             series.applyOptions({ visible });
@@ -365,7 +415,7 @@ export function PowerChart({ state }: { state: DashState }) {
 
           try {
             totalSeriesRef.current?.setData(
-              padBounds(pointsFor(sortedTimes, totalByTime), outerFromSec, outerToSec),
+              toChartData(padBounds(pointsFor(sortedTimes, totalByTime), outerFromSec, outerToSec)),
             );
           } catch (e) {
             console.warn("setData failed for Total", e);
@@ -381,15 +431,15 @@ export function PowerChart({ state }: { state: DashState }) {
             });
             try {
               sumSeriesRef.current?.setData(
-                padBounds(sumData, outerFromSec, outerToSec),
+                toChartData(padBounds(sumData, outerFromSec, outerToSec)),
               );
             } catch (e) { console.warn("setData failed for Sum", e); }
           }
           sumSeriesRef.current?.applyOptions({ visible: showSum });
 
           chartRef.current.timeScale().setVisibleRange({
-            from: wantFromSec as UTCTimestamp,
-            to: wantToSec as UTCTimestamp,
+            from: toDisplay(wantFromSec),
+            to: toDisplay(wantToSec),
           });
           loadedRef.current = {
             fromSec: outerFromSec,
