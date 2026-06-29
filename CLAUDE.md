@@ -34,10 +34,6 @@ cd pi && nohup ./run_collector.sh > collector.log 2>&1 &
   - `grafana/provisioning/` - Auto-configured datasource + dashboard
 - `web/` - Next.js power-explorer dashboard (Docker service, see § web/)
 
-## Co-located Services
-
-- **sentiment-arbitrage worker** — systemd timer, 3x/day weekdays. See `docs/sentiment-arbitrage.md`
-
 ## web/ — power explorer
 
 Next.js 16 app, **Pi-hosted** as a Docker service alongside InfluxDB / Grafana,
