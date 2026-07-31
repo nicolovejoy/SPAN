@@ -33,6 +33,12 @@ cd pi && nohup ./run_collector.sh > collector.log 2>&1 &
   - `docker-compose.yml` - InfluxDB, Grafana, collector, bath-detector, charge-detector, daily-report, web, cloudflared
   - `grafana/provisioning/` - Auto-configured datasource + dashboard
 - `web/` - Next.js power-explorer dashboard (Docker service, see § web/)
+- `pi/backup/` - nightly restic backup to Cloudflare R2 (systemd timer, 03:30). Covers the
+  only unrecoverable state: InfluxDB, TimescaleDB, the Grafana volume, and the `.env` files —
+  everything else rebuilds from git. Config at `/etc/span-backup.env` on the Pi (rendered from
+  `span-backup.env.tpl` via `op inject`; the Pi has no 1Password). **Restore runbook and setup
+  steps: `pi/backup/README.md`.** The repo password lives in 1Password as `phrpi-restic-backup`
+  — without it every snapshot is unrecoverable ciphertext.
 
 ## web/ — power explorer
 
@@ -55,7 +61,10 @@ routed through the same `phrpi` Cloudflare tunnel, gated by Cloudflare Access
 - **Manifest CORS** — *Decided 2026-05-24 to live with it.* `/manifest.webmanifest` is gated by CF Access; browser fetches it without credentials and gets redirected to login → console error. The fix (separate CF Access app with Bypass policy for the four asset paths) is blocked by CF's no-overlapping-destinations rule and would require enumerating every dashboard route. Cosmetic-only — dashboard works; PWA install persists once configured. Revisit only if CF adds path-exclusion or if the noise becomes actively annoying.
 - **EV monthly + annual cost rollup** in daily report (request #3 from 2026-05-23 batch — last unaddressed item). Bundle with SCL plan confirmation so cost isn't computed against two rate models. *2026-06-15: weekly section now excludes EV (per-2h-bucket subtract) with this-week-vs-5wk + vs-12wk charts and an EV-charging-vs-weekly-avg callout; EV accounting (weekly + monthly) pinned to the exact `CHARGE_CIRCUIT` name shared with `charge_detector`, not the Car regex.*
 - **Confirm SCL plan** — bill shows "Small General Energy" flat $0.1241/kWh + $0.83/day base. Check whether residential RSC tiered or TOU would be cheaper; align Grafana cost panel once decided.
-- **Power explorer perf — 90d/1y still slow at the source** (#9). Root cause: `web/lib/influx.ts` scans raw 30s points over the whole range (~15M pts for 1y). Fix = per-circuit Influx rollup measurements (`circuit_5m`/`circuit_1h`) + source-selection by interval. *2026-06-19: #11 landed the client-driven refactor + in-memory `TtlLru` cache (the in-memory half of #10) so in-session revisits are instant; #10 now scoped to IndexedDB-across-reload persistence. #9 (rollups) still open and is what makes the cold 90d/1y query fast + keeps old-data energy accurate.*
+- **Power explorer perf — 90d/1y still slow at the source** (#9). Root cause: `web/lib/influx.ts` scanned raw 30s points over the whole range (~15M pts for 1y). *2026-07-31: **all three sides are built and unit-tested, none deployed.*** (a) Influx: `pi/influx_tasks/{circuit_5m,circuit_1h}.flux` + `pi/provision_influx_tasks.sh` + `pi/backfill_rollups.py`. (b) Web: `web/lib/rollup.ts` picks source by interval/span and hybridises with raw for the fresh tail, falling back to raw entirely if a rollup returns no rows. (c) Report: `pi/daily_report.py` routes its wide queries through the same segment logic. **Remaining: provision the tasks + run the backfill on the Pi, then verify.** Contract, verification numbers and tail-lag invariants are in `pi/influx_tasks/README.md` — read it before wiring another consumer.
+  - Fields per bucket: `power_w_mean`, `energy_wh` (integral of `power_w`), `energy_wh_counter` (delta of SPAN's own meter). The last two are stored side by side deliberately to A/B before picking one.
+  - Timestamps are **end-of-bucket** (`timeSrc: "_stop"`) — a point at T covers `[T - bucket, T)`.
+  - Tail lag by design: `circuit_5m` is 1–6 min stale, `circuit_1h` 5–65 min. Consumers must clamp or hybridise with raw; see the README.
 - **Power explorer chart E2E** (#13) — Playwright harness via a `MOCK_INFLUX` fixture mode (prod is behind CF Access so test a local hermetic build). Locks in the 2026-06-19 pan/zoom fix: bounded-to-data, no blank-out, intent-only URL, cache hits, table-follows-zoom. Plan in the issue.
 - **Zoom-in detail follow-up** — since 2026-06-19 pan/zoom stays *within* the loaded preset window (bounded by `fixLeftEdge/fixRightEdge`); zoom-in no longer auto-fetches a finer bucket. If wanted, add a deliberate "load detail at this zoom" that widens the loaded window. Low priority.
 - **In-email settings link** (#8) — clickable link in the daily email to change report cadence + aux-heat threshold without redeploying. Deferred 2026-06-14 (needs persistent store + web page + report-loop rework). Cadence stays daily for now.
