@@ -75,6 +75,304 @@ def local_day_utc_range(d: date) -> tuple[datetime, datetime]:
     return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
 
 
+# ---------- circuit source routing (issue #9) ----------
+#
+# The collector writes raw 30s `circuit`/`power_w`; InfluxDB tasks derive
+# `circuit_5m` / `circuit_1h`, each bucket carrying `energy_wh` (integral of
+# |power_w| over the bucket, in Wh) and `power_w_mean`. Summing energy_wh costs
+# one row per bucket instead of 120 raw points per hour — that's the whole win.
+#
+# Every circuit query below goes through _run_segments(), which splits the
+# requested window into (measurement, start, stop) segments: raw for anything
+# older than the backfill reaches, the rollup for the stretch it covers, raw
+# again for the fresh tail the rollup task hasn't written yet. Cuts land on the
+# aggregation grid so no output window straddles a segment boundary, and with no
+# rollups present at all the plan degrades to a single raw segment — i.e. exactly
+# the queries this file ran before #9. Panel queries have no rollup and are
+# untouched.
+
+MEAS_RAW = "circuit"
+MEAS_5M = "circuit_5m"
+MEAS_1H = "circuit_1h"
+ROLLUP_PERIOD = {MEAS_5M: timedelta(minutes=5), MEAS_1H: timedelta(hours=1)}
+ROLLUP_EVERY = {MEAS_5M: "5m", MEAS_1H: "1h"}
+
+# Kill switch — USE_ROLLUPS=0 forces the pre-#9 raw queries.
+USE_ROLLUPS = os.getenv("USE_ROLLUPS", "1").lower() not in ("0", "false", "no")
+# Which end of its bucket a rollup point is stamped at. Auto-detected per run;
+# this only settles a tie (aggregateWindow's own default is the window stop).
+ROLLUP_STAMP = os.getenv("ROLLUP_STAMP", "stop")
+
+_EVERY_RE = re.compile(r"^(\d+)(m|h)$")
+_SUM_TAIL = '  |> group(columns: ["_time"])\n  |> sum()\n'
+
+
+def _parse_flux_ts(s: str) -> datetime:
+    """Inverse of flux_ts()."""
+    return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+
+def _shift_ts(s: str, delta: timedelta) -> str:
+    return flux_ts(_parse_flux_ts(s) + delta)
+
+
+def _flux_dur(delta: timedelta) -> str:
+    return f"{int(delta.total_seconds())}s"
+
+
+def _every_minutes(every: str | None) -> int | None:
+    """Minutes in a sub-day `every` literal ("15m", "2h"). None for 1d/1mo."""
+    m = _EVERY_RE.match(every) if every else None
+    return int(m.group(1)) * (60 if m.group(2) == "h" else 1) if m else None
+
+
+def _grid_floor(dt: datetime, every: str | None) -> datetime:
+    """Largest aggregateWindow boundary <= dt. Sub-day windows are anchored to
+    the Unix epoch (verified against Influx); 1d/1mo follow the local calendar,
+    matching `option location`."""
+    if every is None:
+        return dt
+    mins = _every_minutes(every)
+    if mins:
+        step = mins * 60
+        return datetime.fromtimestamp(int(dt.timestamp()) // step * step, tz=timezone.utc)
+    lt = dt.astimezone(LOCAL_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+    if every == "1mo":
+        lt = lt.replace(day=1)
+    return lt.astimezone(timezone.utc)
+
+
+def _grid_ceil(dt: datetime, every: str | None) -> datetime:
+    """Smallest aggregateWindow boundary >= dt."""
+    floor = _grid_floor(dt, every)
+    if every is None or floor == dt:
+        return floor
+    mins = _every_minutes(every)
+    if mins:
+        return floor + timedelta(minutes=mins)
+    lt = floor.astimezone(LOCAL_TZ)
+    if every == "1mo":
+        y, m = add_months(lt.year, lt.month, 1)
+        lt = lt.replace(year=y, month=m)
+    else:
+        lt = lt + timedelta(days=1)   # wall-clock, so DST days stay whole
+    return lt.astimezone(timezone.utc)
+
+
+def _rollup_src(every: str | None) -> str:
+    """Coarsest rollup whose buckets tile `every` exactly."""
+    mins = _every_minutes(every)
+    if mins is not None and mins < 60:
+        return MEAS_5M if mins % 5 == 0 else MEAS_RAW
+    return MEAS_1H
+
+
+_ROLLUP_SPAN: dict[str, tuple[datetime, datetime] | None] = {}
+_ROLLUP_STAMP_AT: dict[str, str] = {MEAS_RAW: "stop"}   # raw ignores it
+
+
+def rollup_span(query_api, src: str) -> tuple[datetime, datetime] | None:
+    """(oldest, newest) timestamp in rollup measurement `src`, or None when it
+    holds nothing yet (tasks/backfill not run). Probed once per process; it only
+    touches one row per bucket, so it is cheap even unbounded."""
+    if src in _ROLLUP_SPAN:
+        return _ROLLUP_SPAN[src]
+    flux = f'''
+base = from(bucket: "{INFLUXDB_BUCKET}")
+  |> range(start: 0)
+  |> filter(fn: (r) => r._measurement == "{src}" and r._field == "energy_wh")
+  |> keep(columns: ["_time"])
+  |> group()
+
+union(tables: [base |> min(column: "_time"), base |> max(column: "_time")])
+'''
+    span = None
+    try:
+        times = sorted(rec.get_time()
+                       for table in query_api.query(flux, org=INFLUXDB_ORG)
+                       for rec in table.records)
+        if times:
+            span = (times[0], times[-1])
+    except Exception as e:   # an empty measurement is fine; a broken query is not
+        logger.warning(f"rollup probe for {src} failed, staying on raw: {e}")
+    _ROLLUP_SPAN[src] = span
+    logger.info(f"rollup {src}: {'absent' if span is None else f'{span[0]} .. {span[1]}'}")
+    return span
+
+
+def _rollup_stamp(query_api, src: str) -> str:
+    """"stop" or "start" — which end of its bucket a rollup point is stamped at.
+    aggregateWindow stamps the stop by default, but a task written with
+    timeSrc: "_start" does the opposite and guessing wrong shifts every window by
+    a whole bucket. Detected once by matching rollup buckets against raw energy
+    over a recent 6h window; falls back to ROLLUP_STAMP when the window is too
+    quiet to tell the two apart."""
+    if src in _ROLLUP_STAMP_AT:
+        return _ROLLUP_STAMP_AT[src]
+    stamp = ROLLUP_STAMP
+    period, every = ROLLUP_PERIOD[src], ROLLUP_EVERY[src]
+    span = rollup_span(query_api, src)
+    if span is None:
+        return stamp
+    try:
+        end = _grid_floor(span[1], "1h") - period      # one bucket of slack
+        begin = max(end - timedelta(hours=6), _grid_ceil(span[0], "1h"))
+        if begin < end:
+            raw = dict(_summed_rows(query_api, MEAS_RAW, flux_ts(begin), flux_ts(end), every))
+            # rollup buckets as stored, unshifted — stamps either end of [begin, end)
+            probe = f'''from(bucket: "{INFLUXDB_BUCKET}")
+  |> range(start: {flux_ts(begin)}, stop: {flux_ts(end + period)})
+  |> filter(fn: (r) => r._measurement == "{src}" and r._field == "energy_wh")
+  |> filter(fn: (r) => exists r._value)
+  |> map(fn: (r) => ({{r with _value: r._value / 1000.0}}))
+''' + _SUM_TAIL
+            roll = [(rec.get_time(), rec.get_value() or 0.0)
+                    for table in query_api.query(probe, org=INFLUXDB_ORG)
+                    for rec in table.records]
+            energy = sum(raw.values())
+            if raw and roll and energy > 0:
+                err = {
+                    # stop-stamped: point at t is the window ending at t
+                    "stop": sum(abs(v - raw[t]) for t, v in roll if t in raw),
+                    # start-stamped: point at t is the window ending at t + period
+                    "start": sum(abs(v - raw[t + period]) for t, v in roll
+                                 if t + period in raw),
+                }
+                best = min(err, key=err.get)
+                if abs(err["stop"] - err["start"]) > 0.01 * energy:
+                    stamp = best
+                else:
+                    logger.warning(f"{src} stamp detection ambiguous "
+                                   f"({err}); assuming {stamp}")
+    except Exception as e:
+        logger.warning(f"{src} stamp detection failed, assuming {stamp}: {e}")
+    _ROLLUP_STAMP_AT[src] = stamp
+    logger.info(f"rollup {src} stamped at bucket {stamp}")
+    return stamp
+
+
+def _circuit_kwh_flux(src: str, start: str, stop: str, every: str | None,
+                      name_filter: str | None = None, mode: str = "energy",
+                      stamp: str = "stop") -> str:
+    """Pipeline yielding circuit energy in kWh — one value per `every`-window, or
+    one per series when `every` is None. Raw integrates 30s power exactly as
+    before #9; a rollup just sums its precomputed energy_wh. `mode="mean"`
+    reproduces the mean-power-times-window form the hourly query has always used.
+
+    Rollup rows are re-stamped to their bucket midpoint (and the range shifted to
+    match) so a bucket can never land in the neighbouring output window."""
+    raw = src == MEAS_RAW
+    field = "power_w" if raw else ("energy_wh" if mode == "energy" else "power_w_mean")
+    nf = f'  |> filter(fn: (r) => r.name =~ /(?i){name_filter}/)\n' if name_filter else ''
+    # rollup buckets can be null where the source had no points; raw never is
+    nn = '' if raw else '  |> filter(fn: (r) => exists r._value)\n'
+    shift = ''
+    if raw:
+        rng_start, rng_stop = start, stop
+    else:
+        period = ROLLUP_PERIOD[src]
+        mid = -period / 2 if stamp == "stop" else period / 2
+        offset = period / 2 - mid          # timedelta(0) or one period
+        rng_start, rng_stop = _shift_ts(start, offset), _shift_ts(stop, offset)
+        if every:
+            shift = f'  |> timeShift(duration: {_flux_dur(mid)})\n'
+
+    if every is None:
+        agg = '  |> integral(unit: 1h)\n' if raw else '  |> sum()\n'
+    elif mode == "mean":
+        agg = f'  |> aggregateWindow(every: {every}, fn: mean, createEmpty: false)\n'
+    elif raw:
+        agg = (f'  |> aggregateWindow(\n'
+               f'       every: {every},\n'
+               f'       fn: (column, tables=<-) => tables |> integral(unit: 1h, column: column),\n'
+               f'       createEmpty: false)\n')
+    else:
+        agg = f'  |> aggregateWindow(every: {every}, fn: sum, createEmpty: false)\n'
+
+    loc = (f'import "timezone"\noption location = timezone.location(name: "{LOCAL_TZ_NAME}")\n\n'
+           if every in ("1d", "1mo") else '')
+    return f'''{loc}from(bucket: "{INFLUXDB_BUCKET}")
+  |> range(start: {rng_start}, stop: {rng_stop})
+  |> filter(fn: (r) => r._measurement == "{src}" and r._field == "{field}")
+{nf}{nn}{shift}  |> map(fn: (r) => ({{r with _value: if r._value < 0.0 then -r._value else r._value}}))
+{agg}  |> map(fn: (r) => ({{r with _value: r._value / 1000.0}}))
+'''
+
+
+def _circuit_records(query_api, src: str, start: str, stop: str, every: str | None,
+                     name_filter: str | None = None, mode: str = "energy",
+                     tail: str = "") -> list:
+    """Run one segment's circuit query and return its Flux records."""
+    flux = _circuit_kwh_flux(src, start, stop, every, name_filter, mode,
+                             _rollup_stamp(query_api, src)) + tail
+    return [rec for table in query_api.query(flux, org=INFLUXDB_ORG)
+            for rec in table.records]
+
+
+def _summed_rows(query_api, src: str, start: str, stop: str, every: str | None,
+                 name_filter: str | None = None,
+                 mode: str = "energy") -> list[tuple[datetime, float]]:
+    """(utc_window_stop, kWh) summed across every circuit matching name_filter."""
+    return [(rec.get_time(), rec.get_value() or 0.0)
+            for rec in _circuit_records(query_api, src, start, stop, every,
+                                        name_filter, mode, tail=_SUM_TAIL)]
+
+
+def _circuit_segments(query_api, start: str, stop: str,
+                      every: str | None) -> list[tuple[str, str, str]]:
+    """(measurement, start, stop) segments tiling [start, stop) — see the note at
+    the top of this section. Always at least one segment; a lone raw one whenever
+    the rollup can't help."""
+    src = _rollup_src(every)
+    span = rollup_span(query_api, src) if USE_ROLLUPS and src != MEAS_RAW else None
+    if span is None:
+        return [(MEAS_RAW, start, stop)]
+    start_dt, stop_dt = _parse_flux_ts(start), _parse_flux_ts(stop)
+    # Snap the rollup segment inwards to whole aggregation windows: conservative
+    # under either stamping convention, and it keeps every truncated edge window
+    # (whose stamp is clamped to the range bound) on the raw side, where it
+    # stamps exactly as it always has.
+    lo = _grid_ceil(max(start_dt, span[0]), every)
+    hi = _grid_floor(min(stop_dt, span[1]), every)
+    if hi <= lo:
+        return [(MEAS_RAW, start, stop)]
+    segments = [(src, flux_ts(lo), flux_ts(hi))]
+    if start_dt < lo:
+        segments.insert(0, (MEAS_RAW, start, flux_ts(lo)))
+    if hi < stop_dt:
+        segments.append((MEAS_RAW, flux_ts(hi), stop))
+    return segments
+
+
+def _run_segments(query_api, start: str, stop: str, every: str | None, run) -> list:
+    """Concatenate run(measurement, start, stop) over each segment. A rollup
+    segment that comes back empty is re-run against raw: a slow report beats one
+    full of zeros."""
+    rows: list = []
+    for src, seg_start, seg_stop in _circuit_segments(query_api, start, stop, every):
+        part = run(src, seg_start, seg_stop)
+        if not part and src != MEAS_RAW:
+            logger.warning(f"{src} empty over {seg_start}..{seg_stop}; falling back to raw")
+            part = run(MEAS_RAW, seg_start, seg_stop)
+        rows.extend(part)
+    return rows
+
+
+def _merge_keyed(rows) -> list[tuple]:
+    """Sum values sharing a key, ascending by key. Segment cuts land on window
+    boundaries so collisions shouldn't arise — but sum rather than silently drop
+    a day if one ever does."""
+    acc: dict = {}
+    for k, v in rows:
+        acc[k] = acc.get(k, 0.0) + v
+    return sorted(acc.items())
+
+
+def _local_day(t: datetime) -> date:
+    # aggregateWindow stamps each window at its STOP, i.e. local midnight of the next day
+    return (t.astimezone(LOCAL_TZ) - timedelta(seconds=1)).date()
+
+
 def query_total_kwh(query_api, start: str, stop: str) -> float:
     """Total grid consumption in kWh for the given range."""
     flux = f'''
@@ -90,26 +388,25 @@ from(bucket: "{INFLUXDB_BUCKET}")
     return 0.0
 
 
-def query_circuit_energy(query_api, start: str, stop: str) -> list[dict]:
-    """Energy per circuit in kWh, summed across tag-variants, sorted descending."""
-    flux = f'''
-from(bucket: "{INFLUXDB_BUCKET}")
-  |> range(start: {start}, stop: {stop})
-  |> filter(fn: (r) => r._measurement == "circuit" and r._field == "power_w")
-  |> map(fn: (r) => ({{r with _value: if r._value < 0.0 then -r._value else r._value}}))
-  |> integral(unit: 1h)
-  |> map(fn: (r) => ({{r with _value: r._value / 1000.0}}))
-  |> group(columns: ["name"])
+_BY_NAME_TAIL = '''  |> group(columns: ["name"])
   |> sum(column: "_value")
   |> group()
   |> keep(columns: ["name", "_value"])
-  |> sort(columns: ["_value"], desc: true)
 '''
-    results = []
-    for table in query_api.query(flux, org=INFLUXDB_ORG):
-        for record in table.records:
-            results.append({"name": record.values.get("name", "Unknown"), "kwh": round(record.get_value(), 2)})
-    return results
+
+
+def query_circuit_energy(query_api, start: str, stop: str) -> list[dict]:
+    """Energy per circuit in kWh, summed across tag-variants, sorted descending."""
+    def run(src, seg_start, seg_stop):
+        return [(rec.values.get("name", "Unknown"), rec.get_value() or 0.0)
+                for rec in _circuit_records(query_api, src, seg_start, seg_stop,
+                                            every=None, tail=_BY_NAME_TAIL)]
+
+    totals: dict[str, float] = {}
+    for name, kwh in _run_segments(query_api, start, stop, None, run):
+        totals[name] = totals.get(name, 0.0) + kwh
+    return sorted(({"name": n, "kwh": round(k, 2)} for n, k in totals.items()),
+                  key=lambda c: -c["kwh"])
 
 
 _BUCKET_RULES: list[tuple[str, re.Pattern]] | None = None
@@ -149,23 +446,15 @@ def query_circuit_kwh_by_name(query_api, start: str, stop: str) -> dict[str, flo
 
 def query_hourly_circuit_kwh(query_api, start: str, stop: str,
                              name_filter: str) -> list[tuple[datetime, float]]:
-    """Hourly kWh summed across circuits matching name_filter regex (case-insensitive)."""
-    flux = f'''
-from(bucket: "{INFLUXDB_BUCKET}")
-  |> range(start: {start}, stop: {stop})
-  |> filter(fn: (r) => r._measurement == "circuit" and r._field == "power_w")
-  |> filter(fn: (r) => r.name =~ /(?i){name_filter}/)
-  |> map(fn: (r) => ({{r with _value: if r._value < 0.0 then -r._value else r._value}}))
-  |> aggregateWindow(every: 1h, fn: mean, createEmpty: false)
-  |> map(fn: (r) => ({{r with _value: r._value / 1000.0}}))
-  |> group(columns: ["_time"])
-  |> sum()
-'''
-    out = []
-    for table in query_api.query(flux, org=INFLUXDB_ORG):
-        for record in table.records:
-            out.append((record.get_time(), record.get_value() or 0.0))
-    return out
+    """Hourly kWh summed across circuits matching name_filter regex (case-insensitive).
+
+    Kept on mean-power × 1h (rollup field power_w_mean) rather than switching to
+    energy_wh, so the numbers this feeds — today/week EV totals — don't move."""
+    def run(src, seg_start, seg_stop):
+        return _summed_rows(query_api, src, seg_start, seg_stop, "1h",
+                            name_filter, mode="mean")
+
+    return _merge_keyed(_run_segments(query_api, start, stop, "1h", run))
 
 
 def query_interval_panel_kwh(query_api, start: str, stop: str,
@@ -191,49 +480,23 @@ from(bucket: "{INFLUXDB_BUCKET}")
 def query_interval_circuit_kwh(query_api, start: str, stop: str, every: str,
                                name_filter: str | None = None) -> list[tuple[str, datetime, float]]:
     """Per-circuit kWh per `every`-window (integral). Returns (name, utc_stop, kwh)."""
-    nf = f'  |> filter(fn: (r) => r.name =~ /(?i){name_filter}/)\n' if name_filter else ''
-    flux = f'''
-from(bucket: "{INFLUXDB_BUCKET}")
-  |> range(start: {start}, stop: {stop})
-  |> filter(fn: (r) => r._measurement == "circuit" and r._field == "power_w")
-{nf}  |> map(fn: (r) => ({{r with _value: if r._value < 0.0 then -r._value else r._value}}))
-  |> aggregateWindow(
-       every: {every},
-       fn: (column, tables=<-) => tables |> integral(unit: 1h, column: column),
-       createEmpty: false)
-  |> map(fn: (r) => ({{r with _value: r._value / 1000.0}}))
-'''
-    out: list[tuple[str, datetime, float]] = []
-    for table in query_api.query(flux, org=INFLUXDB_ORG):
-        for record in table.records:
-            out.append((record.values.get("name", "Unknown"),
-                        record.get_time(), record.get_value() or 0.0))
-    return out
+    def run(src, seg_start, seg_stop):
+        return [(rec.values.get("name", "Unknown"), rec.get_time(), rec.get_value() or 0.0)
+                for rec in _circuit_records(query_api, src, seg_start, seg_stop,
+                                            every, name_filter)]
+
+    # callers accumulate additively, so segments just concatenate
+    return _run_segments(query_api, start, stop, every, run)
 
 
 def query_interval_circuit_kwh_summed(query_api, start: str, stop: str, every: str,
                                       name_filter: str) -> list[tuple[datetime, float]]:
     """Per-`every`-window kWh summed across circuits matching name_filter.
     One (utc_stop, kwh) per window; same bucketing as query_interval_panel_kwh."""
-    flux = f'''
-from(bucket: "{INFLUXDB_BUCKET}")
-  |> range(start: {start}, stop: {stop})
-  |> filter(fn: (r) => r._measurement == "circuit" and r._field == "power_w")
-  |> filter(fn: (r) => r.name =~ /(?i){name_filter}/)
-  |> map(fn: (r) => ({{r with _value: if r._value < 0.0 then -r._value else r._value}}))
-  |> aggregateWindow(
-       every: {every},
-       fn: (column, tables=<-) => tables |> integral(unit: 1h, column: column),
-       createEmpty: false)
-  |> map(fn: (r) => ({{r with _value: r._value / 1000.0}}))
-  |> group(columns: ["_time"])
-  |> sum()
-'''
-    out: list[tuple[datetime, float]] = []
-    for table in query_api.query(flux, org=INFLUXDB_ORG):
-        for record in table.records:
-            out.append((record.get_time(), record.get_value() or 0.0))
-    return out
+    def run(src, seg_start, seg_stop):
+        return _summed_rows(query_api, src, seg_start, seg_stop, every, name_filter)
+
+    return _merge_keyed(_run_segments(query_api, start, stop, every, run))
 
 
 def query_daily_panel_kwh(query_api, start: str, stop: str) -> list[tuple[date, float]]:
@@ -264,30 +527,11 @@ from(bucket: "{INFLUXDB_BUCKET}")
 def query_daily_circuit_kwh(query_api, start: str, stop: str,
                             name_filter: str) -> list[tuple[date, float]]:
     """Daily kWh summed across circuits matching name_filter (case-insensitive)."""
-    flux = f'''
-import "timezone"
-option location = timezone.location(name: "{LOCAL_TZ_NAME}")
+    def run(src, seg_start, seg_stop):
+        return _summed_rows(query_api, src, seg_start, seg_stop, "1d", name_filter)
 
-from(bucket: "{INFLUXDB_BUCKET}")
-  |> range(start: {start}, stop: {stop})
-  |> filter(fn: (r) => r._measurement == "circuit" and r._field == "power_w")
-  |> filter(fn: (r) => r.name =~ /(?i){name_filter}/)
-  |> map(fn: (r) => ({{r with _value: if r._value < 0.0 then -r._value else r._value}}))
-  |> aggregateWindow(
-       every: 1d,
-       fn: (column, tables=<-) => tables |> integral(unit: 1h, column: column),
-       createEmpty: false)
-  |> map(fn: (r) => ({{r with _value: r._value / 1000.0}}))
-  |> group(columns: ["_time"])
-  |> sum()
-'''
-    out: list[tuple[date, float]] = []
-    for table in query_api.query(flux, org=INFLUXDB_ORG):
-        for record in table.records:
-            t = record.get_time().astimezone(LOCAL_TZ)
-            day = (t - timedelta(seconds=1)).date()
-            out.append((day, record.get_value() or 0.0))
-    return out
+    return _merge_keyed((_local_day(t), v)
+                        for t, v in _run_segments(query_api, start, stop, "1d", run))
 
 
 def query_monthly_panel_kwh(query_api, start: str, stop: str) -> list[tuple[tuple[int, int], float]]:
@@ -317,30 +561,11 @@ from(bucket: "{INFLUXDB_BUCKET}")
 def query_monthly_circuit_kwh(query_api, start: str, stop: str,
                               name_filter: str) -> list[tuple[tuple[int, int], float]]:
     """Monthly kWh summed across circuits matching name_filter (case-insensitive)."""
-    flux = f'''
-import "timezone"
-option location = timezone.location(name: "{LOCAL_TZ_NAME}")
+    def run(src, seg_start, seg_stop):
+        return _summed_rows(query_api, src, seg_start, seg_stop, "1mo", name_filter)
 
-from(bucket: "{INFLUXDB_BUCKET}")
-  |> range(start: {start}, stop: {stop})
-  |> filter(fn: (r) => r._measurement == "circuit" and r._field == "power_w")
-  |> filter(fn: (r) => r.name =~ /(?i){name_filter}/)
-  |> map(fn: (r) => ({{r with _value: if r._value < 0.0 then -r._value else r._value}}))
-  |> aggregateWindow(
-       every: 1mo,
-       fn: (column, tables=<-) => tables |> integral(unit: 1h, column: column),
-       createEmpty: false)
-  |> map(fn: (r) => ({{r with _value: r._value / 1000.0}}))
-  |> group(columns: ["_time"])
-  |> sum()
-'''
-    out: list[tuple[tuple[int, int], float]] = []
-    for table in query_api.query(flux, org=INFLUXDB_ORG):
-        for record in table.records:
-            t = record.get_time().astimezone(LOCAL_TZ)
-            d = (t - timedelta(seconds=1)).date()
-            out.append(((d.year, d.month), record.get_value() or 0.0))
-    return out
+    rows = _run_segments(query_api, start, stop, "1mo", run)
+    return _merge_keyed(((_local_day(t).year, _local_day(t).month), v) for t, v in rows)
 
 
 def add_months(year: int, month: int, delta: int) -> tuple[int, int]:

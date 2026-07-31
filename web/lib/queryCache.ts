@@ -1,7 +1,9 @@
 import { queryPower, queryEnergyByCategory, type SeriesPoint } from "./influx";
 import { intervalSeconds, type IntervalKey } from "./interval";
+import { energySourceForSpan, sourceForInterval, sourceKey } from "./rollup";
 
-export type EnergyRow = { category: string; kwh: number };
+export type { EnergyRow } from "./influx";
+import type { EnergyRow } from "./influx";
 
 // In-memory LRU keyed by (interval, quantized from, quantized to). Lives in
 // the Node server module scope — survives across requests on the Pi (where
@@ -15,8 +17,11 @@ const MAX_ENTRIES = 100;
 const cache = new Map<string, Entry>();
 const inflight = new Map<string, Promise<SeriesPoint[]>>();
 
+// The measurement is in the key so an entry can never be served from a
+// different source than it was written with (the source is a pure function of
+// the interval today, so this is belt-and-braces against a threshold change).
 function makeKey(interval: IntervalKey, fromMs: number, toMs: number): string {
-  return `${interval}|${fromMs}|${toMs}`;
+  return `${interval}|${sourceKey(sourceForInterval(interval))}|${fromMs}|${toMs}`;
 }
 
 export async function cachedQueryPower(opts: {
@@ -73,7 +78,9 @@ export async function cachedQueryEnergyByCategory(opts: {
   fromMs: number;
   toMs: number;
 }): Promise<EnergyRow[]> {
-  const key = `${opts.fromMs}|${opts.toMs}`;
+  // Source is derived from the span, which the key already pins — included
+  // explicitly so a stale entry can't outlive a threshold change.
+  const key = `${sourceKey(energySourceForSpan(opts.toMs - opts.fromMs))}|${opts.fromMs}|${opts.toMs}`;
   const now = Date.now();
 
   const hit = energyCache.get(key);
