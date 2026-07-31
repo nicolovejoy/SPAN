@@ -1,0 +1,27 @@
+[Unit]
+Description=Nightly restic backup of phrpi data (InfluxDB, TimescaleDB, Grafana, secrets)
+Documentation=file:///home/nico/SPAN/pi/backup/README.md
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/nico/SPAN/pi/backup/backup.sh
+
+# Backups touch Docker and read root-only secrets, so this runs as root.
+User=root
+
+# A stuck restic (dead network, hung upload) must not block tomorrow's run.
+TimeoutStartSec=2h
+
+# Keep the Pi responsive — SPAN's 30s collector matters more than backup speed.
+Nice=10
+IOSchedulingClass=idle
+
+# Transient network failures are the common case; retry rather than skip a day.
+Restart=on-failure
+RestartSec=15min
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,29 @@
+# Template for /etc/span-backup.env  —  root-owned, chmod 600.
+#
+# This file contains live credentials. It is NOT the copy you rely on: the
+# RESTIC_PASSWORD below must ALSO be stored in 1Password. If the Pi's SD card
+# dies and that password exists nowhere else, every backup is unrecoverable
+# ciphertext and this whole exercise was pointless.
+#
+# Install:
+#   sudo cp restic-env.example /etc/span-backup.env
+#   sudo chmod 600 /etc/span-backup.env
+#   sudo nano /etc/span-backup.env      # fill in the four values
+
+# --- Cloudflare R2 (S3-compatible) --------------------------------------------
+# Repo URL shape:  s3:https://<ACCOUNT_ID>.r2.cloudflarestorage.com/<BUCKET>
+# ACCOUNT_ID is on the Cloudflare dashboard R2 page; BUCKET is what you named it.
+RESTIC_REPOSITORY=s3:https://ACCOUNT_ID.r2.cloudflarestorage.com/phrpi-backups
+
+# From: Cloudflare dashboard -> R2 -> Manage API tokens -> Create API token.
+# Scope it to Object Read & Write on this ONE bucket. Do not use a global key.
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+
+# --- restic repo encryption ---------------------------------------------------
+# Generate a strong one and SAVE IT IN 1PASSWORD BEFORE running restic init:
+#   openssl rand -base64 32
+RESTIC_PASSWORD=
+
+# R2 has no meaningful per-region behaviour but the S3 client wants a value.
+AWS_DEFAULT_REGION=auto

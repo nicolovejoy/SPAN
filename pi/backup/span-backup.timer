@@ -1,0 +1,20 @@
+[Unit]
+Description=Run the phrpi restic backup nightly
+Documentation=file:///home/nico/SPAN/pi/backup/README.md
+
+[Timer]
+# 03:30 local. Well clear of the 07:00 daily report and of any evening activity,
+# and the EV usually finishes charging before this.
+OnCalendar=*-*-* 03:30:00
+
+# Avoid hitting R2 at exactly the same second as every other cron-shaped job
+# on the internet.
+RandomizedDelaySec=15min
+
+# If the Pi was off at 03:30, run once it's back rather than skipping the day.
+Persistent=true
+
+Unit=span-backup.service
+
+[Install]
+WantedBy=timers.target
