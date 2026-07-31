@@ -58,13 +58,26 @@ routed through the same `phrpi` Cloudflare tunnel, gated by Cloudflare Access
 
 ## Next Steps
 
+**Start at `docs/roadmap.md`** — phased, dependency-ordered, each phase scoped to hand to a
+subagent. The list below is near-term mechanics; the roadmap explains ordering and why.
+
 - **Manifest CORS** — *Decided 2026-05-24 to live with it.* `/manifest.webmanifest` is gated by CF Access; browser fetches it without credentials and gets redirected to login → console error. The fix (separate CF Access app with Bypass policy for the four asset paths) is blocked by CF's no-overlapping-destinations rule and would require enumerating every dashboard route. Cosmetic-only — dashboard works; PWA install persists once configured. Revisit only if CF adds path-exclusion or if the noise becomes actively annoying.
 - **EV monthly + annual cost rollup** in daily report (request #3 from 2026-05-23 batch — last unaddressed item). Bundle with SCL plan confirmation so cost isn't computed against two rate models. *2026-06-15: weekly section now excludes EV (per-2h-bucket subtract) with this-week-vs-5wk + vs-12wk charts and an EV-charging-vs-weekly-avg callout; EV accounting (weekly + monthly) pinned to the exact `CHARGE_CIRCUIT` name shared with `charge_detector`, not the Car regex.*
 - **Confirm SCL plan** — bill shows "Small General Energy" flat $0.1241/kWh + $0.83/day base. Check whether residential RSC tiered or TOU would be cheaper; align Grafana cost panel once decided.
-- **Power explorer perf — 90d/1y still slow at the source** (#9). Root cause: `web/lib/influx.ts` scanned raw 30s points over the whole range (~15M pts for 1y). *2026-07-31: **all three sides are built and unit-tested, none deployed.*** (a) Influx: `pi/influx_tasks/{circuit_5m,circuit_1h}.flux` + `pi/provision_influx_tasks.sh` + `pi/backfill_rollups.py`. (b) Web: `web/lib/rollup.ts` picks source by interval/span and hybridises with raw for the fresh tail, falling back to raw entirely if a rollup returns no rows. (c) Report: `pi/daily_report.py` routes its wide queries through the same segment logic. **Remaining: provision the tasks + run the backfill on the Pi, then verify.** Contract, verification numbers and tail-lag invariants are in `pi/influx_tasks/README.md` — read it before wiring another consumer.
-  - Fields per bucket: `power_w_mean`, `energy_wh` (integral of `power_w`), `energy_wh_counter` (delta of SPAN's own meter). The last two are stored side by side deliberately to A/B before picking one.
-  - Timestamps are **end-of-bucket** (`timeSrc: "_stop"`) — a point at T covers `[T - bucket, T)`.
-  - Tail lag by design: `circuit_5m` is 1–6 min stale, `circuit_1h` 5–65 min. Consumers must clamp or hybridise with raw; see the README.
+- **~~Power explorer perf~~ (#9) — DONE, deployed 2026-07-31.** `circuit_5m`/`circuit_1h` tasks
+  active, 7 months backfilled (3.77M + 314k pts), verified **-0.0032%** vs raw integral on a
+  gap-free week. `web/` and `pi/daily_report.py` read them; containers rebuilt.
+  - Fields: `power_w_mean`, `energy_wh` (integral), `energy_wh_counter` (SPAN's own meter delta).
+    Both energy fields stored deliberately to A/B — see **#15**, which argues the counter should win
+    because it's immune to missed polls.
+  - Timestamps are **end-of-bucket** — a point at T covers `[T - bucket, T)`. Comparison queries
+    must shift by one bucket or edges silently mismatch.
+  - Tail lag: `circuit_5m` 1–6 min, `circuit_1h` 5–65 min. Consumers hybridise with raw.
+  - **Follow-up:** the 30d threshold in `energySourceForSpan()` is mistuned — 30d (7.9s, `circuit_5m`,
+    ~181k pts) is *slower* than 1y (4.7s, `circuit_1h`, ~105k pts). Drop the 5m→1h boundary to ~7d.
+  - Contract + tail-lag invariants: `pi/influx_tasks/README.md`. Read before wiring a new consumer.
+- **Verify the daily report** against rollups — run `daily_report.py --date <a past date>` and check
+  the logs for `rollup circuit_1h:` lines and any `falling back to raw` warnings. Not yet done.
 - **Power explorer chart E2E** (#13) — Playwright harness via a `MOCK_INFLUX` fixture mode (prod is behind CF Access so test a local hermetic build). Locks in the 2026-06-19 pan/zoom fix: bounded-to-data, no blank-out, intent-only URL, cache hits, table-follows-zoom. Plan in the issue.
 - **Zoom-in detail follow-up** — since 2026-06-19 pan/zoom stays *within* the loaded preset window (bounded by `fixLeftEdge/fixRightEdge`); zoom-in no longer auto-fetches a finer bucket. If wanted, add a deliberate "load detail at this zoom" that widens the loaded window. Low priority.
 - **In-email settings link** (#8) — clickable link in the daily email to change report cadence + aux-heat threshold without redeploying. Deferred 2026-06-14 (needs persistent store + web page + report-loop rework). Cadence stays daily for now.
