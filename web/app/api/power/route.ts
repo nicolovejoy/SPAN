@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { cachedQueryPower } from "@/lib/queryCache";
 import { INTERVAL_ORDER, intervalSeconds, type IntervalKey } from "@/lib/interval";
+import { isCategory } from "@/lib/categories";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -13,6 +14,9 @@ export async function GET(request: Request) {
   const fromMs = Number(url.searchParams.get("from"));
   const toMs = Number(url.searchParams.get("to"));
   const intervalRaw = url.searchParams.get("interval") ?? "1h";
+  // Optional: one series per circuit within this category instead of the five
+  // category lines (#12). Absent = the original category response.
+  const drill = url.searchParams.get("drill") ?? undefined;
 
   if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || fromMs >= toMs) {
     return NextResponse.json(
@@ -23,13 +27,21 @@ export async function GET(request: Request) {
   if (!isInterval(intervalRaw)) {
     return NextResponse.json({ error: `invalid interval ${intervalRaw}` }, { status: 400 });
   }
+  if (drill !== undefined && !isCategory(drill)) {
+    return NextResponse.json({ error: `invalid drill ${drill}` }, { status: 400 });
+  }
 
   // Defensive quantize so unquantized clients still produce stable cache keys.
   const intervalMs = intervalSeconds(intervalRaw) * 1000;
   const qFromMs = Math.floor(fromMs / intervalMs) * intervalMs;
   const qToMs = Math.floor(toMs / intervalMs) * intervalMs;
 
-  const data = await cachedQueryPower({ fromMs: qFromMs, toMs: qToMs, interval: intervalRaw });
+  const data = await cachedQueryPower({
+    fromMs: qFromMs,
+    toMs: qToMs,
+    interval: intervalRaw,
+    drill,
+  });
 
   // Trailing-bucket queries (to ≈ now) change as time passes; cap cache at
   // one bucket. Historical queries (to is well in the past) are immutable.

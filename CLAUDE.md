@@ -73,15 +73,14 @@ subagent. The list below is near-term mechanics; the roadmap explains ordering a
   - Timestamps are **end-of-bucket** — a point at T covers `[T - bucket, T)`. Comparison queries
     must shift by one bucket or edges silently mismatch.
   - Tail lag: `circuit_5m` 1–6 min, `circuit_1h` 5–65 min. Consumers hybridise with raw.
-  - **Follow-up:** the 30d threshold in `energySourceForSpan()` is mistuned — 30d (7.9s, `circuit_5m`,
-    ~181k pts) is *slower* than 1y (4.7s, `circuit_1h`, ~105k pts). Drop the 5m→1h boundary to ~7d.
+  - ~~Follow-up: retune the 30d threshold~~ — done 2026-08-03, `ENERGY_5M_MAX_MS` now 7d.
   - Contract + tail-lag invariants: `pi/influx_tasks/README.md`. Read before wiring a new consumer.
 - **Verify the daily report** against rollups — run `daily_report.py --date <a past date>` and check
   the logs for `rollup circuit_1h:` lines and any `falling back to raw` warnings. Not yet done.
 - **Power explorer chart E2E** (#13) — Playwright harness via a `MOCK_INFLUX` fixture mode (prod is behind CF Access so test a local hermetic build). Locks in the 2026-06-19 pan/zoom fix: bounded-to-data, no blank-out, intent-only URL, cache hits, table-follows-zoom. Plan in the issue.
 - **Zoom-in detail follow-up** — since 2026-06-19 pan/zoom stays *within* the loaded preset window (bounded by `fixLeftEdge/fixRightEdge`); zoom-in no longer auto-fetches a finer bucket. If wanted, add a deliberate "load detail at this zoom" that widens the loaded window. Low priority.
 - **In-email settings link** (#8) — clickable link in the daily email to change report cadence + aux-heat threshold without redeploying. Deferred 2026-06-14 (needs persistent store + web page + report-loop rework). Cadence stays daily for now.
-- **Dashboard UX backlog** — web app. Done 2026-06-19 (all in `PowerChart.tsx`): ~~time range in PST~~ (axis renders Pacific via per-point DST offset), ~~all-axes labels~~ (kW unit + dated day demarcations on the time axis), ~~legend moved left~~ (right price scale kept clean for values). Open: per-circuit lines (**#12**, deferred), a time-nav control beyond swiping; polling cadence (#5), relax CF Access login (#6), 1m smoothing (#7). Custom PWA icon. Optional: de-group HVAC into per-circuit lines in the explorer (low priority).
+- **Dashboard UX backlog** — web app. Done 2026-06-19 (all in `PowerChart.tsx`): ~~time range in PST~~, ~~all-axes labels~~, ~~legend moved left~~. Done 2026-08-03: ~~per-circuit lines (#12)~~ (drill via `⌄` chip; `lib/drill.ts`), ~~time-nav beyond swiping~~ (`OverviewStrip` all-history brush + `‹ ›` step buttons), pan restored (slack window, `lib/panWindow.ts` — loaded ≈ 3× visible with silent edge extension), cost columns in the breakdown (`lib/rates.ts`, flat SCL $0.1241/kWh + $0.83/day prorated base + Δ vs previous window — revisit if the SCL plan confirmation says TOU). Open: polling cadence (#5), relax CF Access login (#6), 1m smoothing (#7). Custom PWA icon. Note: daily report still costs with the TOU model in `pi/rates.py` — web and report disagree until the SCL plan is confirmed.
 - **HVAC cooling watch** — cooling fault found 2026-06-14 (aux resistance firing + compressor short-cycling on a hot day); turning off the HRV apparently fixed it. Confirm with a 3–6h `pi/hvac_probe.py` run during active cooling. Aux-heat alarm: Auxiliary/Heat Pump cost ≥ `$AUX_HEAT_ALARM_USD` (default $0.50/day, ≈4 kWh) → red banner + `⚠ Aux heat —` subject. Cost-based since that circuit also draws during cooling. Cold-weather suppression at #3.
 
 ## SPAN API

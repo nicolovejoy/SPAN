@@ -16,6 +16,12 @@ export const CATEGORIES = [
 
 export type Category = (typeof CATEGORIES)[number];
 
+/** True if `v` names one of the configured categories (rules + the default).
+ *  Guards the `drill` param on the API routes and in the URL state. */
+export function isCategory(v: string): boolean {
+  return (CATEGORIES as readonly string[]).includes(v);
+}
+
 export function categorize(name: string): string {
   for (const { category, re } of compiledRules) {
     if (re.test(name)) return category;

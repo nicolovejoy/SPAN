@@ -13,24 +13,54 @@ import {
   type UTCTimestamp,
   type WhitespaceData,
 } from "lightweight-charts";
-import { intervalSeconds } from "@/lib/interval";
+import { intervalSeconds, MAX_BUCKETS, type IntervalKey } from "@/lib/interval";
+import {
+  CATEGORY_ORDER,
+  LEGEND_MAX_CIRCUITS,
+  categoryColor,
+  circuitShades,
+  drillInterval,
+} from "@/lib/drill";
+import { padWindow, needsExtension, extendWindow } from "@/lib/panWindow";
 import { fetchSeriesCached } from "@/lib/clientFetch";
 import type { SeriesPoint } from "@/lib/influx";
 import type { DashState } from "@/lib/url-state";
 
 /** Called when a pan/zoom settles, with the visible sub-window (real-UTC ms).
- *  Drives the table + header only — it never changes the chart's loaded
- *  window, so there is no gesture→fetch→setVisibleRange feedback loop. */
+ *  Drives the table + header only — it never moves the chart's view, so there
+ *  is no gesture→fetch→setVisibleRange feedback loop. (A gesture that reaches
+ *  a loaded edge does widen the *loaded* window, but that re-setData restores
+ *  the user's current view rather than resetting it.) */
 export type VisibleChange = (fromMs: number, toMs: number) => void;
 
-const CATEGORY_COLORS: Record<string, string> = {
-  HVAC: "#ef4444",
-  Car: "#3b82f6",
-  Lights: "#eab308",
-  Appliances: "#f59e0b",
-  Else: "#6b7280",
+/** What's currently fetched + drawn. Wider than the visible window (see
+ *  lib/panWindow) so there's drag room inside the fixLeftEdge/fixRightEdge
+ *  bounds. `viewFrom/viewTo` is the preset window this padding was built
+ *  around — the reset target, and the step size for edge extension. */
+type LoadWindow = {
+  fromMs: number;
+  toMs: number;
+  interval: IntervalKey;
+  viewFromMs: number;
+  viewToMs: number;
+  /** Category drawn as one line per circuit instead of one line (#12). */
+  drill: string | null;
+  /** true = preset/bucket change (snap the view back to viewFrom/viewTo);
+   *  false = edge extension or drill change (keep whatever the user is
+   *  looking at). */
+  resetView: boolean;
 };
-const CATEGORY_ORDER = ["HVAC", "Car", "Lights", "Appliances", "Else"] as const;
+
+type LegendEntry = {
+  label: string;
+  color: string;
+  dotted?: boolean;
+  /** Drilled circuit — nested under its category label. */
+  indent?: boolean;
+  /** Label only, no swatch — a drilled category has no line of its own. */
+  header?: boolean;
+};
+
 const SUM_COLOR = "#525252";    // neutral; reads as derived in light + dark
 const TOTAL_COLOR = "#9ca3af";  // dotted reference, intentionally low-contrast
 
@@ -169,6 +199,45 @@ function pointsFor(
   return times.map((time) => ({ time, value: source.get(time) ?? 0 }));
 }
 
+/**
+ * Add/remove/recolor the drilled category's per-circuit series so the chart
+ * holds exactly `names` (sorted, so a circuit keeps its shade). The five
+ * category series are created once at mount; these are the only dynamic ones.
+ * Called with an empty `names` when backing out of a drill.
+ */
+function reconcileCircuitSeries(
+  chart: IChartApi,
+  map: Map<string, ISeriesApi<"Line">>,
+  names: string[],
+  baseColor: string,
+): void {
+  const wanted = new Set(names);
+  for (const [name, series] of map) {
+    if (wanted.has(name)) continue;
+    try { chart.removeSeries(series); }
+    catch (e) { console.warn(`removeSeries failed for ${name}`, e); }
+    map.delete(name);
+  }
+  const shades = circuitShades(baseColor, names.length);
+  names.forEach((name, i) => {
+    const color = shades[i] ?? baseColor;
+    const existing = map.get(name);
+    if (existing) {
+      existing.applyOptions({ color });
+      return;
+    }
+    map.set(
+      name,
+      chart.addSeries(LineSeries, {
+        color,
+        lineWidth: 2,
+        priceLineVisible: false,
+        lastValueVisible: false,
+      }),
+    );
+  });
+}
+
 function Spinner() {
   return (
     <svg
@@ -208,7 +277,17 @@ export function PowerChart({
   onVisibleRef.current = onVisibleChange;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
+  // Every series handle below belongs to whatever chart `chartRef` holds, and
+  // lightweight-charts throws ("Value is null") on any call into a series whose
+  // chart has been removed. A remount (StrictMode's double-mount, Fast Refresh)
+  // tears the chart down between an effect being scheduled and running, so a
+  // `!series` null check isn't enough — the ref still holds a dead object.
+  // This flag is the one thing cleared *before* teardown starts; every path
+  // that touches a series checks it.
+  const chartAliveRef = useRef(false);
   const catSeriesRef = useRef<Map<string, ISeriesApi<"Line">>>(new Map());
+  // Drill-down lines, created/removed on the fly (see reconcileCircuitSeries).
+  const circuitSeriesRef = useRef<Map<string, ISeriesApi<"Line">>>(new Map());
   const sumSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const totalSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const gestureTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -222,13 +301,28 @@ export function PowerChart({
   } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Circuit names in the current drill, sorted — legend only; the series
+  // themselves live in circuitSeriesRef.
+  const [circuitNames, setCircuitNames] = useState<string[]>([]);
+  // The loaded (padded) window. `loadRef` mirrors it for the create-once chart
+  // callback; `extendingRef` keeps overlapping extensions from stacking up.
+  const [load, setLoad] = useState<LoadWindow | null>(null);
+  const loadRef = useRef<LoadWindow | null>(null);
+  const extendingRef = useRef(false);
+  // Last window/bucket the padding was computed for — lets the load effect tell
+  // a real range change from a drill-only change (which must not re-pad).
+  const lastViewRef = useRef<{
+    fromMs: number;
+    toMs: number;
+    interval: IntervalKey;
+  } | null>(null);
 
   // Recompute the Sum series (sum of currently-selected categories) from the
   // last loaded data. No refetch, no setVisibleRange — preserves zoom.
   const applySum = (show: string[]) => {
     const d = dataRef.current;
     const sumSeries = sumSeriesRef.current;
-    if (!d || !sumSeries) return;
+    if (!d || !sumSeries || !chartAliveRef.current) return;
     const selected = new Set(show);
     const showSum = selected.size >= 2;
     if (showSum) {
@@ -270,7 +364,9 @@ export function PowerChart({
         tickMarkFormatter: tickFmt,
         // Bound pan/zoom to the loaded data: you can explore within the window
         // but can never scroll/zoom off into empty canvas (past `now`, or
-        // before the first point). This is what stops the blank-out.
+        // before the first point). This is what stops the blank-out — and
+        // since the loaded window is padded well past the visible one, it
+        // bounds the *padding*, leaving real room to drag.
         fixLeftEdge: true,
         fixRightEdge: true,
         rightOffset: 0,
@@ -286,6 +382,7 @@ export function PowerChart({
       crosshair: { mode: 1 /* Magnet */ },
     });
     chartRef.current = chart;
+    chartAliveRef.current = true;
 
     const total = chart.addSeries(LineSeries, {
       color: TOTAL_COLOR,
@@ -305,9 +402,11 @@ export function PowerChart({
     });
     sumSeriesRef.current = sum;
 
+    // The five category series are fixed for the chart's lifetime; drill-down
+    // circuit series are added and removed around them as the drill changes.
     for (const cat of CATEGORY_ORDER) {
       const s = chart.addSeries(LineSeries, {
-        color: CATEGORY_COLORS[cat] ?? "#888",
+        color: categoryColor(cat),
         lineWidth: 2,
         priceLineVisible: false,
         lastValueVisible: false,
@@ -315,9 +414,10 @@ export function PowerChart({
       catSeriesRef.current.set(cat, s);
     }
 
-    // Report the visible sub-window outward (table + header follow pan/zoom).
-    // This never changes the chart's loaded window, so there's no feedback
-    // loop — fixLeftEdge/fixRightEdge already keep the range inside the data.
+    // Report the visible sub-window outward (table + header follow pan/zoom),
+    // then top up the loaded window if the gesture landed near one of its
+    // edges. The view itself is never moved from here, so there's no feedback
+    // loop; an extension re-setData's around the user's current view.
     const onRangeChange: TimeRangeChangeEventHandler<Time> = (range) => {
       if (!range) return;
       const fromSec = Number(range.from);
@@ -331,57 +431,162 @@ export function PowerChart({
         const now = Date.now();
         if (to > now) to = now;
         if (from < 0) from = 0;
-        onVisibleRef.current(Math.round(from), Math.round(to));
+        from = Math.round(from);
+        to = Math.round(to);
+        onVisibleRef.current(from, to);
+
+        const loaded = loadRef.current;
+        if (!loaded || extendingRef.current) return;
+        const side = needsExtension(loaded, { fromMs: from, toMs: to }, now);
+        if (!side) return;
+        const next = extendWindow(loaded, side, {
+          stepMs: loaded.viewToMs - loaded.viewFromMs,
+          nowMs: now,
+          intervalMs: intervalSeconds(loaded.interval) * 1000,
+          maxBuckets: MAX_BUCKETS,
+        });
+        if (!next) return; // at the cap (or at `now` / the epoch) — nothing to add
+        extendingRef.current = true;
+        setLoad({ ...loaded, ...next, resetView: false });
       }, 180);
     };
 
     chart.timeScale().subscribeVisibleTimeRangeChange(onRangeChange);
 
     return () => {
-      chart.timeScale().unsubscribeVisibleTimeRangeChange(onRangeChange);
+      // Drop every handle *before* removing the chart: if `remove()` throws
+      // mid-teardown the refs would otherwise stay pointing at a dead chart and
+      // the next effect would call into it. The load window goes too — it
+      // describes data that lived on this chart, so a remount re-pads from the
+      // current state instead of resurrecting the old one.
+      chartAliveRef.current = false;
+      chartRef.current = null;
+      catSeriesRef.current.clear();
+      circuitSeriesRef.current.clear();
+      sumSeriesRef.current = null;
+      totalSeriesRef.current = null;
+      dataRef.current = null;
+      loadRef.current = null;
+      lastViewRef.current = null;
+      extendingRef.current = false;
       if (gestureTimer.current) {
         clearTimeout(gestureTimer.current);
         gestureTimer.current = null;
       }
+      chart.timeScale().unsubscribeVisibleTimeRangeChange(onRangeChange);
       chart.remove();
-      chartRef.current = null;
-      catSeriesRef.current.clear();
-      sumSeriesRef.current = null;
-      totalSeriesRef.current = null;
-      dataRef.current = null;
     };
     // intentionally empty: stable chart instance; callback read via onVisibleRef
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Load + render the window set by presets/bucket. Pan/zoom does NOT run this
-  // (it only moves the view within the already-loaded data) — so the fetch and
-  // the authoritative setVisibleRange happen only on a real window/bucket
-  // change. That is what removes the old gesture feedback loop.
+  // A preset/bucket change picks the *visible* window; pad it out to the
+  // loaded window here. The bucket stays keyed to the visible span (chosen
+  // upstream by autoInterval) — padWindow shrinks the padding if the wider
+  // fetch would blow past MAX_BUCKETS.
   useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
+    const prev = lastViewRef.current;
+    const viewChanged =
+      !prev ||
+      prev.fromMs !== state.fromMs ||
+      prev.toMs !== state.toMs ||
+      prev.interval !== state.interval;
+    lastViewRef.current = {
+      fromMs: state.fromMs,
+      toMs: state.toMs,
+      interval: state.interval,
+    };
+
+    // Drill toggled on its own: keep the exact window already loaded (edge
+    // extensions included) and don't touch the visible range — only the drilled
+    // series is missing, and it must arrive at the user's current zoom.
+    if (!viewChanged) {
+      const loaded = loadRef.current;
+      if (loaded) {
+        setLoad({ ...loaded, drill: state.drill, resetView: false });
+        return;
+      }
+    }
 
     const now = Date.now();
-    const fromMs = state.fromMs;
-    const toMs = Math.min(now, state.toMs);
     const intervalMs = intervalSeconds(state.interval) * 1000;
-    const qFrom = Math.floor(fromMs / intervalMs) * intervalMs;
-    const qTo = Math.floor(toMs / intervalMs) * intervalMs;
+    const viewFromMs = state.fromMs;
+    const viewToMs = Math.min(now, state.toMs);
+    const padded = padWindow(
+      { fromMs: viewFromMs, toMs: viewToMs },
+      { nowMs: now, intervalMs, maxBuckets: MAX_BUCKETS },
+    );
+    extendingRef.current = false;
+    setLoad({
+      ...padded,
+      interval: state.interval,
+      viewFromMs,
+      viewToMs,
+      drill: state.drill,
+      resetView: true,
+    });
+  }, [state.fromMs, state.toMs, state.interval, state.drill]);
 
-    fetchSeriesCached(qFrom, qTo, state.interval)
-      .then((data) => {
-        if (cancelled || !chartRef.current) return;
+  // Fetch + render the loaded window. Runs on a preset/bucket change (snapping
+  // the view back to the preset) and on an edge extension (keeping the user's
+  // current view). Plain pan/zoom inside the padding does NOT run this.
+  useEffect(() => {
+    if (!load) return;
+    let cancelled = false;
+    const prevLoad = loadRef.current;
+    // The chart this fetch is for. A remount swaps in a new one while the
+    // request is still in flight, and the series we're about to draw into
+    // belong to the old one.
+    const chartAtStart = chartRef.current;
+    loadRef.current = load;
+    // Extensions load in the background — the chart already has data to show.
+    // A drill change does show the spinner: the new lines can take seconds and
+    // nothing else on screen indicates work is happening.
+    if (load.resetView || load.drill !== prevLoad?.drill) setLoading(true);
+    setError(null);
+
+    // Category data is fetched drilled or not — the drilled category's line is
+    // just hidden, and Sum/Total still need its numbers. The circuit fetch is a
+    // second, independently-cached request, so toggling a drill off and on again
+    // is a pure cache hit on both.
+    Promise.all([
+      fetchSeriesCached(load.fromMs, load.toMs, load.interval),
+      load.drill
+        ? fetchSeriesCached(
+            load.fromMs,
+            load.toMs,
+            // A drill multiplies the row count by the circuit count; coarsen
+            // the bucket if that would blow the per-fetch point budget.
+            drillInterval(load.interval, load.fromMs, load.toMs),
+            load.drill,
+          )
+        : Promise.resolve<SeriesPoint[]>([]),
+    ])
+      .then(([data, drillData]) => {
+        const chart = chartRef.current;
+        if (cancelled || !chart || !chartAliveRef.current || chart !== chartAtStart)
+          return;
 
         const { byCat, totalByTime, sortedTimes } = shapeData(data);
+        // Drilled series get their own time axis: their fetch may have been
+        // coarsened, so their bucket stamps needn't line up with the categories'.
+        const drilled = shapeData(drillData);
+        const drillNames = Array.from(drilled.byCat.keys()).sort((a, b) =>
+          a.localeCompare(b),
+        );
 
-        // Sentinels pin the axis to exactly [from, to] (capped at now) so the
-        // visible range spans the full requested window even when bucket
-        // alignment leaves the first/last point inside it.
-        const outerFromSec = Math.floor(fromMs / 1000) as UTCTimestamp;
-        const outerToSec = Math.floor(toMs / 1000) as UTCTimestamp;
+        // Sentinels pin the axis to exactly the loaded window so pan/zoom has
+        // the full padding to move through, even when bucket alignment leaves
+        // the first/last point inside it.
+        const outerFromSec = Math.floor(load.fromMs / 1000) as UTCTimestamp;
+        const outerToSec = Math.floor(load.toMs / 1000) as UTCTimestamp;
         dataRef.current = { byCat, sortedTimes, outerFromSec, outerToSec };
+
+        // setData rescales the time axis, so an extension has to put the
+        // user's view back exactly where it was.
+        const keep = load.resetView
+          ? null
+          : chart.timeScale().getVisibleRange();
 
         try {
           for (const cat of CATEGORY_ORDER) {
@@ -394,9 +599,31 @@ export function PowerChart({
             );
             try { series.setData(toChartData(pts)); }
             catch (e) { console.warn(`setData failed for ${cat}`, e); }
-            const visible = state.show.length === 0 || state.show.includes(cat);
+            // The drilled category is replaced by its circuits, not doubled up.
+            const visible =
+              (state.show.length === 0 || state.show.includes(cat)) &&
+              cat !== load.drill;
             series.applyOptions({ visible });
           }
+
+          reconcileCircuitSeries(
+            chart,
+            circuitSeriesRef.current,
+            drillNames,
+            categoryColor(load.drill ?? ""),
+          );
+          for (const name of drillNames) {
+            const series = circuitSeriesRef.current.get(name);
+            if (!series) continue;
+            const pts = padBounds(
+              pointsFor(drilled.sortedTimes, drilled.byCat.get(name)),
+              outerFromSec,
+              outerToSec,
+            );
+            try { series.setData(toChartData(pts)); }
+            catch (e) { console.warn(`setData failed for circuit ${name}`, e); }
+          }
+          setCircuitNames(drillNames);
 
           try {
             totalSeriesRef.current?.setData(
@@ -405,58 +632,112 @@ export function PowerChart({
           } catch (e) {
             console.warn("setData failed for Total", e);
           }
+          // Whole-house context is worth the scale everywhere except inside a
+          // drill: Lights' circuits are ~0.2 kW and a 5 kW dotted reference
+          // flattens them into noise along the axis.
+          totalSeriesRef.current?.applyOptions({ visible: !load.drill });
 
           applySum(state.show);
 
-          chartRef.current.timeScale().setVisibleRange({
-            from: toDisplay(outerFromSec),
-            to: toDisplay(outerToSec),
-          });
+          // Show the preset window (a slice of the loaded one) on a reset;
+          // restore the pre-setData view on an extension.
+          chart.timeScale().setVisibleRange(
+            keep ?? {
+              from: toDisplay(Math.floor(load.viewFromMs / 1000)),
+              to: toDisplay(Math.floor(load.viewToMs / 1000)),
+            },
+          );
         } catch (e) {
           console.error("PowerChart apply failed", e);
         } finally {
+          extendingRef.current = false;
           setLoading(false);
         }
       })
       .catch((e) => {
         if (cancelled) return;
         console.error("PowerChart fetch failed:", e);
-        setError(
-          "Couldn't load this range — try a narrower window or coarser bucket.",
-        );
-        setLoading(false);
+        extendingRef.current = false;
+        // An extension failure is silent: the chart keeps the data it has, and
+        // loadRef goes back to matching it so the edge can be retried.
+        if (!load.resetView) loadRef.current = prevLoad;
+        if (load.resetView) {
+          setError(
+            "Couldn't load this range — try a narrower window or coarser bucket.",
+          );
+          setLoading(false);
+        }
       });
 
     return () => {
       cancelled = true;
     };
-    // applySum + state.show read fresh each run; not deps (window/bucket only).
+    // applySum + state.show read fresh each run; not deps (loaded window only).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.fromMs, state.toMs, state.interval]);
+  }, [load]);
 
   // Show-filter toggle: recompute Sum + per-series visibility from the already
   // loaded data — no refetch, no setVisibleRange, so the current zoom is kept.
   useEffect(() => {
-    if (!dataRef.current) return;
+    if (!dataRef.current || !chartAliveRef.current) return;
     for (const cat of CATEGORY_ORDER) {
       const series = catSeriesRef.current.get(cat);
       if (!series) continue;
       series.applyOptions({
-        visible: state.show.length === 0 || state.show.includes(cat),
+        visible:
+          (state.show.length === 0 || state.show.includes(cat)) &&
+          cat !== state.drill,
       });
     }
+    totalSeriesRef.current?.applyOptions({ visible: !state.drill });
     applySum(state.show);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.show.join(",")]);
+  }, [state.show.join(","), state.drill]);
 
-  const legend: { label: string; color: string; dotted?: boolean }[] = [
-    { label: "Total", color: TOTAL_COLOR, dotted: true },
+  // Drilled circuits are listed under their category, capped so a big category
+  // (Else can be 10+) can't push the label stack over the plot area. Shades are
+  // regenerated from the same sorted names the series were built from, so a
+  // legend swatch always matches its line.
+  const drillShades = circuitShades(
+    categoryColor(state.drill ?? ""),
+    circuitNames.length,
+  );
+  const shownCircuits = state.drill ? circuitNames.slice(0, LEGEND_MAX_CIRCUITS) : [];
+  const hiddenCircuitCount = state.drill
+    ? circuitNames.length - shownCircuits.length
+    : 0;
+
+  const legend: LegendEntry[] = [
+    ...(state.drill
+      ? []
+      : [{ label: "Total", color: TOTAL_COLOR, dotted: true }]),
     ...(state.show.length >= 2
       ? [{ label: "Sum", color: SUM_COLOR }]
       : []),
     ...CATEGORY_ORDER.filter(
       (c) => state.show.length === 0 || state.show.includes(c),
-    ).map((c) => ({ label: c, color: CATEGORY_COLORS[c] ?? "#888" })),
+    ).flatMap((c): LegendEntry[] =>
+      c === state.drill
+        ? [
+            { label: c, color: categoryColor(c), header: true },
+            ...shownCircuits.map((name, i) => ({
+              label: name,
+              color: drillShades[i] ?? categoryColor(c),
+              indent: true,
+            })),
+            ...(hiddenCircuitCount > 0
+              ? [
+                  {
+                    label: `+${hiddenCircuitCount} more`,
+                    color: categoryColor(c),
+                    indent: true,
+                    header: true,
+                  },
+                ]
+              : []),
+          ]
+        : [{ label: c, color: categoryColor(c) }],
+    ),
   ];
 
   return (
@@ -467,12 +748,19 @@ export function PowerChart({
       />
       <div className="pointer-events-none absolute left-2 top-1 flex flex-col gap-0.5 text-[11px]">
         {legend.map((it) => (
-          <div key={it.label} className="flex items-center gap-1.5">
+          <div
+            key={it.label}
+            className={`flex items-center gap-1.5 ${it.indent ? "pl-3" : ""}`}
+          >
             <span
               className="inline-block h-0 w-3.5 shrink-0"
-              style={{
-                borderTop: `${it.dotted ? "1px dotted" : "2px solid"} ${it.color}`,
-              }}
+              style={
+                it.header
+                  ? undefined
+                  : {
+                      borderTop: `${it.dotted ? "1px dotted" : "2px solid"} ${it.color}`,
+                    }
+              }
             />
             <span className="text-zinc-500 dark:text-zinc-400">{it.label}</span>
           </div>

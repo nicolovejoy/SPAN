@@ -17,11 +17,14 @@ export function TimeNav({
   fromMs,
   toMs,
   onPreset,
+  onStep,
 }: {
   range: RangePreset | null;
   fromMs: number;
   toMs: number;
   onPreset: (preset: RangePreset) => void;
+  /** Shift the window back (-1) / forward (+1) by one window-width. */
+  onStep: (dir: -1 | 1) => void;
 }) {
   // When panned/zoomed (no exact preset), soft-highlight the nearest preset so
   // you see roughly where you are and can snap to it.
@@ -32,6 +35,7 @@ export function TimeNav({
       <span className="w-16 shrink-0 text-xs uppercase tracking-wide text-zinc-500">
         Range
       </span>
+      <StepButton dir={-1} onClick={() => onStep(-1)} />
       {RANGE_OPTIONS.map((r) => (
         <Chip
           key={r.key}
@@ -42,7 +46,23 @@ export function TimeNav({
           {r.label}
         </Chip>
       ))}
+      <StepButton dir={1} onClick={() => onStep(1)} />
     </div>
+  );
+}
+
+// Same pill shape as the presets, flanking the row: step the current window
+// one width back / forward. Forward is clamped at `now` upstream.
+function StepButton({ dir, onClick }: { dir: -1 | 1; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={dir === -1 ? "Step back one window" : "Step forward one window"}
+      className="rounded-full border border-zinc-300 px-2.5 py-1 text-xs leading-4 text-zinc-700 transition-colors hover:border-zinc-500 dark:border-zinc-700 dark:text-zinc-300"
+    >
+      {dir === -1 ? "‹" : "›"}
+    </button>
   );
 }
 

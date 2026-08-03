@@ -14,9 +14,14 @@ function nextShow(current: string[], cat: string): string[] {
 export function QuickFilters({
   show,
   onChange,
+  drill,
+  onDrill,
 }: {
   show: string[];
   onChange: (next: string[]) => void;
+  /** Category currently expanded into its circuits, or null (#12). */
+  drill: string | null;
+  onDrill: (next: string | null) => void;
 }) {
   const navigate = (next: string[]) => onChange(next);
 
@@ -31,17 +36,62 @@ export function QuickFilters({
       <Chip active={allActive} onClick={() => navigate([])}>
         All
       </Chip>
-      {CHIPS.map((cat) => (
-        <Chip
-          key={cat}
-          active={!allActive && selected.has(cat)}
-          dim={!allActive && !selected.has(cat)}
-          onClick={() => navigate(nextShow(show, cat))}
-        >
-          {cat}
-        </Chip>
-      ))}
+      {CHIPS.map((cat) => {
+        // The drill affordance only shows on chips whose line is actually on
+        // the chart — drilling into a hidden category would draw nothing.
+        const visible = allActive || selected.has(cat);
+        const drilled = drill === cat;
+        return (
+          <span key={cat} className="inline-flex items-center">
+            <Chip
+              active={!allActive && selected.has(cat)}
+              dim={!allActive && !selected.has(cat)}
+              onClick={() => navigate(nextShow(show, cat))}
+            >
+              {cat}
+            </Chip>
+            {visible && (
+              <DrillToggle
+                drilled={drilled}
+                label={cat}
+                // Only one category drills at a time: picking a new one
+                // replaces the old rather than adding to it.
+                onClick={() => onDrill(drilled ? null : cat)}
+              />
+            )}
+          </span>
+        );
+      })}
     </div>
+  );
+}
+
+/** Caret appended to a category chip; becomes an ✕ once drilled. */
+function DrillToggle({
+  drilled,
+  label,
+  onClick,
+}: {
+  drilled: boolean;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={drilled}
+      title={drilled ? `Hide ${label} circuits` : `Show ${label} circuits`}
+      aria-label={drilled ? `Hide ${label} circuits` : `Show ${label} circuits`}
+      className={[
+        "-ml-1 rounded-full border px-1.5 py-1 text-[10px] leading-none transition-colors",
+        drilled
+          ? "border-zinc-900 bg-zinc-900 text-white dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-900"
+          : "border-zinc-300 text-zinc-500 hover:border-zinc-500 dark:border-zinc-700 dark:text-zinc-400",
+      ].join(" ")}
+    >
+      {drilled ? "✕" : "⌄"}
+    </button>
   );
 }
 

@@ -17,12 +17,31 @@ const powerInflight = new Map<string, Promise<SeriesPoint[]>>();
 const energyCache = new TtlLru<EnergyRow[]>(MAX_ENTRIES);
 const energyInflight = new Map<string, Promise<EnergyRow[]>>();
 
+// Drilled and un-drilled responses are different row shapes for the same
+// window, so the drill is part of the key — a category entry must never be
+// served to a drilled request or vice versa. Exported for unit tests.
+const drillKey = (drill?: string): string => drill ?? "";
+
+export const seriesCacheKey = (
+  fromMs: number,
+  toMs: number,
+  interval: IntervalKey,
+  drill?: string,
+): string => `${interval}|${drillKey(drill)}|${fromMs}|${toMs}`;
+
+export const energyCacheKey = (
+  fromMs: number,
+  toMs: number,
+  drill?: string,
+): string => `${drillKey(drill)}|${fromMs}|${toMs}`;
+
 export async function fetchSeriesCached(
   fromMs: number,
   toMs: number,
   interval: IntervalKey,
+  drill?: string,
 ): Promise<SeriesPoint[]> {
-  const key = `${interval}|${fromMs}|${toMs}`;
+  const key = seriesCacheKey(fromMs, toMs, interval, drill);
   const hit = powerCache.get(key, Date.now());
   if (hit) return hit;
 
@@ -34,6 +53,7 @@ export async function fetchSeriesCached(
     url.searchParams.set("from", String(fromMs));
     url.searchParams.set("to", String(toMs));
     url.searchParams.set("interval", interval);
+    if (drill) url.searchParams.set("drill", drill);
     const r = await fetch(url.toString());
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const json = (await r.json()) as { data?: SeriesPoint[] };
@@ -54,8 +74,9 @@ export async function fetchSeriesCached(
 export async function fetchEnergyCached(
   fromMs: number,
   toMs: number,
+  drill?: string,
 ): Promise<EnergyRow[]> {
-  const key = `${fromMs}|${toMs}`;
+  const key = energyCacheKey(fromMs, toMs, drill);
   const hit = energyCache.get(key, Date.now());
   if (hit) return hit;
 
@@ -66,6 +87,7 @@ export async function fetchEnergyCached(
     const url = new URL("/api/energy", location.origin);
     url.searchParams.set("from", String(fromMs));
     url.searchParams.set("to", String(toMs));
+    if (drill) url.searchParams.set("drill", drill);
     const r = await fetch(url.toString());
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const json = (await r.json()) as { data?: EnergyRow[] };
@@ -88,7 +110,7 @@ export async function fetchEnergyCached(
 /** Seed the energy cache with server-rendered initial rows so the first paint's
  *  table needs no client round-trip. */
 export function seedEnergy(fromMs: number, toMs: number, rows: EnergyRow[]): void {
-  const key = `${fromMs}|${toMs}`;
+  const key = energyCacheKey(fromMs, toMs);
   const ttl = cacheTtlMs(toMs, 60_000, Date.now());
   energyCache.set(key, rows, Date.now() + ttl);
 }

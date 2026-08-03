@@ -1,11 +1,44 @@
-export function BreakdownTable({
-  rows,
-}: {
-  rows: Array<{ category: string; kwh: number }>;
-}) {
+import { costForKwh, proratedBaseCharge } from "@/lib/rates";
+import { computeDelta } from "@/lib/energyWindow";
+import type { EnergyRow } from "@/lib/queryCache";
+
+const fmtUsd = (n: number) => `$${n.toFixed(2)}`;
+
+/** Δ cell — signed, colored (red = more usage, green = less), falling back to
+ *  a plain kWh delta when the previous window is too small for % to be legible. */
+function DeltaCell({ kwh, prevKwh }: { kwh: number; prevKwh: number | undefined }) {
+  const delta = computeDelta(kwh, prevKwh);
+  if (delta.kind === "none") {
+    return <span className="text-zinc-400">—</span>;
+  }
+  const up = delta.value > 0;
+  const color = up ? "text-red-600 dark:text-red-400" : "text-green-600 dark:text-green-400";
+  const sign = up ? "+" : "";
+  const text =
+    delta.kind === "percent"
+      ? `${sign}${delta.value.toFixed(0)}%`
+      : `${sign}${delta.value.toFixed(1)} kWh`;
+  return <span className={color}>{text}</span>;
+}
+
+export function BreakdownTable({ rows }: { rows: EnergyRow[] }) {
+  // Drill-down rows (#12) are children of a category row that is still present
+  // as their subtotal, so they're excluded from every aggregate — counting both
+  // would double the total and break Share.
+  const categoryRows = rows.filter((r) => !r.parent);
   // Only include non-negative kWh in the total — a negative would mean
   // bad upstream data and would poison the Share column.
-  const total = rows.reduce((acc, r) => (r.kwh > 0 ? acc + r.kwh : acc), 0);
+  const total = categoryRows.reduce((acc, r) => (r.kwh > 0 ? acc + r.kwh : acc), 0);
+  const totalCost = categoryRows.reduce(
+    (acc, r) => (r.kwh > 0 ? acc + costForKwh(r.kwh) : acc),
+    0,
+  );
+  // windowMs is the same on every row (carried by the API for exactly this) —
+  // read it off the first row rather than threading a separate prop through
+  // ExplorerClient.
+  const windowMs = rows[0]?.windowMs;
+  const baseCharge = windowMs !== undefined ? proratedBaseCharge(windowMs) : 0;
+
   return (
     <div className="overflow-hidden rounded-md border border-zinc-200 dark:border-zinc-800">
       <table className="w-full text-sm">
@@ -13,14 +46,29 @@ export function BreakdownTable({
           <tr>
             <th className="px-3 py-2 text-left font-medium">Category</th>
             <th className="px-3 py-2 text-right font-medium">kWh</th>
+            <th className="hidden px-3 py-2 text-right font-medium sm:table-cell">Δ</th>
+            <th className="px-3 py-2 text-right font-medium">Cost</th>
             <th className="px-3 py-2 text-right font-medium">Share</th>
           </tr>
         </thead>
         <tbody>
           {rows.map((r) => (
-            <tr key={r.category} className="border-t border-zinc-100 dark:border-zinc-800">
-              <td className="px-3 py-2">{r.category}</td>
+            <tr
+              key={`${r.parent ?? ""}|${r.category}`}
+              className={[
+                "border-t border-zinc-100 dark:border-zinc-800",
+                r.parent ? "text-xs text-zinc-600 dark:text-zinc-400" : "",
+              ].join(" ")}
+            >
+              <td className={r.parent ? "py-1.5 pl-8 pr-3" : "px-3 py-2"}>
+                {r.parent && <span className="mr-1.5 text-zinc-400">└</span>}
+                {r.category}
+              </td>
               <td className="px-3 py-2 text-right tabular-nums">{r.kwh.toFixed(1)}</td>
+              <td className="hidden px-3 py-2 text-right tabular-nums sm:table-cell">
+                <DeltaCell kwh={r.kwh} prevKwh={r.prevKwh} />
+              </td>
+              <td className="px-3 py-2 text-right tabular-nums">{fmtUsd(costForKwh(r.kwh))}</td>
               <td className="px-3 py-2 text-right tabular-nums text-zinc-500">
                 {total > 0 ? `${((r.kwh / total) * 100).toFixed(0)}%` : "—"}
               </td>
@@ -28,17 +76,28 @@ export function BreakdownTable({
           ))}
           {rows.length === 0 && (
             <tr>
-              <td colSpan={3} className="px-3 py-4 text-center text-zinc-500">
+              <td colSpan={5} className="px-3 py-4 text-center text-zinc-500">
                 No data in selected range.
               </td>
             </tr>
           )}
           {rows.length > 0 && (
-            <tr className="border-t-2 border-zinc-300 font-medium dark:border-zinc-700">
-              <td className="px-3 py-2">Total</td>
-              <td className="px-3 py-2 text-right tabular-nums">{total.toFixed(1)}</td>
-              <td className="px-3 py-2"></td>
-            </tr>
+            <>
+              <tr className="border-t-2 border-zinc-300 font-medium dark:border-zinc-700">
+                <td className="px-3 py-2">Total</td>
+                <td className="px-3 py-2 text-right tabular-nums">{total.toFixed(1)}</td>
+                <td className="hidden sm:table-cell"></td>
+                <td className="px-3 py-2 text-right tabular-nums">{fmtUsd(totalCost)}</td>
+                <td className="px-3 py-2"></td>
+              </tr>
+              <tr className="border-t border-zinc-100 text-zinc-500 dark:border-zinc-800">
+                <td className="px-3 py-2 text-xs">+ base charge</td>
+                <td className="px-3 py-2"></td>
+                <td className="hidden sm:table-cell"></td>
+                <td className="px-3 py-2 text-right text-xs tabular-nums">{fmtUsd(baseCharge)}</td>
+                <td className="px-3 py-2"></td>
+              </tr>
+            </>
           )}
         </tbody>
       </table>

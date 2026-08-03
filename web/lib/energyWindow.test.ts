@@ -1,0 +1,100 @@
+import { describe, it, expect } from "vitest";
+import {
+  buildEnergyRows,
+  computeDelta,
+  mergeDrillRows,
+  previousWindowRange,
+} from "./energyWindow";
+
+const DAY = 24 * 60 * 60 * 1000;
+
+describe("previousWindowRange", () => {
+  it("returns the immediately-preceding equal-length window", () => {
+    const to = 10 * DAY;
+    const from = 9 * DAY;
+    expect(previousWindowRange(from, to)).toEqual({ fromMs: 8 * DAY, toMs: 9 * DAY });
+  });
+
+  it("handles multi-day spans", () => {
+    const to = 30 * DAY;
+    const from = 23 * DAY; // 7-day window
+    expect(previousWindowRange(from, to)).toEqual({ fromMs: 16 * DAY, toMs: 23 * DAY });
+  });
+});
+
+describe("buildEnergyRows", () => {
+  it("attaches prevKwh from the matching category and windowMs to every row", () => {
+    const current = [
+      { category: "HVAC", kwh: 10 },
+      { category: "Kitchen", kwh: 2 },
+    ];
+    const previous = [{ category: "HVAC", kwh: 8 }];
+    const result = buildEnergyRows(current, previous, DAY);
+    expect(result).toEqual([
+      { category: "HVAC", kwh: 10, prevKwh: 8, windowMs: DAY },
+      { category: "Kitchen", kwh: 2, prevKwh: 0, windowMs: DAY },
+    ]);
+  });
+
+  it("defaults prevKwh to 0 for a category with no prior data", () => {
+    const result = buildEnergyRows([{ category: "New", kwh: 5 }], [], DAY);
+    expect(result[0].prevKwh).toBe(0);
+  });
+});
+
+describe("computeDelta", () => {
+  it("returns a percent change when the previous window is non-negligible", () => {
+    expect(computeDelta(12, 10)).toEqual({ kind: "percent", value: 20 });
+    expect(computeDelta(8, 10)).toEqual({ kind: "percent", value: -20 });
+  });
+
+  it("falls back to a plain kWh delta when the previous window is ~zero", () => {
+    expect(computeDelta(3, 0)).toEqual({ kind: "kwh", value: 3 });
+  });
+
+  it("returns none when both windows are ~zero", () => {
+    expect(computeDelta(0, 0)).toEqual({ kind: "none" });
+  });
+
+  it("returns none when prevKwh is undefined", () => {
+    expect(computeDelta(5, undefined)).toEqual({ kind: "none" });
+  });
+});
+
+describe("mergeDrillRows", () => {
+  const cats = [
+    { category: "HVAC", kwh: 10 },
+    { category: "Car", kwh: 5 },
+  ];
+  const circuits = [
+    { category: "Heat pump", kwh: 7, parent: "HVAC" },
+    { category: "Auxiliary", kwh: 3, parent: "HVAC" },
+  ];
+
+  it("splices circuits in right after their parent category", () => {
+    expect(
+      mergeDrillRows(cats, circuits, "HVAC").map((r) => r.category),
+    ).toEqual(["HVAC", "Auxiliary", "Heat pump", "Car"]);
+  });
+
+  it("orders circuits by name, matching the chart's shade order", () => {
+    const out = mergeDrillRows(cats, circuits, "HVAC").filter((r) => r.parent);
+    expect(out.map((r) => r.category)).toEqual(["Auxiliary", "Heat pump"]);
+  });
+
+  it("is a no-op with no drill, no rows, or a filtered-out category", () => {
+    expect(mergeDrillRows(cats, circuits, null)).toEqual(cats);
+    expect(mergeDrillRows(cats, [], "HVAC")).toEqual(cats);
+    expect(mergeDrillRows([{ category: "Car", kwh: 5 }], circuits, "HVAC")).toEqual([
+      { category: "Car", kwh: 5 },
+    ]);
+  });
+
+  it("leaves the category row in place as the subtotal", () => {
+    const out = mergeDrillRows(cats, circuits, "HVAC");
+    const parentRow = out.find((r) => r.category === "HVAC" && !r.parent);
+    expect(parentRow?.kwh).toBe(10);
+    // Children sum to the parent — the table must not add both into the total.
+    expect(out.filter((r) => r.parent).reduce((a, r) => a + r.kwh, 0)).toBe(10);
+  });
+});

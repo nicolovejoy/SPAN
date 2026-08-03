@@ -1,4 +1,9 @@
-import { queryPower, queryEnergyByCategory, type SeriesPoint } from "./influx";
+import {
+  queryPower,
+  queryEnergyByCategory,
+  type Grouping,
+  type SeriesPoint,
+} from "./influx";
 import { intervalSeconds, type IntervalKey } from "./interval";
 import { energySourceForSpan, sourceForInterval, sourceKey } from "./rollup";
 
@@ -17,19 +22,33 @@ const MAX_ENTRIES = 100;
 const cache = new Map<string, Entry>();
 const inflight = new Map<string, Promise<SeriesPoint[]>>();
 
+/** "" for the category view, the category name for a drill — a drilled result
+ *  is a completely different row shape and must never share an entry. */
+const drillKey = (drill?: string): string => drill ?? "";
+
+const groupingFor = (drill?: string): Grouping =>
+  drill ? { kind: "circuit", category: drill } : { kind: "category" };
+
 // The measurement is in the key so an entry can never be served from a
 // different source than it was written with (the source is a pure function of
 // the interval today, so this is belt-and-braces against a threshold change).
-function makeKey(interval: IntervalKey, fromMs: number, toMs: number): string {
-  return `${interval}|${sourceKey(sourceForInterval(interval))}|${fromMs}|${toMs}`;
+export function makeKey(
+  interval: IntervalKey,
+  fromMs: number,
+  toMs: number,
+  drill?: string,
+): string {
+  return `${interval}|${sourceKey(sourceForInterval(interval))}|${drillKey(drill)}|${fromMs}|${toMs}`;
 }
 
 export async function cachedQueryPower(opts: {
   fromMs: number;
   toMs: number;
   interval: IntervalKey;
+  /** Category to break into its individual circuits (#12). */
+  drill?: string;
 }): Promise<SeriesPoint[]> {
-  const key = makeKey(opts.interval, opts.fromMs, opts.toMs);
+  const key = makeKey(opts.interval, opts.fromMs, opts.toMs, opts.drill);
   const now = Date.now();
 
   const hit = cache.get(key);
@@ -48,7 +67,7 @@ export async function cachedQueryPower(opts: {
   const isTrailing = now - opts.toMs < 2 * intervalMs;
   const ttlMs = isTrailing ? Math.max(60_000, intervalMs) : 24 * 60 * 60 * 1000;
 
-  const promise = queryPower(opts)
+  const promise = queryPower({ ...opts, grouping: groupingFor(opts.drill) })
     .then((data) => {
       cache.set(key, { data, expiresAt: Date.now() + ttlMs });
       while (cache.size > MAX_ENTRIES) {
@@ -71,16 +90,26 @@ export async function cachedQueryPower(opts: {
 // Energy-by-category cache. Keyed by (from, to) only — energy is the integral
 // over the whole window, independent of the display bucket, so switching the
 // chart's interval must not invalidate the table.
+// Source is derived from the span, which the key already pins — included
+// explicitly so a stale entry can't outlive a threshold change.
+export function makeEnergyKey(
+  fromMs: number,
+  toMs: number,
+  drill?: string,
+): string {
+  return `${sourceKey(energySourceForSpan(toMs - fromMs))}|${drillKey(drill)}|${fromMs}|${toMs}`;
+}
+
 const energyCache = new Map<string, { data: EnergyRow[]; expiresAt: number }>();
 const energyInflight = new Map<string, Promise<EnergyRow[]>>();
 
 export async function cachedQueryEnergyByCategory(opts: {
   fromMs: number;
   toMs: number;
+  /** Category to break into its individual circuits (#12). */
+  drill?: string;
 }): Promise<EnergyRow[]> {
-  // Source is derived from the span, which the key already pins — included
-  // explicitly so a stale entry can't outlive a threshold change.
-  const key = `${sourceKey(energySourceForSpan(opts.toMs - opts.fromMs))}|${opts.fromMs}|${opts.toMs}`;
+  const key = makeEnergyKey(opts.fromMs, opts.toMs, opts.drill);
   const now = Date.now();
 
   const hit = energyCache.get(key);
@@ -98,7 +127,7 @@ export async function cachedQueryEnergyByCategory(opts: {
   const isTrailing = now - opts.toMs < 2 * 60_000;
   const ttlMs = isTrailing ? 60_000 : 24 * 60 * 60 * 1000;
 
-  const promise = queryEnergyByCategory(opts)
+  const promise = queryEnergyByCategory({ ...opts, grouping: groupingFor(opts.drill) })
     .then((data) => {
       energyCache.set(key, { data, expiresAt: Date.now() + ttlMs });
       while (energyCache.size > MAX_ENTRIES) {
