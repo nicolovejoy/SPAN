@@ -74,7 +74,7 @@ describe("energySourceForSpan", () => {
     });
   });
 
-  it("sums the 5m rollup just past 48h and up to 30d inclusive", () => {
+  it("sums the 5m rollup just past 48h and up to 7d inclusive", () => {
     expect(energySourceForSpan(ENERGY_RAW_MAX_MS + 1)).toMatchObject({
       measurement: "circuit_5m",
       mode: "sum",
@@ -86,11 +86,15 @@ describe("energySourceForSpan", () => {
     });
   });
 
-  it("sums the 1h rollup past 30d", () => {
+  it("sums the 1h rollup past 7d", () => {
     expect(energySourceForSpan(ENERGY_5M_MAX_MS + 1)).toMatchObject({
       measurement: "circuit_1h",
       mode: "sum",
       bucketMs: HOUR_MS,
+    });
+    expect(energySourceForSpan(30 * DAY_MS)).toMatchObject({
+      measurement: "circuit_1h",
+      mode: "sum",
     });
     expect(energySourceForSpan(365 * DAY_MS)).toMatchObject({
       measurement: "circuit_1h",

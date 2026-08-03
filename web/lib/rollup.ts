@@ -110,7 +110,7 @@ export type EnergySource = {
 /** Windows up to this span integrate raw points (most accurate). */
 export const ENERGY_RAW_MAX_MS = 48 * HOUR_MS;
 /** Windows up to this span sum `circuit_5m.energy_wh`. */
-export const ENERGY_5M_MAX_MS = 30 * DAY_MS;
+export const ENERGY_5M_MAX_MS = 7 * DAY_MS;
 
 export const RAW_ENERGY_SOURCE: EnergySource = {
   measurement: "circuit",
@@ -122,12 +122,19 @@ export const RAW_ENERGY_SOURCE: EnergySource = {
 /**
  * Energy source by window span:
  *
- *   ≤ 48h  → raw integral (existing pipeline, most accurate)
- *   ≤ 30d  → sum(circuit_5m.energy_wh)
- *   > 30d  → sum(circuit_1h.energy_wh)
+ *   ≤ 48h → raw integral (existing pipeline, most accurate)
+ *   ≤ 7d  → sum(circuit_5m.energy_wh)
+ *   > 7d  → sum(circuit_1h.energy_wh)
  *
  * Summing pre-computed Wh is *exact* — there is no re-integration error — which
  * is why this is the big win over `queryPower`'s mean-of-means.
+ *
+ * The 5m→1h boundary was originally 30d, but `circuit_5m` returns ~12x more
+ * points per unit time than `circuit_1h` (18,144/day vs 1,512/day), so a 30d
+ * `circuit_5m` query (~181k pts, 7.9s) ended up slower than a 1y `circuit_1h`
+ * query (~105k pts, 4.7s) — the coarser rollup should take over well before
+ * that crossover. 7d keeps `circuit_5m` in play only for windows short enough
+ * that its extra point count doesn't matter.
  */
 export function energySourceForSpan(spanMs: number): EnergySource {
   if (spanMs <= ENERGY_RAW_MAX_MS) return RAW_ENERGY_SOURCE;
