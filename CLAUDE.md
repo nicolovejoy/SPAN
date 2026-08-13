@@ -67,6 +67,7 @@ GitHub pushes via the Vercel Git integration. Pi-hosted as a Docker service
 - Categories sourced from `pi/categories.json` (copied to `web/categories.generated.json` by `predev`/`prebuild` — Vercel builds use this normal `prebuild` sync; the Dockerfile's copy-in path is a Docker-era leftover, no longer used)
 - Talks to Influx via `influx.pianohouseproject.org` with the `span-web` CF Access service token (`CF_ACCESS_CLIENT_ID/SECRET` in the Vercel env activate the service-token path in `web/lib/influx.ts`)
 - Built with `output: "standalone"` — a leftover from the Docker era, harmless on Vercel
+- `/api/health` — observer endpoint (UptimeRobot + prompt-lab's daily health email): `checks[]` of artifact ages — collector (newest raw Influx point, ≤300s) and backup (newest `backup_snapshot` point, ≤30h; written by `pi/backup/backup.sh` with the restic snapshot's own timestamp). 503 on any failure. Logic in `web/lib/health.ts`.
 - Deploy/auth setup: see `docs/web-deploy.md`
 
 ## Next Steps
