@@ -29,7 +29,7 @@ Detects bath events from heat pump circuit signature (sustained elevated draw re
 ### What's Done
 - `pi/bath_detector.py` — detection script with `--backtest` mode
 - `pi/run_bath_detector.sh` — wrapper script (points at phrpi.local InfluxDB)
-- `~/Library/LaunchAgents/com.span.bath-detector.plist` — runs every 10 minutes
+- ~~`~/Library/LaunchAgents/com.span.bath-detector.plist`~~ — retired 2026-08-13 (mini decommissioned); detection runs as the `bath-detector` Docker service on the Pi
 - Writes `bath_event` measurement to InfluxDB with duration, power stats, aux heater status
 
 ### Next Steps

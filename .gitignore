@@ -8,3 +8,4 @@ pi/cloudflared/
 
 # Playwright MCP browser-automation scratch (console logs + page snapshots)
 .playwright-mcp/
+.vercel

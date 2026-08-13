@@ -11,28 +11,40 @@ Local observability tool for SPAN Smart Panel. Polls panel API, stores data in I
 ## Quick Start
 
 ```bash
+# One-shot health check of the whole stack (panel, Pi services, freshness, backup)
+./status.sh
+
 # Terminal dashboard (one-off)
 ./run.sh --run
 
-# Start full stack (InfluxDB + Grafana)
+# Full stack lives on the Pi (ssh nico@phrpi.local); manage it there:
 cd pi && docker compose up -d
-
-# Run collector (Mac - outside Docker due to network)
-cd pi && nohup ./run_collector.sh > collector.log 2>&1 &
 ```
+
+## Machine roles (decided 2026-08-13)
+
+- **Pi (`phrpi`, 192.168.5.50)** — single source of truth. Runs the whole Docker
+  stack (dashboard itself is Vercel-hosted) + nightly restic backup. Stays this way deliberately: low blast radius,
+  rebuilds from git.
+- **Mini** (closet, ethernet to Pi, always-on) — no SPAN services. Observer/backup
+  roles only (uptime monitoring is external — UptimeRobot via prompt-lab's
+  declarative config; candidate second backup target). Revisit only if #18
+  (TimescaleDB) lands, which would make it the storage box.
+- **Laptop** — dev only. `status.sh` and `span_client.py` work from here; nothing
+  runs in steady state.
 
 ## Architecture
 
 - `span_client.py` - CLI client with live terminal dashboard
-- `pi/` - Docker stack for Pi deployment (8 services)
+- `pi/` - Docker stack for Pi deployment (7 services)
   - `collector.py` - Polls SPAN every 30s, writes to InfluxDB
   - `bath_detector.py` - Detects bath events from heat pump signature (10min loop)
   - `charge_detector.py` - Detects EV charging sessions (10min loop)
   - `daily_report.py` - HTML email report via Resend at 7am daily
   - `rates.py` - TOU rate schedule for cost calculations
-  - `docker-compose.yml` - InfluxDB, Grafana, collector, bath-detector, charge-detector, daily-report, web, cloudflared
+  - `docker-compose.yml` - InfluxDB, Grafana, collector, bath-detector, charge-detector, daily-report, cloudflared
   - `grafana/provisioning/` - Auto-configured datasource + dashboard
-- `web/` - Next.js power-explorer dashboard (Docker service, see § web/)
+- `web/` - Next.js power-explorer dashboard (Vercel-hosted, see § web/)
 - `pi/backup/` - nightly restic backup to Cloudflare R2 (systemd timer, 03:30). Covers the
   only unrecoverable state: InfluxDB, TimescaleDB, the Grafana volume, and the `.env` files —
   everything else rebuilds from git. Config at `/etc/span-backup.env` on the Pi (rendered from
@@ -42,18 +54,19 @@ cd pi && nohup ./run_collector.sh > collector.log 2>&1 &
 
 ## web/ — power explorer
 
-Next.js 16 app, **Pi-hosted** as a Docker service alongside InfluxDB / Grafana,
-routed through the same `phrpi` Cloudflare tunnel, gated by Cloudflare Access
-(passkey/Face ID).
+Next.js 16 app, **Vercel-hosted** (project `nico-lovejoys-projects/span`,
+domain `span.pianohouseproject.org`) since 2026-08-13, auto-deployed from
+GitHub pushes via the Vercel Git integration. Pi-hosted as a Docker service
+2026-05-09 → 2026-08-13.
 
 - **Client-driven state** (`ExplorerClient.tsx`, since #11 2026-06-19): a client reducer owns `{from,to,interval,show}`. Pan/zoom updates client state only — it never navigates. The URL is **intent-only** (`?range=7d&show=HVAC`), synced via `history.replaceState`; transient pan/zoom is *not* in the URL. `page.tsx` SSRs the initial breakdown + seeds the client cache for a fast first paint, then the client owns every switch. A full reload resets pan/zoom to the preset (by design).
 - **Caching:** in-memory `TtlLru` (`lib/clientCache`) fronts `/api/power` + `/api/energy` (`lib/clientFetch`) → back-and-forth between visited windows = 0-network. Server LRU (`lib/queryCache`, both power + energy) + HTTP cache are the cold-miss backstop. IndexedDB-across-reload persistence still open (#10).
 - **Breakdown table** = real 30s `integral()` via `/api/energy` (`cachedQueryEnergyByCategory`), keyed by window only so changing the bucket doesn't refetch it.
 - Auto-coarsen interval picks bucket size to stay ≤175 points across the range
 - Tests: `cd web && npm test` (vitest) — unit tests for the cache + intent-URL logic. Chart/React wiring is manual-verify.
-- Categories sourced from `pi/categories.json` (copied to `web/categories.generated.json` by `predev`/`prebuild`; the Dockerfile copies the canonical file straight into the build, no sync step needed in container)
-- Talks to Influx via Docker service name (`http://influxdb:8086`) — no CF service token needed at runtime since the call never leaves the host
-- Built with `output: "standalone"` for a small runtime image
+- Categories sourced from `pi/categories.json` (copied to `web/categories.generated.json` by `predev`/`prebuild` — Vercel builds use this normal `prebuild` sync; the Dockerfile's copy-in path is a Docker-era leftover, no longer used)
+- Talks to Influx via `influx.pianohouseproject.org` with the `span-web` CF Access service token (`CF_ACCESS_CLIENT_ID/SECRET` in the Vercel env activate the service-token path in `web/lib/influx.ts`)
+- Built with `output: "standalone"` — a leftover from the Docker era, harmless on Vercel
 - Deploy/auth setup: see `docs/web-deploy.md`
 
 ## Next Steps
@@ -61,7 +74,8 @@ routed through the same `phrpi` Cloudflare tunnel, gated by Cloudflare Access
 **Start at `docs/roadmap.md`** — phased, dependency-ordered, each phase scoped to hand to a
 subagent. The list below is near-term mechanics; the roadmap explains ordering and why.
 
-- **Manifest CORS** — *Decided 2026-05-24 to live with it.* `/manifest.webmanifest` is gated by CF Access; browser fetches it without credentials and gets redirected to login → console error. The fix (separate CF Access app with Bypass policy for the four asset paths) is blocked by CF's no-overlapping-destinations rule and would require enumerating every dashboard route. Cosmetic-only — dashboard works; PWA install persists once configured. Revisit only if CF adds path-exclusion or if the noise becomes actively annoying.
+- **~~Manifest CORS~~ — resolved by the 2026-08-13 re-home to Vercel.** The premise (`/manifest.webmanifest` gated by CF Access on the Pi-hosted dashboard) no longer applies to the new topology. Previously: decided 2026-05-24 to live with the credential-less manifest fetch hitting the CF Access login redirect (cosmetic console error).
+- **Dashboard access model** — decision pending (2026-08-13); candidate: signed-cookie unlock link in Next.js middleware. /api/health (observer endpoint, see prompt-lab uptime convention) must stay exempt.
 - **EV monthly + annual cost rollup** in daily report (request #3 from 2026-05-23 batch — last unaddressed item). Bundle with SCL plan confirmation so cost isn't computed against two rate models. *2026-06-15: weekly section now excludes EV (per-2h-bucket subtract) with this-week-vs-5wk + vs-12wk charts and an EV-charging-vs-weekly-avg callout; EV accounting (weekly + monthly) pinned to the exact `CHARGE_CIRCUIT` name shared with `charge_detector`, not the Car regex.*
 - **Confirm SCL plan** — bill shows "Small General Energy" flat $0.1241/kWh + $0.83/day base. Check whether residential RSC tiered or TOU would be cheaper; align Grafana cost panel once decided.
 - **~~Power explorer perf~~ (#9) — DONE, deployed 2026-07-31.** `circuit_5m`/`circuit_1h` tasks
@@ -77,10 +91,10 @@ subagent. The list below is near-term mechanics; the roadmap explains ordering a
   - Contract + tail-lag invariants: `pi/influx_tasks/README.md`. Read before wiring a new consumer.
 - **Verify the daily report** against rollups — run `daily_report.py --date <a past date>` and check
   the logs for `rollup circuit_1h:` lines and any `falling back to raw` warnings. Not yet done.
-- **Power explorer chart E2E** (#13) — Playwright harness via a `MOCK_INFLUX` fixture mode (prod is behind CF Access so test a local hermetic build). Locks in the 2026-06-19 pan/zoom fix: bounded-to-data, no blank-out, intent-only URL, cache hits, table-follows-zoom. Plan in the issue.
+- **Power explorer chart E2E** (#13) — Playwright harness via a `MOCK_INFLUX` fixture mode (hermetic local build — no live Influx dependency in CI). Locks in the 2026-06-19 pan/zoom fix: bounded-to-data, no blank-out, intent-only URL, cache hits, table-follows-zoom. Plan in the issue.
 - **Zoom-in detail follow-up** — since 2026-06-19 pan/zoom stays *within* the loaded preset window (bounded by `fixLeftEdge/fixRightEdge`); zoom-in no longer auto-fetches a finer bucket. If wanted, add a deliberate "load detail at this zoom" that widens the loaded window. Low priority.
 - **In-email settings link** (#8) — clickable link in the daily email to change report cadence + aux-heat threshold without redeploying. Deferred 2026-06-14 (needs persistent store + web page + report-loop rework). Cadence stays daily for now.
-- **Dashboard UX backlog** — web app. Done 2026-06-19 (all in `PowerChart.tsx`): ~~time range in PST~~, ~~all-axes labels~~, ~~legend moved left~~. Done 2026-08-03: ~~per-circuit lines (#12)~~ (drill via `⌄` chip; `lib/drill.ts`), ~~time-nav beyond swiping~~ (`OverviewStrip` all-history brush + `‹ ›` step buttons), pan restored (slack window, `lib/panWindow.ts` — loaded ≈ 3× visible with silent edge extension), cost columns in the breakdown (`lib/rates.ts`, flat SCL $0.1241/kWh + $0.83/day prorated base + Δ vs previous window — revisit if the SCL plan confirmation says TOU). Open: polling cadence (#5), relax CF Access login (#6), 1m smoothing (#7). Custom PWA icon. Note: daily report still costs with the TOU model in `pi/rates.py` — web and report disagree until the SCL plan is confirmed.
+- **Dashboard UX backlog** — web app. Done 2026-06-19 (all in `PowerChart.tsx`): ~~time range in PST~~, ~~all-axes labels~~, ~~legend moved left~~. Done 2026-08-03: ~~per-circuit lines (#12)~~ (drill via `⌄` chip; `lib/drill.ts`), ~~time-nav beyond swiping~~ (`OverviewStrip` all-history brush + `‹ ›` step buttons), pan restored (slack window, `lib/panWindow.ts` — loaded ≈ 3× visible with silent edge extension), cost columns in the breakdown (`lib/rates.ts`, flat SCL $0.1241/kWh + $0.83/day prorated base + Δ vs previous window — revisit if the SCL plan confirmation says TOU). Open: polling cadence (#5), ~~relax CF Access login (#6)~~ (superseded by the 2026-08-13 Vercel re-home — see "Dashboard access model"), 1m smoothing (#7). Custom PWA icon. Note: daily report still costs with the TOU model in `pi/rates.py` — web and report disagree until the SCL plan is confirmed.
 - **HVAC cooling watch** — cooling fault found 2026-06-14 (aux resistance firing + compressor short-cycling on a hot day); turning off the HRV apparently fixed it. Confirm with a 3–6h `pi/hvac_probe.py` run during active cooling. Aux-heat alarm: Auxiliary/Heat Pump cost ≥ `$AUX_HEAT_ALARM_USD` (default $0.50/day, ≈4 kWh) → red banner + `⚠ Aux heat —` subject. Cost-based since that circuit also draws during cooling. Cold-weather suppression at #3.
 
 ## SPAN API
@@ -95,7 +109,7 @@ Base URL: `http://192.168.4.72/api/v1`
 
 All secrets are in `pi/.env` (git-ignored). See `pi/.env.example` for the required variables.
 
-<!-- SHARED-CONVENTIONS:BEGIN v=d5e16e653242 — auto-managed, do not edit here; source: prompt-lab/workflow/claude-md-shared.md (edit + re-sync) -->
+<!-- SHARED-CONVENTIONS:BEGIN v=e5fb79b2ef4d — auto-managed, do not edit here; source: prompt-lab/workflow/claude-md-shared.md (edit + re-sync) -->
 ## Shared conventions
 
 <!-- These are Nico's cross-repo output rules. They're materialized into each repo's
@@ -107,6 +121,8 @@ of truth: prompt-lab/workflow/claude-md-shared.md — edit there and re-sync, ne
 - **Number your questions.** Any time you ask Nico more than one question, present them as a numbered list (1., 2., 3.) so he can answer by number with no ambiguity. A single standalone question needs no number.
 
 - **Self-contained smoke-test instructions.** When you ask Nico to manually test or verify an app or website, assume zero carried-over context — he should never scroll back or recall a URL/path/credential from earlier. Always include: the exact URL (full `https://…` or `http://localhost:…`, restated even if mentioned above), the precise steps in order, and what a pass vs. fail looks like. Repetition here is a feature, not clutter.
+
+- **UTC at rest, Pacific on display.** Timestamps are stored in UTC, always. A *calendar day* shown to a human is `America/Los_Angeles` — Nico's day, and the clock the work actually happened on. The two rules that follow are the ones that get broken: never form a date bucket with `new Date(…).toISOString().slice(0,10)` (that is UTC, so every chart axis and "today" silently rolls over at 5pm Pacific — it put a phantom tomorrow bar on the Prompt Lab dashboard), and never bucket UTC-stamped rows with a bare `date(col)` in SQL. Use `Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles' })` in JS and an explicit zone in SQL/Python. Storage in local time is also wrong — it can't be migrated across a DST boundary without loss.
 
 - **No marker before a copy-paste command block.** Nico's terminal renders markdown bullets (`-`, `*`, `•`) as `●`, which breaks paste into zsh. The line directly above a fenced command block must be a plain-text label ending in a colon — never a bullet, dash, asterisk, or number. For loud copy targets, lead the label with `📋` + bold `COPY THE BELOW`, then a colon, then the block.
 <!-- SHARED-CONVENTIONS:END -->
