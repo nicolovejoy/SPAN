@@ -162,4 +162,27 @@ if [ "$(date +%u)" = "$CHECK_ON_WEEKDAY" ]; then
 fi
 
 date -Is > "$STATE_DIR/last-success"
+
+# Publish the newest snapshot's own timestamp to Influx so the dashboard's
+# /api/health can alarm on artifact age instead of this job's exit status — a
+# success ping can lie (job ran, artifact missing); the snapshot's time can't.
+# Best-effort: a failed write just lets the health check go stale, which is the
+# alarm working.
+publish_snapshot_time() {
+    local token snap_epoch
+    token=$(grep -m1 '^INFLUXDB_TOKEN=' /home/nico/SPAN/pi/.env | cut -d= -f2-) || return 1
+    snap_epoch=$(restic snapshots --host phrpi --latest 1 --json | python3 -c '
+import json, re, sys
+from datetime import datetime
+t = json.load(sys.stdin)[-1]["time"]
+t = re.sub(r"\.\d+", "", t)  # fromisoformat chokes on nanosecond fractions
+print(int(datetime.fromisoformat(t).timestamp()))') || return 1
+    curl -sf -m 10 -X POST \
+        "http://localhost:8086/api/v2/write?org=home&bucket=span&precision=s" \
+        -H "Authorization: Token $token" \
+        --data-binary "backup_snapshot,host=phrpi ok=1i $snap_epoch"
+}
+publish_snapshot_time \
+    || log "WARNING: could not publish snapshot time to Influx (/api/health backup check will go stale)"
+
 log "backup complete"

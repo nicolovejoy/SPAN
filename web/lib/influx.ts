@@ -166,6 +166,28 @@ async function runPowerFlux(flux: string): Promise<SeriesPoint[]> {
 }
 
 /**
+ * Time of the newest point for a measurement/field, or null if none exists in
+ * the lookback window. Used by /api/health to alarm on artifact age.
+ */
+export async function queryLastPointTime(
+  measurement: string,
+  field: string,
+  lookback: string,
+): Promise<string | null> {
+  const flux = `
+    from(bucket: "${BUCKET}")
+      |> range(start: -${lookback})
+      |> filter(fn: (r) => r._measurement == "${measurement}" and r._field == "${field}")
+      |> group()
+      |> last()
+      |> keep(columns: ["_time"])`;
+  const rows = await makeClient()
+    .getQueryApi(ORG)
+    .collectRows<{ _time: string }>(flux);
+  return rows[0]?._time ?? null;
+}
+
+/**
  * Mean power per bucket, grouped by derived category — or, when `grouping` is a
  * drill, by circuit within one category. One row per (time, series) — pivot
  * client-side.

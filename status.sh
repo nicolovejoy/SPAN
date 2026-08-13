@@ -58,6 +58,16 @@ case "$code" in
     *)       bad "dashboard ($TUNNEL_URL) — HTTP ${code:-timeout}" ;;
 esac
 
+# Observer endpoint (UptimeRobot + daily email watch this): {"ok":true,checks:[...]}
+health=$(curl -s -m 10 "$TUNNEL_URL/api/health" || true)
+if echo "$health" | grep -q '"ok":true'; then
+    ok "health endpoint — all checks pass"
+elif [ -n "$health" ]; then
+    bad "health endpoint — $(echo "$health" | head -c 200)"
+else
+    bad "health endpoint — no response"
+fi
+
 # Grafana rides the phrpi CF tunnel — a 200/302 here proves tunnel + CF Access are up.
 code=$(curl -s -m 8 -o /dev/null -w '%{http_code}' https://grafana.pianohouseproject.org || true)
 case "$code" in
