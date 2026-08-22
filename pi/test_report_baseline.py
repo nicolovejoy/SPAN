@@ -1,8 +1,11 @@
 """
     cd pi && python3 test_report_baseline.py
 """
+import json
+import tempfile
 import unittest
-from datetime import date
+from datetime import date, timedelta
+from pathlib import Path
 
 import report_baseline as rb
 
@@ -70,3 +73,97 @@ class WeekdayBucketingTest(unittest.TestCase):
         self.assertEqual(len(got), 8)
         self.assertTrue(all(d.weekday() == 1 for d in got))  # all Tuesdays
         self.assertEqual(got[-1], date(2026, 3, 3))
+
+
+class CoverageTest(unittest.TestCase):
+    def test_day_coverage_threshold(self):
+        self.assertTrue(rb.day_coverage_ok(0.90))
+        self.assertFalse(rb.day_coverage_ok(0.89))
+
+    def test_category_coverage_threshold(self):
+        self.assertTrue(rb.category_coverage_ok(6))
+        self.assertFalse(rb.category_coverage_ok(5))
+
+
+class SuppressionStateTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "state.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_missing_file_is_no_prior_alert(self):
+        state = rb.load_state(self.path, "HVAC")
+        self.assertIsNone(state.last_alert_date)
+
+    def test_save_then_load_round_trips(self):
+        rb.save_state(self.path, "HVAC", date(2026, 8, 18), 4.2)
+        state = rb.load_state(self.path, "HVAC")
+        self.assertEqual(state.last_alert_date, date(2026, 8, 18))
+        self.assertAlmostEqual(state.last_z, 4.2)
+
+    def test_save_preserves_other_categories(self):
+        rb.save_state(self.path, "HVAC", date(2026, 8, 18), 4.2)
+        rb.save_state(self.path, "Lights", date(2026, 8, 19), 3.5)
+        data = json.loads(self.path.read_text())
+        self.assertIn("HVAC", data)
+        self.assertIn("Lights", data)
+
+    def test_clear_removes_the_category_only(self):
+        rb.save_state(self.path, "HVAC", date(2026, 8, 18), 4.2)
+        rb.save_state(self.path, "Lights", date(2026, 8, 19), 3.5)
+        rb.clear_state(self.path, "HVAC")
+        self.assertIsNone(rb.load_state(self.path, "HVAC").last_alert_date)
+        self.assertIsNotNone(rb.load_state(self.path, "Lights").last_alert_date)
+
+    def test_a_six_day_heat_wave_produces_one_alert_not_six(self):
+        """The failure this whole design exists to avoid (spec, 'Guard: repeat
+        suppression'). A flat, non-worsening anomaly stays suppressed for the
+        whole episode — only worsening or a return to normal lifts it, so
+        elapsed time alone never re-triggers."""
+        baseline = rb.compute_baseline([10, 11, 10, 9, 10, 11, 10, 9])  # HVAC-ish
+        hot_value = 40.0   # anomalous every day of the heat wave, same severity
+        alerts_sent = 0
+        day = date(2026, 7, 20)   # Monday
+        for i in range(6):
+            today = day + timedelta(days=i)
+            result = rb.evaluate(hot_value, baseline)
+            state = rb.load_state(self.path, "HVAC")
+            if rb.should_alert(result, state):
+                alerts_sent += 1
+                rb.save_state(self.path, "HVAC", today, result.z)
+        self.assertEqual(alerts_sent, 1)
+
+    def test_state_clears_once_back_to_normal(self):
+        rb.save_state(self.path, "HVAC", date(2026, 8, 18), 4.5)
+        baseline = rb.compute_baseline([10, 11, 10, 9, 10, 11, 10, 9])
+        normal_result = rb.evaluate(10.0, baseline)
+        self.assertFalse(normal_result.is_anomalous)
+        # caller's responsibility per should_alert's docstring: clear on normal
+        rb.clear_state(self.path, "HVAC")
+        state = rb.load_state(self.path, "HVAC")
+        self.assertIsNone(state.last_alert_date)
+        # a fresh anomaly right after clearing should alert immediately, not be
+        # suppressed by the just-cleared episode
+        result = rb.evaluate(40.0, baseline)
+        self.assertTrue(rb.should_alert(result, state))
+
+    def test_worsening_deviation_breaks_the_suppression_window(self):
+        rb.save_state(self.path, "HVAC", date(2026, 8, 18), 4.0)
+        state = rb.load_state(self.path, "HVAC")
+        result = rb.AnomalyResult(is_anomalous=True, z=5.5, pct=80.0)   # +37.5% over 4.0
+        self.assertTrue(rb.should_alert(result, state))   # still anomalous, but materially worse
+
+    def test_mild_worsening_stays_suppressed(self):
+        rb.save_state(self.path, "HVAC", date(2026, 8, 18), 4.0)
+        state = rb.load_state(self.path, "HVAC")
+        result = rb.AnomalyResult(is_anomalous=True, z=4.5, pct=70.0)   # only +12.5%
+        self.assertFalse(rb.should_alert(result, state))
+
+
+class CoverageGapTest(unittest.TestCase):
+    def test_a_coverage_gap_produces_zero_alerts(self):
+        """spec, 'Guard: coverage check' — a collector outage must not be
+        reported as an anomaly in every category."""
+        self.assertFalse(rb.day_coverage_ok(0.40))  # caller suppresses the whole day
