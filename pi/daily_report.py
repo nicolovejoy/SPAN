@@ -3,24 +3,21 @@
 
 import argparse
 import base64
-import calendar
 import io
 import json
 import os
 import re
 import time
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
-from typing import Any
 from zoneinfo import ZoneInfo
 
 import httpx
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 from influxdb_client import InfluxDBClient
 
 from rates import ENERGY_RATE, BASE_CHARGE_DAILY
@@ -41,26 +38,6 @@ REPORT_FROM = os.getenv("REPORT_FROM", "SPAN Monitor <energy@span.pianohouseproj
 REPORT_HOUR = int(os.getenv("REPORT_HOUR", "7"))
 LOCAL_TZ_NAME = os.getenv("TZ", "America/Los_Angeles")
 LOCAL_TZ = ZoneInfo(LOCAL_TZ_NAME)
-
-# Banner + subject-prefix when the Auxiliary/Heat Pump circuit's draw for the
-# report day costs at least this much. Cost (not kWh) because that circuit also
-# draws during cooling — small amounts are normal noise; only flag real spend.
-AUX_HEAT_ALARM_USD = float(os.getenv("AUX_HEAT_ALARM_USD", "0.50"))
-AUX_CIRCUIT_PATTERN = re.compile(r"Auxiliary", re.IGNORECASE)
-
-# EV charging is a single dedicated circuit. Pin EV accounting to its exact name
-# (same CHARGE_CIRCUIT env charge_detector uses) instead of the fuzzy Car regex
-# — exact, one source of truth, no false positives.
-EV_CIRCUIT = os.getenv("CHARGE_CIRCUIT", "Outdoor / Tesla Car Charger")
-
-
-def ev_name_filter() -> str:
-    """Flux `=~` regex matching the EV charger circuit name exactly. Anchored,
-    with regex metachars + `/` (the /.../ literal delimiter) escaped. Spaces stay
-    literal — RE2 rejects escaped spaces, so don't use re.escape here."""
-    specials = set(r".^$*+?()[]{}|\/")
-    escaped = "".join("\\" + c if c in specials else c for c in EV_CIRCUIT)
-    return "^" + escaped + "$"
 
 
 def flux_ts(dt: datetime) -> str:
@@ -634,27 +611,6 @@ from(bucket: "{INFLUXDB_BUCKET}")
     return 0.0
 
 
-_BY_NAME_TAIL = '''  |> group(columns: ["name"])
-  |> sum(column: "_value")
-  |> group()
-  |> keep(columns: ["name", "_value"])
-'''
-
-
-def query_circuit_energy(query_api, start: str, stop: str) -> list[dict]:
-    """Energy per circuit in kWh, summed across tag-variants, sorted descending."""
-    def run(src, seg_start, seg_stop):
-        return [(rec.values.get("name", "Unknown"), rec.get_value() or 0.0)
-                for rec in _circuit_records(query_api, src, seg_start, seg_stop,
-                                            every=None, tail=_BY_NAME_TAIL)]
-
-    totals: dict[str, float] = {}
-    for name, kwh in _run_segments(query_api, start, stop, None, run):
-        totals[name] = totals.get(name, 0.0) + kwh
-    return sorted(({"name": n, "kwh": round(k, 2)} for n, k in totals.items()),
-                  key=lambda c: -c["kwh"])
-
-
 _BUCKET_RULES: list[tuple[str, re.Pattern]] | None = None
 _BUCKET_DEFAULT: str = "Else"
 
@@ -685,66 +641,6 @@ def _load_bucket_rules() -> tuple[list[tuple[str, re.Pattern]], str]:
     return _BUCKET_RULES, _BUCKET_DEFAULT
 
 
-def query_circuit_kwh_by_name(query_api, start: str, stop: str) -> dict[str, float]:
-    """{circuit_name: kWh} over [start, stop). Reuses query_circuit_energy shape."""
-    return {c["name"]: c["kwh"] for c in query_circuit_energy(query_api, start, stop)}
-
-
-def query_hourly_circuit_kwh(query_api, start: str, stop: str,
-                             name_filter: str) -> list[tuple[datetime, float]]:
-    """Hourly kWh summed across circuits matching name_filter regex (case-insensitive).
-
-    Kept on mean-power × 1h (rollup field power_w_mean) rather than switching to
-    energy_wh, so the numbers this feeds — today/week EV totals — don't move."""
-    def run(src, seg_start, seg_stop):
-        return _summed_rows(query_api, src, seg_start, seg_stop, "1h",
-                            name_filter, mode="mean")
-
-    return _merge_keyed(_run_segments(query_api, start, stop, "1h", run))
-
-
-def query_interval_panel_kwh(query_api, start: str, stop: str,
-                             every: str) -> list[tuple[datetime, float]]:
-    """Grid kWh per `every`-window (integral, exact). Stop-stamped UTC times."""
-    flux = f'''
-from(bucket: "{INFLUXDB_BUCKET}")
-  |> range(start: {start}, stop: {stop})
-  |> filter(fn: (r) => r._measurement == "panel" and r._field == "grid_power_w")
-  |> aggregateWindow(
-       every: {every},
-       fn: (column, tables=<-) => tables |> integral(unit: 1h, column: column),
-       createEmpty: true)
-  |> map(fn: (r) => ({{r with _value: (if exists r._value then r._value else 0.0) / 1000.0}}))
-'''
-    out: list[tuple[datetime, float]] = []
-    for table in query_api.query(flux, org=INFLUXDB_ORG):
-        for record in table.records:
-            out.append((record.get_time(), record.get_value() or 0.0))
-    return out
-
-
-def query_interval_circuit_kwh(query_api, start: str, stop: str, every: str,
-                               name_filter: str | None = None) -> list[tuple[str, datetime, float]]:
-    """Per-circuit kWh per `every`-window (integral). Returns (name, utc_stop, kwh)."""
-    def run(src, seg_start, seg_stop):
-        return [(rec.values.get("name", "Unknown"), rec.get_time(), rec.get_value() or 0.0)
-                for rec in _circuit_records(query_api, src, seg_start, seg_stop,
-                                            every, name_filter)]
-
-    # callers accumulate additively, so segments just concatenate
-    return _run_segments(query_api, start, stop, every, run)
-
-
-def query_interval_circuit_kwh_summed(query_api, start: str, stop: str, every: str,
-                                      name_filter: str) -> list[tuple[datetime, float]]:
-    """Per-`every`-window kWh summed across circuits matching name_filter.
-    One (utc_stop, kwh) per window; same bucketing as query_interval_panel_kwh."""
-    def run(src, seg_start, seg_stop):
-        return _summed_rows(query_api, src, seg_start, seg_stop, every, name_filter)
-
-    return _merge_keyed(_run_segments(query_api, start, stop, every, run))
-
-
 def query_daily_panel_kwh(query_api, start: str, stop: str) -> list[tuple[date, float]]:
     """Daily grid kWh via per-local-day integral. One record per local calendar day."""
     flux = f'''
@@ -770,262 +666,15 @@ from(bucket: "{INFLUXDB_BUCKET}")
     return out
 
 
-def query_daily_circuit_kwh(query_api, start: str, stop: str,
-                            name_filter: str) -> list[tuple[date, float]]:
-    """Daily kWh summed across circuits matching name_filter (case-insensitive)."""
-    def run(src, seg_start, seg_stop):
-        return _summed_rows(query_api, src, seg_start, seg_stop, "1d", name_filter)
-
-    return _merge_keyed((_local_day(t), v)
-                        for t, v in _run_segments(query_api, start, stop, "1d", run))
-
-
-def query_monthly_panel_kwh(query_api, start: str, stop: str) -> list[tuple[tuple[int, int], float]]:
-    """Monthly grid kWh via per-local-month integral. One record per local calendar month."""
-    flux = f'''
-import "timezone"
-option location = timezone.location(name: "{LOCAL_TZ_NAME}")
-
-from(bucket: "{INFLUXDB_BUCKET}")
-  |> range(start: {start}, stop: {stop})
-  |> filter(fn: (r) => r._measurement == "panel" and r._field == "grid_power_w")
-  |> aggregateWindow(
-       every: 1mo,
-       fn: (column, tables=<-) => tables |> integral(unit: 1h, column: column),
-       createEmpty: true)
-  |> map(fn: (r) => ({{r with _value: (if exists r._value then r._value else 0.0) / 1000.0}}))
-'''
-    out: list[tuple[tuple[int, int], float]] = []
-    for table in query_api.query(flux, org=INFLUXDB_ORG):
-        for record in table.records:
-            t = record.get_time().astimezone(LOCAL_TZ)
-            d = (t - timedelta(seconds=1)).date()
-            out.append(((d.year, d.month), record.get_value() or 0.0))
-    return out
-
-
-def query_monthly_circuit_kwh(query_api, start: str, stop: str,
-                              name_filter: str) -> list[tuple[tuple[int, int], float]]:
-    """Monthly kWh summed across circuits matching name_filter (case-insensitive)."""
-    def run(src, seg_start, seg_stop):
-        return _summed_rows(query_api, src, seg_start, seg_stop, "1mo", name_filter)
-
-    rows = _run_segments(query_api, start, stop, "1mo", run)
-    return _merge_keyed(((_local_day(t).year, _local_day(t).month), v) for t, v in rows)
-
-
 def add_months(year: int, month: int, delta: int) -> tuple[int, int]:
     """Add `delta` calendar months to (year, month). Handles negative deltas."""
     total = year * 12 + (month - 1) + delta
     return total // 12, total % 12 + 1
 
 
-def latest_complete_month(target_date: date) -> tuple[int, int]:
-    """Most recent month fully covered by target_date."""
-    last_day = calendar.monthrange(target_date.year, target_date.month)[1]
-    if target_date.day == last_day:
-        return target_date.year, target_date.month
-    return add_months(target_date.year, target_date.month, -1)
-
-
-# Per-category line colors (keys = categories.json buckets). Total/avg/aux fixed.
-CATEGORY_COLORS = {
-    "Lights": "#f1c40f",
-    "HVAC": "#e74c3c",
-    "Car": "#3498db",
-    "Appliances": "#e67e22",
-    "Else": "#16a085",
-}
-_FALLBACK_CYCLE = ["#8e44ad", "#2980b9", "#27ae60", "#d35896"]
-
-
-def build_today_series(query_api, today_start: str, today_end: str,
-                       week_start: str, aux_alarm: bool, every: str = "15m") -> dict:
-    """Assemble the today line-chart data: total + top-3 category lines +
-    dotted 7-day same-slot total average (+ aux-heat line if alarming).
-
-    All series are aligned on the canonical bucket grid (x = local bucket start)."""
-    every_min = 15
-    every_td = timedelta(minutes=every_min)
-    total = query_interval_panel_kwh(query_api, today_start, today_end, every)
-    if not total:
-        return {"times": []}
-
-    stops = [t for t, _ in total]               # UTC stop stamps, canonical order
-    idx = {t: i for i, t in enumerate(stops)}
-    n = len(stops)
-    times = [t.astimezone(LOCAL_TZ) - every_td for t in stops]   # x = bucket start (local)
-    total_vals = [v for _, v in total]
-
-    # Per-circuit → roll up to category lines; pick top 3 by today's total.
-    cat_series: dict[str, list[float]] = {}
-    cat_total: dict[str, float] = {}
-    for name, t, v in query_interval_circuit_kwh(query_api, today_start, today_end, every):
-        i = idx.get(t)
-        if i is None:
-            continue
-        cat = display_bucket(name)
-        cat_series.setdefault(cat, [0.0] * n)[i] += v
-        cat_total[cat] = cat_total.get(cat, 0.0) + v
-    top3 = sorted(cat_total, key=lambda c: -cat_total[c])[:3]
-    cats = [(c, cat_series[c]) for c in top3]
-
-    # Dotted 7-day average of total, by 15-min slot-of-day.
-    slot_vals: dict[int, list[float]] = {}
-    for t, v in query_interval_panel_kwh(query_api, week_start, today_end, every):
-        st = t.astimezone(LOCAL_TZ) - every_td
-        slot_vals.setdefault(st.hour * 4 + st.minute // 15, []).append(v)
-    slot_avg = {s: sum(xs) / len(xs) for s, xs in slot_vals.items()}
-    avg_total = [slot_avg.get(lt.hour * 4 + lt.minute // 15, 0.0) for lt in times]
-
-    series = {"times": times, "total": total_vals, "cats": cats, "avg_total": avg_total}
-
-    if aux_alarm:
-        aux = [0.0] * n
-        for _, t, v in query_interval_circuit_kwh(query_api, today_start, today_end,
-                                                  every, name_filter="Auxiliary"):
-            i = idx.get(t)
-            if i is not None:
-                aux[i] += v
-        series["aux"] = aux
-    return series
-
-
-def build_week_series(query_api, start: str, today_end: str,
-                      target_date: date, every: str = "2h") -> dict:
-    """Last-7-days load (EV-excluded) at 2h grain vs same-weekday+slot averages
-    over the trailing 5- and 12-week windows. EV (the dedicated charger circuit)
-    is subtracted per bucket. Also returns weekly-average EV (5/12-week, complete
-    weeks only) for the EV callout. `start` must cover ≥12 complete prior weeks."""
-    every_td = timedelta(hours=2)
-    panel = query_interval_panel_kwh(query_api, start, today_end, every)
-    if not panel:
-        return {"times": []}
-    ev_bkt = dict(query_interval_circuit_kwh_summed(
-        query_api, start, today_end, every, ev_name_filter()))
-    excl = [(t, max(0.0, v - ev_bkt.get(t, 0.0))) for t, v in panel]
-
-    def slot_avg(since_day: date) -> dict[tuple[int, int], float]:
-        cut = local_day_utc_range(since_day)[0].astimezone(LOCAL_TZ)
-        acc: dict[tuple[int, int], list[float]] = {}
-        for t, v in excl:
-            st = t.astimezone(LOCAL_TZ) - every_td
-            if st >= cut:
-                acc.setdefault((st.weekday(), st.hour // 2), []).append(v)
-        return {k: sum(xs) / len(xs) for k, xs in acc.items()}
-
-    avg5 = slot_avg(target_date - timedelta(days=34))
-    avg12 = slot_avg(target_date - timedelta(days=83))
-
-    cutoff = local_day_utc_range(target_date - timedelta(days=6))[0].astimezone(LOCAL_TZ)
-    times, actual, roll5, roll12 = [], [], [], []
-    for t, v in excl:
-        st = t.astimezone(LOCAL_TZ) - every_td
-        if st < cutoff:
-            continue
-        key = (st.weekday(), st.hour // 2)
-        times.append(st)
-        actual.append(v)
-        roll5.append(avg5.get(key, 0.0))
-        roll12.append(avg12.get(key, 0.0))
-
-    # Weekly-average EV over complete prior weeks (excludes the in-progress week).
-    daily_ev = dict(query_daily_circuit_kwh(query_api, start, today_end, ev_name_filter()))
-
-    def ev_week_avg(weeks: int) -> float:
-        hi = target_date - timedelta(days=7)            # last day before this week
-        lo = target_date - timedelta(days=6 + 7 * weeks)  # oldest counted day
-        return sum(v for d, v in daily_ev.items() if lo <= d <= hi) / weeks
-
-    return {
-        "times": times, "actual": actual, "avg5": roll5, "avg12": roll12,
-        "ev_avg5": ev_week_avg(5), "ev_avg12": ev_week_avg(12),
-    }
-
-
-def render_today_chart(series: dict) -> str:
-    """Total + dotted 7-day avg + top-3 category lines (+ aux heat) at 15-min grain."""
-    times = series.get("times")
-    if not times:
-        return ""
-    fig, ax = plt.subplots(figsize=(7, 3.4), dpi=120)
-    if series.get("avg_total"):
-        ax.plot(times, series["avg_total"], color="#7f8c8d", linewidth=1.4,
-                linestyle=":", label="Total · 7-day avg")
-    ax.plot(times, series["total"], color="#2c3e50", linewidth=2.2, label="Total", zorder=5)
-    fb = iter(_FALLBACK_CYCLE)
-    for name, vals in series.get("cats", []):
-        ax.plot(times, vals, linewidth=1.3,
-                color=CATEGORY_COLORS.get(name, next(fb, "#888")), label=name)
-    if series.get("aux"):
-        ax.plot(times, series["aux"], color="#c0392b", linewidth=1.4,
-                linestyle="--", label="Aux heat")
-    ax.set_xlabel("Time of day (PST)")
-    ax.set_ylabel("kWh per 15 min")
-    ax.set_ylim(bottom=0)
-    ax.set_xlim(times[0], times[-1])
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc="upper left", fontsize=8, ncol=2)
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%-I %p", tz=LOCAL_TZ))
-    # Pin ticks to fixed clock hours (0,3,6,…) so labels land on midnight, not the view edge.
-    ax.xaxis.set_major_locator(mdates.HourLocator(byhour=range(0, 24, 3), tz=LOCAL_TZ))
-    fig.autofmt_xdate()
-    fig.tight_layout()
-    return _fig_to_b64(fig)
-
-
-def render_week_compare(series: dict, avg_key: str, avg_label: str,
-                        avg_color: str, avg_style: str) -> str:
-    """This week's load (excl. car) vs one same-time average, 2-hour grain."""
-    times = series.get("times")
-    avg = series.get(avg_key)
-    if not times or not avg:
-        return ""
-    fig, ax = plt.subplots(figsize=(7, 3.4), dpi=120)
-    ax.plot(times, avg, color=avg_color, linewidth=1.4,
-            linestyle=avg_style, label=avg_label)
-    ax.plot(times, series["actual"], color="#3498db", linewidth=1.8,
-            label="This week (excl. car)")
-    ax.set_xlabel("Day (PST)")
-    ax.set_ylabel("kWh per 2 h")
-    ax.set_ylim(bottom=0)
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc="upper left", fontsize=8)
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%a %-m/%-d", tz=LOCAL_TZ))
-    ax.xaxis.set_major_locator(mdates.DayLocator(tz=LOCAL_TZ))
-    fig.autofmt_xdate()
-    fig.tight_layout()
-    return _fig_to_b64(fig)
-
-
-def render_monthly_chart(monthly_excl: list[tuple[tuple[int, int], float]],
-                         monthly_ev: dict[tuple[int, int], float]) -> str:
-    """Stacked monthly bars (excl + EV) + dashed total-avg line."""
-    if not monthly_excl:
-        return ""
-
-    labels = [f"{calendar.month_abbr[m]} '{str(y)[2:]}" for (y, m), _ in monthly_excl]
-    excl_values = [v for _, v in monthly_excl]
-    ev_values = [monthly_ev.get(ym, 0.0) for ym, _ in monthly_excl]
-
-    x = list(range(len(excl_values)))
-    fig, ax = plt.subplots(figsize=(7, 3.2), dpi=120)
-    ax.bar(x, excl_values, width=0.7, color="#3498db", label="excl. car")
-    ax.bar(x, ev_values, width=0.7, bottom=excl_values, color="#9b59b6", label="EV")
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, fontsize=9, rotation=30, ha="right")
-    ax.set_ylabel("kWh")
-    ax.grid(True, alpha=0.3, axis="y")
-    ax.legend(loc="upper left", fontsize=9)
-    fig.tight_layout()
-    return _fig_to_b64(fig)
-
-
-def _fig_to_b64(fig) -> str:
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight")
-    plt.close(fig)
-    return base64.b64encode(buf.getvalue()).decode("ascii")
+# ---------- retained utilities from the old daily report (used by the
+# category/headline grouping helpers above and by the render functions below;
+# the rest of the old daily-report pipeline was retired in Task 5) ----------
 
 
 def cost_n_days(kwh: float, days: int) -> float:
@@ -1042,128 +691,11 @@ def display_bucket(name: str) -> str:
     return default
 
 
-def _aggregate_by_bucket(circuits: list[dict]) -> dict[str, float]:
-    out: dict[str, float] = {}
-    for c in circuits:
-        bucket = display_bucket(c["name"])
-        out[bucket] = out.get(bucket, 0.0) + c["kwh"]
-    return out
-
-
-def merge_circuits(today_list: list[dict], week_list: list[dict],
-                   n: int = 10) -> tuple[list[dict], dict]:
-    """Top N display buckets by max(day, week/7) — surfaces consistent heavy
-    users even on quiet days while still ranking today's spikes. Raw circuits
-    are first aggregated into coarse buckets (see display_bucket).
-    Returns (rows, totals)."""
-    today_map = _aggregate_by_bucket(today_list)
-    week_map = _aggregate_by_bucket(week_list)
-    names = set(today_map) | set(week_map)
-    rows = sorted(
-        [{"name": name,
-          "kwh_day": today_map.get(name, 0.0),
-          "kwh_week": week_map.get(name, 0.0)} for name in names],
-        key=lambda r: max(r["kwh_day"], r["kwh_week"] / 7.0),
-        reverse=True,
-    )[:n]
-    totals = {
-        "kwh_day": sum(r["kwh_day"] for r in rows),
-        "kwh_week": sum(r["kwh_week"] for r in rows),
-    }
-    return rows, totals
-
-
-def event_summary(events: list[dict]) -> dict:
-    """Count + kWh + cost (recomputed at current ENERGY_RATE) for a list of events."""
-    kwh = sum((e.get("energy_kwh") or 0) for e in events)
-    return {"count": len(events), "kwh": kwh, "cost": round(kwh * ENERGY_RATE, 2)}
-
-
-def query_events(query_api, measurement: str, start: str, stop: str) -> list[dict]:
-    """Query pivoted event records (bath_event or charge_event)."""
-    flux = f'''
-from(bucket: "{INFLUXDB_BUCKET}")
-  |> range(start: {start}, stop: {stop})
-  |> filter(fn: (r) => r._measurement == "{measurement}")
-  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
-'''
-    results = []
-    for table in query_api.query(flux, org=INFLUXDB_ORG):
-        for record in table.records:
-            results.append(record.values)
-    return results
-
-
-@dataclass
-class Period:
-    """Energy over a contiguous range. Both grid and EV in kWh."""
-    grid: float = 0.0
-    ev: float = 0.0
-    days: int = 1
-
-    @property
-    def excl(self) -> float:
-        return max(0.0, self.grid - self.ev)
-
-    @property
-    def cost(self) -> float:
-        return round(self.grid * ENERGY_RATE + self.days * BASE_CHARGE_DAILY, 2)
-
-    @property
-    def ev_cost(self) -> float:
-        return round(self.ev * ENERGY_RATE, 2)
-
-
-@dataclass
-class ReportContext:
-    query_api: Any
-    target_date: date
-    force_monthly: bool
-    today: Period
-    week: Period
-    prev_day_kwh: float
-    daily_grid: dict[date, float]  # 5wk window
-    daily_ev: dict[date, float]    # 5wk window
-    today_series: dict             # today line chart (total + top-3 cats + 7d avg + aux)
-    week_series: dict              # week line chart (this week vs 5-week avg)
-    circuits_top10: list[dict]
-    circuits_totals: dict
-    baths_today: list[dict]
-    baths_week_summary: dict
-    charges_today: list[dict]
-    aux_heat_kwh: float = 0.0
-
-    @property
-    def date_str(self) -> str:
-        return self.target_date.strftime("%A, %B %-d")
-
-    @property
-    def daily_excl(self) -> list[tuple[date, float]]:
-        return sorted(
-            (d, max(0.0, k - self.daily_ev.get(d, 0.0)))
-            for d, k in self.daily_grid.items()
-        )
-
-    @property
-    def avg30_excl(self) -> float:
-        # Drop target day from the average if it's still in progress
-        series = [(d, v) for d, v in self.daily_excl if d != self.target_date] \
-            if self.target_incomplete else self.daily_excl
-        last = series[-30:]
-        return (sum(v for _, v in last) / len(last)) if last else 0.0
-
-    @property
-    def target_incomplete(self) -> bool:
-        """True when target_date is today (local), so its data is partial."""
-        return self.target_date == datetime.now(LOCAL_TZ).date()
-
-    @property
-    def show_monthly(self) -> bool:
-        return self.force_monthly or self.target_date.weekday() == 6
-
-    @property
-    def aux_alarm(self) -> bool:
-        return self.aux_heat_kwh * ENERGY_RATE >= AUX_HEAT_ALARM_USD
+def _fig_to_b64(fig) -> str:
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight")
+    plt.close(fig)
+    return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
 def _chart_img(b64: str, alt: str) -> str:
@@ -1180,191 +712,13 @@ def _delta_arrow(current: float, baseline: float) -> str:
             f'{arrow}{abs(pct):.0f}% vs yesterday</span>')
 
 
-def _event_time(e: dict) -> str:
-    t = e.get("_time")
-    return t.strftime("%-I:%M %p") if hasattr(t, "strftime") else str(t)
-
-
-# ---------- sections ----------
-
-def section_aux_alarm(ctx: ReportContext) -> str:
-    if not ctx.aux_alarm:
-        return ""
-    cost = ctx.aux_heat_kwh * ENERGY_RATE
-    # 5kW resistance element ≈ 0.083 kWh/min, so kWh ÷ 0.083 ≈ minutes
-    approx_min = ctx.aux_heat_kwh / (5.0 / 60.0)
-    return (
-        '<div style="background:#fee2e2;border-left:4px solid #dc2626;'
-        'padding:12px 16px;margin:0 0 16px;border-radius:4px;color:#991b1b;">'
-        f'<strong>&#9888; Auxiliary heat used</strong> &mdash; '
-        f'{ctx.aux_heat_kwh:.2f} kWh (~{approx_min:.0f} min, ${cost:.2f}). '
-        'See the aux-heat line on the chart below.'
-        '</div>'
-    )
-
-
-def section_summary(ctx: ReportContext) -> str:
-    delta = "" if ctx.target_incomplete else _delta_arrow(ctx.today.grid, ctx.prev_day_kwh)
-    return f'''<h2>Energy Report &mdash; {ctx.date_str}</h2>
-
-<table class="summary">
-<tr><th></th><th>Today</th><th>Last 7 days</th></tr>
-<tr><th>Total kWh</th><td>{ctx.today.grid:.1f}{delta}</td><td>{ctx.week.grid:.1f}</td></tr>
-<tr><th>Excl. car</th><td>{ctx.today.excl:.1f}</td><td>{ctx.week.excl:.1f}</td></tr>
-<tr><th>Est. cost</th><td>${ctx.today.cost:.2f}</td><td>${ctx.week.cost:.2f}</td></tr>
-</table>
-<p style="font-size:12px;color:#666;margin:4px 0 16px;">
-30-day daily avg (excl. car): <strong>{ctx.avg30_excl:.1f} kWh/day</strong>
-</p>'''
-
-
-def section_today_chart(ctx: ReportContext) -> str:
-    b64 = render_today_chart(ctx.today_series)
-    if not b64:
-        return ""
-    return (f'<h3>Today &mdash; 15-min (total &amp; top categories)</h3>\n'
-            f'{_chart_img(b64, "Today by 15 min")}')
-
-
-def week_ev_line(ctx: ReportContext) -> str:
-    """EV charging this week vs the 5- and 12-week weekly averages."""
-    s = ctx.week_series
-    cur, a5, a12 = ctx.week.ev, s.get("ev_avg5", 0.0), s.get("ev_avg12", 0.0)
-    if cur == 0 and a5 == 0 and a12 == 0:
-        return ""
-
-    def vs(avg: float) -> str:
-        if avg <= 0:
-            return ""
-        pct = (cur - avg) / avg * 100
-        arrow, color = ("&uarr;", "#e74c3c") if pct >= 0 else ("&darr;", "#27ae60")
-        return (f' <span style="color:{color};font-size:12px;font-weight:500;">'
-                f'{arrow}{abs(pct):.0f}%</span>')
-
-    return (
-        f'<p style="font-size:13px;color:#444;margin:8px 0 16px;">'
-        f'EV charging: <strong>{cur:.1f} kWh</strong> this week vs '
-        f'<strong>{a5:.1f} kWh</strong> (5-wk avg){vs(a5)} &middot; '
-        f'<strong>{a12:.1f} kWh</strong> (12-wk avg){vs(a12)}</p>'
-    )
-
-
-def section_week_chart(ctx: ReportContext) -> str:
-    s = ctx.week_series
-    b5 = render_week_compare(s, "avg5", "5-week avg (same time)", "#e67e22", ":")
-    b12 = render_week_compare(s, "avg12", "12-week avg (same time)", "#16a085", "--")
-    if not b5 and not b12:
-        return ""
-    parts = ['<h3>This week vs average (excl. car) &mdash; 2-hour grain</h3>']
-    if b5:
-        parts.append(_chart_img(b5, "This week vs 5-week average"))
-    if b12:
-        parts.append(_chart_img(b12, "This week vs 12-week average"))
-    parts.append(week_ev_line(ctx))
-    return "\n".join(p for p in parts if p)
-
-
-def section_cost_breakdown(ctx: ReportContext) -> str:
-    energy = round(ctx.today.grid * ENERGY_RATE, 2)
-    base = round(BASE_CHARGE_DAILY, 2)
-    return f'''<h3>Cost Breakdown &mdash; today</h3>
-<table>
-<tr><td>Energy &mdash; {ctx.today.grid:.2f} kWh &times; ${ENERGY_RATE:.4f}</td><td>${energy:.2f}</td></tr>
-<tr><td>Base service charge</td><td>${base:.2f}</td></tr>
-<tr><td><strong>Total</strong></td><td><strong>${ctx.today.cost:.2f}</strong></td></tr>
-</table>
-<p style="font-size:11px;color:#888;margin:4px 0;">SCL Small General, flat rate.</p>'''
-
-
-def section_top_circuits(ctx: ReportContext) -> str:
-    if not ctx.circuits_top10:
-        return ""
-    rows = "".join(
-        f'<tr><td>{c["name"]}</td>'
-        f'<td>{c["kwh_day"]:.2f}</td><td>${c["kwh_day"] * ENERGY_RATE:.2f}</td>'
-        f'<td>{c["kwh_week"]:.2f}</td><td>${c["kwh_week"] * ENERGY_RATE:.2f}</td></tr>\n'
-        for c in ctx.circuits_top10
-    )
-    t = ctx.circuits_totals
-    totals_row = (
-        f'<tr style="background:#f8f9fa;font-weight:600;">'
-        f'<td>Total</td>'
-        f'<td>{t["kwh_day"]:.2f}</td><td>${t["kwh_day"] * ENERGY_RATE:.2f}</td>'
-        f'<td>{t["kwh_week"]:.2f}</td><td>${t["kwh_week"] * ENERGY_RATE:.2f}</td></tr>'
-    )
-    return f'''<h3>Usage by Category</h3>
-<table>
-<tr><th>Category</th><th>kWh&nbsp;(day)</th><th>$&nbsp;(day)</th><th>kWh&nbsp;(7d)</th><th>$&nbsp;(7d)</th></tr>
-{rows}{totals_row}
-</table>'''
-
-
-def section_monthly(ctx: ReportContext) -> str:
-    if not ctx.show_monthly:
-        return ""
-    return build_monthly_section(ctx.query_api, ctx.target_date)
-
-
-def section_baths(ctx: ReportContext) -> str:
-    if not (ctx.baths_today or ctx.baths_week_summary["count"] > 0):
-        return ""
-    today_kwh = sum((b.get("energy_kwh") or 0) for b in ctx.baths_today)
-    summary = (
-        f'<p style="margin:8px 0;color:#666;font-size:13px;">'
-        f'Today: <strong>{len(ctx.baths_today)}</strong> '
-        f'(<strong>{today_kwh:.2f} kWh</strong>, ${today_kwh * ENERGY_RATE:.2f}) &middot; '
-        f'last 7 days: <strong>{ctx.baths_week_summary["count"]}</strong> '
-        f'(<strong>{ctx.baths_week_summary["kwh"]:.2f} kWh</strong>, '
-        f'${ctx.baths_week_summary["cost"]:.2f})</p>'
-    )
-    table = ""
-    if ctx.baths_today:
-        rows = "".join(
-            f'<tr><td>{_event_time(b)}</td><td>{b.get("duration_min", 0):.0f}</td>'
-            f'<td>{(b.get("energy_kwh") or 0):.2f} kWh</td>'
-            f'<td>${(b.get("energy_kwh") or 0) * ENERGY_RATE:.2f}</td></tr>\n'
-            for b in ctx.baths_today
-        )
-        table = (f'<table><tr><th>Time</th><th>Min</th><th>Energy</th><th>Cost</th></tr>\n'
-                 f'{rows}</table>')
-    return f'<h3>Bath Events</h3>\n{summary}\n{table}'
-
-
-def section_charges(ctx: ReportContext) -> str:
-    if not (ctx.charges_today or ctx.today.ev > 0 or ctx.week.ev > 0):
-        return ""
-    summary = (
-        f'<p style="margin:8px 0;color:#666;font-size:13px;">'
-        f'Today: <strong>{ctx.today.ev:.2f} kWh</strong> '
-        f'(${ctx.today.ev_cost:.2f}) &middot; '
-        f'last 7 days: <strong>{ctx.week.ev:.2f} kWh</strong> '
-        f'(${ctx.week.ev_cost:.2f})</p>'
-    )
-    table = ""
-    if ctx.charges_today:
-        rows = "".join(
-            f'<tr><td>{_event_time(ch)}</td><td>{ch.get("duration_min", 0):.0f}</td>'
-            f'<td>{ch.get("mean_power_w", 0):.0f} W</td>'
-            f'<td>{(ch.get("energy_kwh") or 0):.2f} kWh</td>'
-            f'<td>${(ch.get("energy_kwh") or 0) * ENERGY_RATE:.2f}</td></tr>\n'
-            for ch in ctx.charges_today
-        )
-        table = (f'<table><tr><th>Time</th><th>Min</th><th>Power</th><th>Energy</th><th>Cost</th></tr>\n'
-                 f'{rows}</table>')
-    return f'<h3>Car Charging</h3>\n{summary}\n{table}'
-
-
-SECTIONS = [
-    section_aux_alarm,
-    section_summary,
-    section_today_chart,
-    section_week_chart,
-    section_cost_breakdown,
-    section_top_circuits,
-    section_monthly,
-    section_baths,
-    section_charges,
-]
+def seconds_until_hour(hour: int) -> float:
+    """Seconds until the next occurrence of `hour` in local time."""
+    now = datetime.now()
+    target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+    if now >= target:
+        target += timedelta(days=1)
+    return (target - now).total_seconds()
 
 
 CSS = """
@@ -1377,16 +731,6 @@ th { background: #f8f9fa; font-weight: 600; }
 table.summary td { text-align: right; }
 table.summary th:first-child, table.summary td:first-child { text-align: left; }
 """
-
-
-def build_html(ctx: ReportContext) -> str:
-    """Render the email body by concatenating non-empty sections."""
-    body = "\n\n".join(s for s in (section(ctx) for section in SECTIONS) if s)
-    return f'''<!DOCTYPE html>
-<html><head><style>{CSS}</style></head>
-<body>
-{body}
-</body></html>'''
 
 
 def send_email(html: str, subject: str):
@@ -1406,176 +750,137 @@ def send_email(html: str, subject: str):
     logger.info(f"Email sent to {REPORT_EMAIL}: {resp.json().get('id')}")
 
 
-def build_monthly_section(query_api, target_date: date) -> str:
-    """Render trailing-12-month chart + table. Returns HTML fragment (or '' if no data)."""
-    end_y, end_m = latest_complete_month(target_date)
-    start_y, start_m = add_months(end_y, end_m, -11)
-    after_end_y, after_end_m = add_months(end_y, end_m, 1)
+# ---------- Task 5: weekly briefing blocks 1-4, wiring ----------
 
-    start_dt = datetime(start_y, start_m, 1, tzinfo=LOCAL_TZ)
-    end_dt = datetime(after_end_y, after_end_m, 1, tzinfo=LOCAL_TZ)
-    start_str = flux_ts(start_dt.astimezone(timezone.utc))
-    stop_str = flux_ts(end_dt.astimezone(timezone.utc))
 
-    ev_pat = ev_name_filter()
-    grid = dict(query_monthly_panel_kwh(query_api, start_str, stop_str))
-    ev = dict(query_monthly_circuit_kwh(query_api, start_str, stop_str, ev_pat))
+CATEGORY_COLORS = {
+    "Lights": "#f1c40f", "HVAC": "#e74c3c", "Car": "#3498db",
+    "Appliances": "#e67e22", "Else": "#16a085", "Unmonitored": "#95a5a6",
+}
 
-    months: list[tuple[int, int]] = []
-    y, m = start_y, start_m
-    while (y, m) != (after_end_y, after_end_m):
-        months.append((y, m))
-        y, m = add_months(y, m, 1)
 
-    monthly_excl = [(ym, max(0.0, grid.get(ym, 0.0) - ev.get(ym, 0.0))) for ym in months]
-    # Trim leading months with no data at all (avoids phantom base-charge rows)
-    first_idx = next(
-        (i for i, (ym, v) in enumerate(monthly_excl) if v > 0 or ev.get(ym, 0.0) > 0),
-        len(monthly_excl),
-    )
-    monthly_excl = monthly_excl[first_idx:]
-    if not monthly_excl:
+def render_headline(ctx: WeeklyContext) -> str:
+    h = ctx.headline
+    week_delta = _delta_arrow_pct(h["delta_vs_last_week_pct"], " vs last week")
+    avg_delta = _delta_arrow_pct(h["delta_vs_12wk_pct"], " vs 12-wk avg")
+    mover = (f' The biggest mover was <strong>{h["top_mover"]}</strong> '
+            f'({h["top_mover_delta_kwh"]:+.1f} kWh vs last week).'
+            if h["top_mover"] else "")
+    return f'''<h2>Weekly Energy Report &mdash; {ctx.date_str}</h2>
+<p style="font-size:15px;">
+<strong>{h["kwh"]:.1f} kWh</strong> (${h["cost"]:.2f}){week_delta}{avg_delta}.{mover}
+</p>'''
+
+
+def _delta_arrow_pct(pct: float | None, suffix: str) -> str:
+    if pct is None:
         return ""
+    arrow, color = ("&uarr;", "#e74c3c") if pct > 0 else ("&darr;", "#27ae60")
+    return (f' <span style="color:{color};font-size:13px;font-weight:500;">'
+           f'{arrow}{abs(pct):.0f}%{suffix}</span>')
 
-    chart_b64 = render_monthly_chart(monthly_excl, ev)
-    chart_img = (f'<img src="data:image/png;base64,{chart_b64}" '
-                 f'alt="Trailing 12 months excl. car" '
-                 f'style="width:100%;max-width:560px;display:block;margin:8px 0;">') \
-        if chart_b64 else ''
 
-    rows = ""
-    tot_excl = tot_ev = tot_total = tot_cost = 0.0
-    for (y, m), excl in monthly_excl:
-        ev_kwh = ev.get((y, m), 0.0)
-        total = excl + ev_kwh
-        days = calendar.monthrange(y, m)[1]
-        cost = total * ENERGY_RATE + days * BASE_CHARGE_DAILY
-        label = f"{calendar.month_abbr[m]} {y}"
-        rows += (f'<tr><td>{label}</td><td>{excl:.1f}</td>'
-                 f'<td>{ev_kwh:.1f}</td><td>{total:.1f}</td>'
-                 f'<td>${cost:.2f}</td></tr>\n')
-        tot_excl += excl
-        tot_ev += ev_kwh
-        tot_total += total
-        tot_cost += cost
+def render_week_by_day_chart(ctx: WeeklyContext) -> str:
+    """Block 2 — 7 bars stacked by category."""
+    if not ctx.week_by_day:
+        return ""
+    labels = [d.strftime("%a %-m/%-d") for d, _ in ctx.week_by_day]
+    fig, ax = plt.subplots(figsize=(7, 3.4), dpi=120)
+    bottom = [0.0] * len(labels)
+    for cat in ctx.categories:
+        vals = [cats.get(cat, 0.0) for _, cats in ctx.week_by_day]
+        ax.bar(labels, vals, bottom=bottom, width=0.6,
+              color=CATEGORY_COLORS.get(cat, "#888"), label=cat)
+        bottom = [b + v for b, v in zip(bottom, vals)]
+    ax.set_ylabel("kWh")
+    ax.grid(True, alpha=0.3, axis="y")
+    ax.legend(loc="upper left", fontsize=8, ncol=3)
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    b64 = _fig_to_b64(fig)
+    return f'<h3>This week by day</h3>\n{_chart_img(b64, "This week by day, by category")}'
 
-    total_row = (f'<tr style="background:#f8f9fa;font-weight:600;">'
-                 f'<td>12-mo total</td><td>{tot_excl:.1f}</td>'
-                 f'<td>{tot_ev:.1f}</td><td>{tot_total:.1f}</td>'
-                 f'<td>${tot_cost:.2f}</td></tr>')
 
-    return f'''
-<h3>Trailing 12 Months</h3>
-{chart_img}
+def render_12wk_trend_chart(ctx: WeeklyContext) -> str:
+    """Block 3 — stacked histogram of weekly totals by category, 13 weeks
+    (12 trailing + the target week) so direction and composition read in one
+    image."""
+    if not ctx.trend:
+        return ""
+    labels = [ws.strftime("%-m/%-d") for ws, _ in ctx.trend]
+    fig, ax = plt.subplots(figsize=(7, 3.2), dpi=120)
+    bottom = [0.0] * len(labels)
+    for cat in ctx.categories:
+        vals = [totals.get(cat, 0.0) for _, totals in ctx.trend]
+        ax.bar(labels, vals, bottom=bottom, width=0.7,
+              color=CATEGORY_COLORS.get(cat, "#888"), label=cat)
+        bottom = [b + v for b, v in zip(bottom, vals)]
+    ax.set_xticklabels(labels, fontsize=8, rotation=45, ha="right")
+    ax.set_ylabel("kWh / week")
+    ax.grid(True, alpha=0.3, axis="y")
+    ax.legend(loc="upper left", fontsize=8, ncol=3)
+    fig.tight_layout()
+    b64 = _fig_to_b64(fig)
+    return f'<h3>12-week trend</h3>\n{_chart_img(b64, "12-week trend by category")}'
+
+
+def render_usage_table(ctx: WeeklyContext) -> str:
+    """Block 4 — one table replacing the old cost-breakdown + top-circuits
+    sections. Per-category cost is energy-only (kWh * ENERGY_RATE); the base
+    service charge isn't attributable to a category and only appears in the
+    headline's whole-week cost."""
+    def pct_cell(pct: float | None) -> str:
+        if pct is None:
+            return "&mdash;"
+        arrow, color = ("&uarr;", "#e74c3c") if pct > 0 else ("&darr;", "#27ae60")
+        return f'<span style="color:{color};">{arrow}{abs(pct):.0f}%</span>'
+
+    rows_html = []
+    for r in ctx.usage_rows:
+        rows_html.append(
+            f'<tr><td>{r["category"]}</td><td>{r["kwh"]:.1f}</td><td>${r["cost"]:.2f}</td>'
+            f'<td>{pct_cell(r["delta_week_pct"])}</td><td>{pct_cell(r["delta_12wk_pct"])}</td></tr>'
+        )
+        if r["top_circuits"]:
+            nested = ", ".join(f'{name} ({kwh:.1f} kWh)' for name, kwh in r["top_circuits"])
+            rows_html.append(
+                f'<tr><td colspan="5" style="font-size:11px;color:#888;padding-left:24px;">'
+                f'{nested}</td></tr>'
+            )
+    return f'''<h3>Usage by category</h3>
 <table>
-<tr><th>Month</th><th>kWh excl. car</th><th>EV kWh</th><th>Total kWh</th><th>Est. cost</th></tr>
-{rows}{total_row}
+<tr><th>Category</th><th>kWh</th><th>Cost</th><th>vs last wk</th><th>vs 12-wk avg</th></tr>
+{"".join(rows_html)}
 </table>'''
 
 
-def build_context(query_api, target_date: date, force_monthly: bool) -> ReportContext:
-    """Fetch everything needed for the report and pack into a ReportContext.
-
-    Window conventions (all aligned to local midnight):
-      TODAY = [target, target+1)
-      WEEK  = [target-6, target+1)         — 7 days inclusive of target
-      5WK   = [target-34, target+1)        — 35 days inclusive
-    """
-    utc_start, utc_end = local_day_utc_range(target_date)
-    today_start = flux_ts(utc_start)
-    today_end = flux_ts(utc_end)
-    week_start = flux_ts(local_day_utc_range(target_date - timedelta(days=6))[0])
-    fivewk_start = flux_ts(local_day_utc_range(target_date - timedelta(days=34))[0])
-    # Week comparison averages over 12 weeks; need ≥12 complete prior weeks of history.
-    weekcmp_start = flux_ts(local_day_utc_range(target_date - timedelta(days=90))[0])
-
-    ev_pat = ev_name_filter()
-
-    # Today + week Periods (grid total + EV total)
-    today_ev_series = query_hourly_circuit_kwh(query_api, today_start, today_end, ev_pat)
-    week_ev_series = query_hourly_circuit_kwh(query_api, week_start, today_end, ev_pat)
-    today = Period(
-        grid=query_total_kwh(query_api, today_start, today_end),
-        ev=sum(v for _, v in today_ev_series),
-        days=1,
-    )
-    week = Period(
-        grid=query_total_kwh(query_api, week_start, today_end),
-        ev=sum(v for _, v in week_ev_series),
-        days=7,
-    )
-
-    # Previous day for "vs yesterday" delta
-    pstart, pend = local_day_utc_range(target_date - timedelta(days=1))
-    prev_day_kwh = query_total_kwh(query_api, flux_ts(pstart), flux_ts(pend))
-
-    # 5-week daily series (drives 30d avg)
-    daily_grid = dict(query_daily_panel_kwh(query_api, fivewk_start, today_end))
-    daily_ev = dict(query_daily_circuit_kwh(query_api, fivewk_start, today_end, ev_pat))
-
-    # Circuit breakdown
-    circuits_today = query_circuit_energy(query_api, today_start, today_end)
-    circuits_week = query_circuit_energy(query_api, week_start, today_end)
-    top10, totals = merge_circuits(circuits_today, circuits_week, n=10)
-    aux_heat_kwh = sum(
-        c["kwh"] for c in circuits_today
-        if AUX_CIRCUIT_PATTERN.search(c["name"])
-    )
-
-    # Line-chart series (today 15-min + this-week-vs-avg 2-hour)
-    today_series = build_today_series(
-        query_api, today_start, today_end, week_start,
-        aux_alarm=aux_heat_kwh * ENERGY_RATE >= AUX_HEAT_ALARM_USD)
-    week_series = build_week_series(query_api, weekcmp_start, today_end, target_date)
-
-    # Events
-    baths_today = query_events(query_api, "bath_event", today_start, today_end)
-    baths_week = query_events(query_api, "bath_event", week_start, today_end)
-    charges_today = query_events(query_api, "charge_event", today_start, today_end)
-
-    return ReportContext(
-        query_api=query_api,
-        target_date=target_date,
-        force_monthly=force_monthly,
-        today=today,
-        week=week,
-        prev_day_kwh=prev_day_kwh,
-        daily_grid=daily_grid,
-        daily_ev=daily_ev,
-        today_series=today_series,
-        week_series=week_series,
-        circuits_top10=top10,
-        circuits_totals=totals,
-        baths_today=baths_today,
-        baths_week_summary=event_summary(baths_week),
-        charges_today=charges_today,
-        aux_heat_kwh=aux_heat_kwh,
-    )
+WEEKLY_SECTIONS = [render_headline, render_week_by_day_chart, render_12wk_trend_chart,
+                  render_usage_table]
 
 
-def generate_report(client: InfluxDBClient, target_date: date, force_monthly: bool = False):
-    """Build the email for `target_date` (local) and send via Resend."""
-    ctx = build_context(client.query_api(), target_date, force_monthly)
-    prefix = "⚠ Aux heat — " if ctx.aux_alarm else ""
-    subject = f"{prefix}Energy Report — {ctx.date_str}"
-    send_email(build_html(ctx), subject)
+def build_weekly_html(ctx: WeeklyContext) -> str:
+    body = "\n\n".join(s for s in (section(ctx) for section in WEEKLY_SECTIONS) if s)
+    return f'''<!DOCTYPE html>
+<html><head><style>{CSS}</style></head>
+<body>
+{body}
+</body></html>'''
 
 
-def seconds_until_hour(hour: int) -> float:
-    """Seconds until the next occurrence of `hour` in local time."""
-    now = datetime.now()
-    target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
-    if now >= target:
-        target += timedelta(days=1)
-    return (target - now).total_seconds()
+def generate_weekly_report(client: InfluxDBClient, week_start: date):
+    """Build and send the Monday briefing for the week starting `week_start`."""
+    ctx = build_weekly_context(client.query_api(), week_start)
+    send_email(build_weekly_html(ctx), f"Weekly Energy Report — {ctx.date_str}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Daily energy report email")
-    parser.add_argument("--loop", action="store_true", help="Send at REPORT_HOUR daily")
-    parser.add_argument("--date", type=str, help="Report for date (YYYY-MM-DD)")
-    parser.add_argument("--monthly", action="store_true",
-                        help="Force-include trailing-12-month section (otherwise: Sundays only)")
+    parser = argparse.ArgumentParser(description="Weekly energy report + daily anomaly check")
+    parser.add_argument("--loop", action="store_true",
+                       help="Run forever: anomaly check daily, weekly briefing Mondays, "
+                            "both at REPORT_HOUR local")
+    parser.add_argument("--date", type=str,
+                       help="Send the weekly briefing for the week containing this date "
+                            "(YYYY-MM-DD) — on-demand test send")
     args = parser.parse_args()
 
     for var, name in [(INFLUXDB_TOKEN, "INFLUXDB_TOKEN"), (RESEND_API_KEY, "RESEND_API_KEY"),
@@ -1588,22 +893,22 @@ def main():
 
     if args.date:
         target = datetime.strptime(args.date, "%Y-%m-%d").date()
-        logger.info(f"Generating report for {args.date}")
-        generate_report(client, target, force_monthly=args.monthly)
+        logger.info(f"Generating weekly briefing for the week containing {args.date}")
+        generate_weekly_report(client, local_week_start(target))
     elif args.loop:
-        logger.info(f"Loop mode: report at {REPORT_HOUR}:00 daily")
+        logger.info(f"Loop mode: weekly briefing Mondays at {REPORT_HOUR}:00")
         while True:
             wait = seconds_until_hour(REPORT_HOUR)
-            logger.info(f"Next report in {wait / 3600:.1f} hours")
+            logger.info(f"Next run in {wait / 3600:.1f} hours")
             time.sleep(wait)
             yesterday = (datetime.now() - timedelta(days=1)).date()
-            try:
-                generate_report(client, yesterday, force_monthly=args.monthly)
-            except Exception as e:
-                logger.error(f"Report failed: {e}")
+            if datetime.now().weekday() == 0:   # Monday: yesterday closed last week
+                try:
+                    generate_weekly_report(client, local_week_start(yesterday))
+                except Exception as e:
+                    logger.error(f"Weekly report failed: {e}")
     else:
-        yesterday = (datetime.now() - timedelta(days=1)).date()
-        generate_report(client, yesterday, force_monthly=args.monthly)
+        generate_weekly_report(client, local_week_start(datetime.now().date() - timedelta(days=7)))
 
     client.close()
 

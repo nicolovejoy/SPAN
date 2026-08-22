@@ -21,7 +21,20 @@ if "matplotlib" not in sys.modules:
     _mpl = types.ModuleType("matplotlib")
     _mpl.use = lambda *a, **k: None
     sys.modules["matplotlib"] = _mpl
-    sys.modules["matplotlib.pyplot"] = types.ModuleType("matplotlib.pyplot")
+
+    class _FakeMplObject:
+        """Generic no-op stand-in for a matplotlib Figure or Axes — every
+        attribute access returns a callable that accepts any args and does
+        nothing, so chart-rendering code can run without a real matplotlib
+        backend. Charts themselves are manual-verify (see the plan); these
+        tests only need the rendering code path not to crash."""
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+
+    _plt = types.ModuleType("matplotlib.pyplot")
+    _plt.subplots = lambda *a, **k: (_FakeMplObject(), _FakeMplObject())
+    _plt.close = lambda *a, **k: None
+    sys.modules["matplotlib.pyplot"] = _plt
     sys.modules["matplotlib.dates"] = types.ModuleType("matplotlib.dates")
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
@@ -200,6 +213,48 @@ class BuildWeeklyContextTest(unittest.TestCase):
         self.assertEqual(len(ctx.week_by_day), 7)
         self.assertEqual(ctx.week_by_day[0][0], date(2026, 8, 3))
         self.assertAlmostEqual(ctx.headline["kwh"], 15.0)
+
+
+class RenderTest(unittest.TestCase):
+    def make_ctx(self, **overrides):
+        base = dict(
+            week_start=date(2026, 8, 3), rows=[], panel_daily={}, day_cat={},
+            categories=["Lights", "HVAC", "Car", "Appliances", "Else"],
+            headline={"kwh": 210.0, "cost": 27.87, "delta_vs_last_week_pct": 5.0,
+                     "delta_vs_12wk_pct": 7.7, "top_mover": "HVAC", "top_mover_delta_kwh": 20.0},
+            usage_rows=[{"category": "HVAC", "kwh": 80.0, "cost": 9.93,
+                        "delta_week_pct": 33.3, "delta_12wk_pct": 10.0,
+                        "top_circuits": [("Heat pump", 75.0), ("Auxiliary", 5.0)]}],
+            week_by_day=[(date(2026, 8, 3) + timedelta(days=i), {"HVAC": float(i)})
+                        for i in range(7)],
+            trend=[(date(2026, 8, 3) - timedelta(weeks=w), {"HVAC": float(w)})
+                  for w in range(12, -1, -1)],
+        )
+        base.update(overrides)
+        return dr.WeeklyContext(**base)
+
+    def test_render_headline_names_the_top_mover(self):
+        html = dr.render_headline(self.make_ctx())
+        self.assertIn("210.0", html.replace(",", ""))
+        self.assertIn("HVAC", html)
+
+    def test_render_usage_table_includes_nested_top_circuits(self):
+        html = dr.render_usage_table(self.make_ctx())
+        self.assertIn("HVAC", html)
+        self.assertIn("Heat pump", html)
+        self.assertIn("Auxiliary", html)
+
+    def test_render_usage_table_handles_no_baseline_gracefully(self):
+        ctx = self.make_ctx(usage_rows=[{"category": "Car", "kwh": 0.0, "cost": 0.0,
+                                        "delta_week_pct": None, "delta_12wk_pct": None,
+                                        "top_circuits": []}])
+        html = dr.render_usage_table(ctx)   # must not raise on None deltas
+        self.assertIn("Car", html)
+
+    def test_build_weekly_html_concatenates_sections(self):
+        html = dr.build_weekly_html(self.make_ctx())
+        self.assertIn("<html>", html)
+        self.assertIn("HVAC", html)
 
 
 if __name__ == "__main__":
