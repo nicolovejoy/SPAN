@@ -480,6 +480,31 @@ def _all_categories() -> list[str]:
     return [c for c, _ in rules] + [default]
 
 
+# ---------- Task 3: Headline computation ----------
+
+
+def _pct_delta(current: float, baseline: float) -> float | None:
+    """Percentage change from baseline to current. Returns None if baseline <= 0."""
+    return None if baseline <= 0 else (current - baseline) / baseline * 100.0
+
+
+def headline_stats(week_kwh: float, last_week_kwh: float, trailing12_avg_kwh: float,
+                   week_cat: dict[str, float], last_week_cat: dict[str, float]) -> dict:
+    """Block 1's numbers. Largest mover excludes "Unmonitored" — it's a metering
+    accounting row, not a category a reader can act on."""
+    movers = {c: week_cat.get(c, 0.0) - last_week_cat.get(c, 0.0)
+             for c in (set(week_cat) | set(last_week_cat)) - {"Unmonitored"}}
+    top_mover = max(movers, key=lambda c: abs(movers[c])) if movers else None
+    return {
+        "kwh": week_kwh,
+        "cost": cost_n_days(week_kwh, 7),
+        "delta_vs_last_week_pct": _pct_delta(week_kwh, last_week_kwh),
+        "delta_vs_12wk_pct": _pct_delta(week_kwh, trailing12_avg_kwh),
+        "top_mover": top_mover,
+        "top_mover_delta_kwh": movers.get(top_mover, 0.0) if top_mover else 0.0,
+    }
+
+
 def _merge_keyed(rows) -> list[tuple]:
     """Sum values sharing a key, ascending by key. Segment cuts land on window
     boundaries so collisions shouldn't arise — but sum rather than silently drop

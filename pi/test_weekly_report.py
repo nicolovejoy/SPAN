@@ -152,5 +152,30 @@ class GroupingTest(unittest.TestCase):
         self.assertEqual(cats, ["Lights", "HVAC", "Car", "Appliances", "Else"])
 
 
+class HeadlineTest(unittest.TestCase):
+    def test_pct_delta_none_when_baseline_is_zero_or_negative(self):
+        self.assertIsNone(dr._pct_delta(5.0, 0.0))
+
+    def test_pct_delta_sign_matches_direction(self):
+        self.assertAlmostEqual(dr._pct_delta(110.0, 100.0), 10.0)
+        self.assertAlmostEqual(dr._pct_delta(90.0, 100.0), -10.0)
+
+    def test_top_mover_is_the_largest_absolute_category_swing_excluding_unmonitored(self):
+        stats = dr.headline_stats(
+            week_kwh=210.0, last_week_kwh=200.0, trailing12_avg_kwh=195.0,
+            week_cat={"HVAC": 80.0, "Lights": 20.0, "Unmonitored": 50.0},
+            last_week_cat={"HVAC": 60.0, "Lights": 22.0, "Unmonitored": 10.0},
+        )
+        # Unmonitored swung by 40, HVAC by 20 — but Unmonitored is excluded
+        self.assertEqual(stats["top_mover"], "HVAC")
+        self.assertAlmostEqual(stats["top_mover_delta_kwh"], 20.0)
+        self.assertAlmostEqual(stats["delta_vs_last_week_pct"], 5.0)
+        self.assertAlmostEqual(stats["kwh"], 210.0)
+
+    def test_no_movers_when_categories_are_empty(self):
+        stats = dr.headline_stats(0.0, 0.0, 0.0, {}, {})
+        self.assertIsNone(stats["top_mover"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
