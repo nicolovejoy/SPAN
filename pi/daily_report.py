@@ -505,6 +505,105 @@ def headline_stats(week_kwh: float, last_week_kwh: float, trailing12_avg_kwh: fl
     }
 
 
+# ---------- Task 4: WeeklyContext orchestration ----------
+
+
+@dataclass
+class WeeklyContext:
+    """Everything the weekly-briefing renders need. `week_start` is the target
+    week's Monday; `rows`/`panel_daily` span the full 98-day fetch window so
+    the 12-week trend and HVAC's month-over-month (Task 7) can be derived
+    without a second Influx round trip."""
+    week_start: date
+    rows: list[tuple[str, date, float]]
+    panel_daily: dict[date, float]
+    day_cat: dict[date, dict[str, float]]
+    categories: list[str]
+    headline: dict
+    usage_rows: list[dict]
+    week_by_day: list[tuple[date, dict[str, float]]]
+    trend: list[tuple[date, dict[str, float]]]
+
+    @property
+    def date_str(self) -> str:
+        week_end = self.week_start + timedelta(days=6)
+        return f'{self.week_start.strftime("%b %-d")}–{week_end.strftime("%b %-d, %Y")}'
+
+
+def build_weekly_context(query_api, week_start: date) -> WeeklyContext:
+    """Window conventions:
+      TARGET WEEK = [week_start, week_start+7)               Monday-Sunday
+      FETCH       = [week_start-98, week_start+7)             14 weeks back,
+                    covering the 12-week trend (block 3) and a full 2-month
+                    look-back for HVAC month-over-month (Task 7)
+    """
+    fetch_start_date = week_start - timedelta(days=98)
+    fetch_start = flux_ts(local_day_utc_range(fetch_start_date)[0])
+    fetch_stop = flux_ts(local_day_utc_range(week_start + timedelta(days=7))[0])
+
+    rows = query_daily_circuit_counter_kwh(query_api, fetch_start, fetch_stop)
+    panel_daily = dict(query_daily_panel_kwh(query_api, fetch_start, fetch_stop))
+    day_cat = category_day_kwh(rows)
+    categories = _all_categories()
+
+    last_week_start = week_start - timedelta(days=7)
+    this_week_cat = week_totals(day_cat, week_start)
+    last_week_cat = week_totals(day_cat, last_week_start)
+    trailing12_starts = trailing_week_starts(week_start, 12)
+
+    week_panel_kwh = _sum_days(panel_daily, week_start, week_start + timedelta(days=7))
+    last_week_panel_kwh = _sum_days(panel_daily, last_week_start, week_start)
+    trailing12_panel = [_sum_days(panel_daily, ws, ws + timedelta(days=7))
+                        for ws in trailing12_starts]
+    trailing12_avg_panel = sum(trailing12_panel) / len(trailing12_panel) if trailing12_panel else 0.0
+
+    headline = headline_stats(week_panel_kwh, last_week_panel_kwh, trailing12_avg_panel,
+                              this_week_cat, last_week_cat)
+
+    circuit_totals = circuit_week_totals(rows, week_start)
+    usage_rows = []
+    for cat in categories:
+        kwh = this_week_cat.get(cat, 0.0)
+        wk12 = [week_totals(day_cat, ws).get(cat, 0.0) for ws in trailing12_starts]
+        avg12 = sum(wk12) / len(wk12) if wk12 else 0.0
+        usage_rows.append({
+            "category": cat,
+            "kwh": kwh,
+            "cost": round(kwh * ENERGY_RATE, 2),
+            "delta_week_pct": _pct_delta(kwh, last_week_cat.get(cat, 0.0)),
+            "delta_12wk_pct": _pct_delta(kwh, avg12),
+            "top_circuits": category_top_circuits(rows, week_start, cat),
+        })
+
+    unmon = unmonitored_week_kwh(week_panel_kwh, circuit_totals)
+    last_unmon = unmonitored_week_kwh(last_week_panel_kwh, circuit_week_totals(rows, last_week_start))
+    unmon_wk12 = [unmonitored_week_kwh(_sum_days(panel_daily, ws, ws + timedelta(days=7)),
+                                       circuit_week_totals(rows, ws))
+                 for ws in trailing12_starts]
+    unmon_avg12 = sum(unmon_wk12) / len(unmon_wk12) if unmon_wk12 else 0.0
+    usage_rows.append({
+        "category": "Unmonitored",
+        "kwh": unmon,
+        "cost": round(unmon * ENERGY_RATE, 2),
+        "delta_week_pct": _pct_delta(unmon, last_unmon),
+        "delta_12wk_pct": _pct_delta(unmon, unmon_avg12),
+        "top_circuits": [],
+    })
+
+    week_by_day = [
+        (week_start + timedelta(days=i),
+         {c: day_cat.get(week_start + timedelta(days=i), {}).get(c, 0.0) for c in categories})
+        for i in range(7)
+    ]
+    trend = [(ws, week_totals(day_cat, ws)) for ws in trailing12_starts + [week_start]]
+
+    return WeeklyContext(
+        week_start=week_start, rows=rows, panel_daily=panel_daily, day_cat=day_cat,
+        categories=categories, headline=headline, usage_rows=usage_rows,
+        week_by_day=week_by_day, trend=trend,
+    )
+
+
 def _merge_keyed(rows) -> list[tuple]:
     """Sum values sharing a key, ascending by key. Segment cuts land on window
     boundaries so collisions shouldn't arise — but sum rather than silently drop

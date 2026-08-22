@@ -9,6 +9,7 @@ import sys
 import types
 import unittest
 from datetime import date, datetime, timedelta, timezone
+from unittest import mock
 
 for _name in ("httpx",):
     sys.modules.setdefault(_name, types.ModuleType(_name))
@@ -175,6 +176,30 @@ class HeadlineTest(unittest.TestCase):
     def test_no_movers_when_categories_are_empty(self):
         stats = dr.headline_stats(0.0, 0.0, 0.0, {}, {})
         self.assertIsNone(stats["top_mover"])
+
+
+class BuildWeeklyContextTest(unittest.TestCase):
+    def test_wires_queries_into_a_consistent_context(self):
+        rows = [
+            ("Heat pump", date(2026, 8, 3), 10.0),
+            ("Heat pump", date(2026, 7, 27), 8.0),   # last week
+            ("Kitchen Lights", date(2026, 8, 3), 2.0),
+        ]
+        panel_daily = {date(2026, 8, 3): 15.0, date(2026, 7, 27): 12.0}
+        with mock.patch.object(dr, "query_daily_circuit_counter_kwh", return_value=rows), \
+             mock.patch.object(dr, "query_daily_panel_kwh", return_value=list(panel_daily.items())):
+            ctx = dr.build_weekly_context(object(), date(2026, 8, 3))
+
+        self.assertEqual(ctx.week_start, date(2026, 8, 3))
+        self.assertEqual(ctx.categories, ["Lights", "HVAC", "Car", "Appliances", "Else"])
+        hvac_row = next(r for r in ctx.usage_rows if r["category"] == "HVAC")
+        self.assertAlmostEqual(hvac_row["kwh"], 10.0)
+        self.assertAlmostEqual(hvac_row["delta_week_pct"], 25.0)  # 10 vs 8
+        unmon_row = next(r for r in ctx.usage_rows if r["category"] == "Unmonitored")
+        self.assertAlmostEqual(unmon_row["kwh"], 3.0)  # 15 - (10 + 2)
+        self.assertEqual(len(ctx.week_by_day), 7)
+        self.assertEqual(ctx.week_by_day[0][0], date(2026, 8, 3))
+        self.assertAlmostEqual(ctx.headline["kwh"], 15.0)
 
 
 if __name__ == "__main__":
