@@ -67,6 +67,21 @@ GitHub pushes via the Vercel Git integration. Pi-hosted as a Docker service
 - Categories sourced from `pi/categories.json` (copied to `web/categories.generated.json` by `predev`/`prebuild` — Vercel builds use this normal `prebuild` sync; the Dockerfile's copy-in path is a Docker-era leftover, no longer used)
 - Talks to Influx via `influx.pianohouseproject.org` with the `span-web` CF Access service token (`CF_ACCESS_CLIENT_ID/SECRET` in the Vercel env activate the service-token path in `web/lib/influx.ts`)
 - Built with `output: "standalone"` — a leftover from the Docker era, harmless on Vercel
+- **Cloudflare Bot Fight Mode must stay OFF on the `pianohouseproject.org` zone.** It challenges the
+  Vercel→Influx path and breaks the dashboard. Outage 2026-08-21: 453 of 500 firewall events in 24h
+  were `bot_fight_mode` / `managed_challenge` against `influx.pianohouseproject.org` `/api/v2/query`,
+  UA `influxdb-client-js`, from Vercel's AWS egress — *all* of them our own traffic, zero real bots.
+  Symptom: `/api/health` 503s and charts go blank while the Pi stays perfectly healthy.
+  - **A WAF skip rule does NOT fix this on the free plan.** Plain Bot Fight Mode runs ahead of WAF
+    custom rules and can't be exempted; that scoping needs Super Bot Fight Mode (paid). The zone-wide
+    toggle in Security → Settings is the only lever. Don't burn time writing a skip rule.
+  - Nothing else protects Influx via BFM — CF Access + the service token is the real gate, and Managed
+    Rules / AI Crawl Control (which do catch real scanners on other hosts in the zone) are unaffected.
+  - **It presents as a rate limit, not a hard block.** Vercel egresses from a rotating AWS IP pool and
+    BFM scores each IP separately, so ~1 check in 20 slips through — long down-runs punctuated by a
+    single success. Both agents on the 2026-08-21 incident initially misread this as a refilling
+    rate-limit budget. Firewall-events export (Security → Analytics → Events) names the rule directly;
+    read it before theorising.
 - `/api/health` — observer endpoint (UptimeRobot + prompt-lab's daily health email): `checks[]` of artifact ages — collector (newest raw Influx point, ≤300s) and backup (newest `backup_snapshot` point, ≤30h; written by `pi/backup/backup.sh` with the restic snapshot's own timestamp). 503 on any failure. Logic in `web/lib/health.ts`.
 - Deploy/auth setup: see `docs/web-deploy.md`
 
