@@ -269,10 +269,13 @@ class HvacBlockTest(unittest.TestCase):
         self.assertAlmostEqual(last_month, 3.0)    # Jul 1 + Jul 10 (day-of-month cutoff)
 
     def test_mom_comparison_clamps_cutoff_to_shorter_month(self):
-        day_cat = {date(2026, 2, 28): {"HVAC": 5.0}}
-        # Jan has 31 days; as_of.day=31 should clamp to Feb 28
-        this_month, last_month = dr.mom_comparison(day_cat, date(2026, 1, 31), "HVAC")
-        self.assertAlmostEqual(this_month, 0.0)
+        day_cat = {
+            date(2026, 2, 28): {"HVAC": 5.0},   # last valid Feb day — the clamped cutoff
+            date(2026, 3, 31): {"HVAC": 9.0},   # this month, day 31
+        }
+        this_month, last_month = dr.mom_comparison(day_cat, date(2026, 3, 31), "HVAC")
+        self.assertAlmostEqual(this_month, 9.0)
+        self.assertAlmostEqual(last_month, 5.0)   # clamped to Feb 28, doesn't read into March
 
     def test_render_hvac_block_smoke(self):
         day_cat = {date(2026, 8, 3) + timedelta(days=i): {"HVAC": float(i)} for i in range(7)}
