@@ -91,16 +91,21 @@ GitHub pushes via the Vercel Git integration. Pi-hosted as a Docker service
 subagent. The list below is near-term mechanics; the roadmap explains ordering and why.
 
 - **~~Manifest CORS~~ — resolved by the 2026-08-13 re-home to Vercel.** The premise (`/manifest.webmanifest` gated by CF Access on the Pi-hosted dashboard) no longer applies to the new topology. Previously: decided 2026-05-24 to live with the credential-less manifest fetch hitting the CF Access login redirect (cosmetic console error).
-- **Weekly energy report + anomaly email** — DONE, shipped 2026-08-22. Plan:
-  `docs/superpowers/plans/2026-08-22-weekly-energy-report.md`. Weekly briefing Mondays 07:00
-  (headline, week-by-day chart, 12-week trend, usage table with Unmonitored row, HVAC block);
-  daily anomaly check at 07:00, silent unless a category's median/MAD baseline is exceeded.
-  Suppression state in `/app/state/anomaly_state.json` on the `report-state` volume. Retired: the
-  nine-section daily email, the aux-heat alarm, `pi/rates.py`'s already-flat cost model needed no
-  change. Left in place but now unreferenced by the report: the #9 raw/rollup segment router in
-  `daily_report.py` (`_run_segments` and friends), `query_total_kwh` (a standalone helper), and the
-  stale module docstring in `daily_report.py` — candidates for a future cleanup pass if nothing
-  else picks them up.
+- **Weekly energy report + anomaly email** — code DONE 2026-08-22, **PR #19 open against main, not yet
+  merged**. Built on branch `worktree-weekly-energy-report` via 11-task subagent-driven plan
+  (`docs/superpowers/plans/2026-08-22-weekly-energy-report.md`) + a final whole-branch review that caught
+  and fixed 4 real bugs (garbage "inf%" anomaly subject on a zero baseline, week- vs day-scoped "driven by"
+  circuits, an off-by-one-bucket coverage-guard window, and the untested alert-send path all four lived in).
+  80/80 tests pass. **Before merging:** no Flux query has run against real InfluxDB and no chart has been
+  drawn by real matplotlib — run `docker compose run --rm daily-report python daily_report.py --date <past
+  Monday>` and `--anomaly-date <past date>` against the Pi (sends real test emails) before rebuilding the
+  live container. Weekly briefing Mondays 07:00 (headline, week-by-day chart, 12-week trend, usage table
+  with Unmonitored row, HVAC block); daily anomaly check at 07:00, silent unless a category's median/MAD
+  baseline is exceeded. Suppression state in `/app/state/anomaly_state.json` on the `report-state` volume.
+  Retired: the nine-section daily email, the aux-heat alarm, `pi/rates.py`'s already-flat cost model needed
+  no change. Left in place but now unreferenced by the report: the #9 raw/rollup segment router in
+  `daily_report.py` (`_run_segments` and friends), `query_total_kwh` (a standalone helper), and
+  `_delta_arrow` — candidates for a future cleanup pass if nothing else picks them up.
 - **#15 `energy_wh_counter`** — Task 1 (evaluation) done; consumer switch not started, on branch
   `worktree-energy-counter-authoritative`. Independent cleanup, **not** a prerequisite for the
   report (weekly stdev between the two fields is 0.25pp). Plan at
