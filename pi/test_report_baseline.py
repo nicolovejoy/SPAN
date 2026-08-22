@@ -97,6 +97,11 @@ class SuppressionStateTest(unittest.TestCase):
         state = rb.load_state(self.path, "HVAC")
         self.assertIsNone(state.last_alert_date)
 
+    def test_corrupt_json_is_no_prior_alert(self):
+        self.path.write_text("{not valid json")
+        state = rb.load_state(self.path, "HVAC")
+        self.assertIsNone(state.last_alert_date)
+
     def test_save_then_load_round_trips(self):
         rb.save_state(self.path, "HVAC", date(2026, 8, 18), 4.2)
         state = rb.load_state(self.path, "HVAC")
@@ -167,3 +172,7 @@ class CoverageGapTest(unittest.TestCase):
         """spec, 'Guard: coverage check' — a collector outage must not be
         reported as an anomaly in every category."""
         self.assertFalse(rb.day_coverage_ok(0.40))  # caller suppresses the whole day
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
