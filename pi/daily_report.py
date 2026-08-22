@@ -409,6 +409,77 @@ def query_daily_circuit_counter_kwh(query_api, start: str, stop: str) -> list[tu
     return out
 
 
+# ---------- Task 2: Pure date/grouping helpers ----------
+
+
+def local_week_start(d: date) -> date:
+    """Monday on or before `d` — report weeks run Monday-Sunday."""
+    return d - timedelta(days=d.weekday())
+
+
+def category_day_kwh(rows: list[tuple[str, date, float]]) -> dict[date, dict[str, float]]:
+    """rows -> {local_date: {category: kwh}}, circuits rolled up via display_bucket."""
+    out: dict[date, dict[str, float]] = {}
+    for name, day, kwh in rows:
+        cat = display_bucket(name)
+        day_map = out.setdefault(day, {})
+        day_map[cat] = day_map.get(cat, 0.0) + kwh
+    return out
+
+
+def week_totals(day_cat: dict[date, dict[str, float]], week_start: date) -> dict[str, float]:
+    """Sum category kWh over [week_start, week_start+7)."""
+    week_end = week_start + timedelta(days=7)
+    out: dict[str, float] = {}
+    for day, cats in day_cat.items():
+        if week_start <= day < week_end:
+            for cat, kwh in cats.items():
+                out[cat] = out.get(cat, 0.0) + kwh
+    return out
+
+
+def circuit_week_totals(rows: list[tuple[str, date, float]], week_start: date) -> dict[str, float]:
+    """Per-circuit (not per-category) kWh over [week_start, week_start+7)."""
+    week_end = week_start + timedelta(days=7)
+    out: dict[str, float] = {}
+    for name, day, kwh in rows:
+        if week_start <= day < week_end:
+            out[name] = out.get(name, 0.0) + kwh
+    return out
+
+
+def category_top_circuits(rows: list[tuple[str, date, float]], week_start: date,
+                          category: str, n: int = 5) -> list[tuple[str, float]]:
+    """Top-n circuits by kWh within `category`, for the usage table's nested rows."""
+    totals = circuit_week_totals(rows, week_start)
+    names = [name for name in totals if display_bucket(name) == category]
+    return sorted(((name, totals[name]) for name in names), key=lambda x: -x[1])[:n]
+
+
+def trailing_week_starts(target_week_start: date, n: int) -> list[date]:
+    """The n Mondays strictly before target_week_start, oldest first."""
+    return [target_week_start - timedelta(days=7 * i) for i in range(n, 0, -1)]
+
+
+def _sum_days(daily: dict[date, float], lo: date, hi_exclusive: date) -> float:
+    return sum(v for d, v in daily.items() if lo <= d < hi_exclusive)
+
+
+def unmonitored_week_kwh(panel_week_kwh: float, circuit_totals: dict[str, float]) -> float:
+    """Panel total minus every known circuit — the energy the panel meters but no
+    circuit sensor does (no washer/dryer/water-heater circuit; see #17). Floored
+    at zero: circuit-level counter noise can occasionally exceed a noisy panel
+    integral over a short window, and a negative "unmonitored" number is never
+    meaningful."""
+    return max(0.0, panel_week_kwh - sum(circuit_totals.values()))
+
+
+def _all_categories() -> list[str]:
+    """Category display order: categories.json rules, then its default bucket."""
+    rules, default = _load_bucket_rules()
+    return [c for c, _ in rules] + [default]
+
+
 def _merge_keyed(rows) -> list[tuple]:
     """Sum values sharing a key, ascending by key. Segment cuts land on window
     boundaries so collisions shouldn't arise — but sum rather than silently drop

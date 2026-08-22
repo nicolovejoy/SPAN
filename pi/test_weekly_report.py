@@ -102,5 +102,55 @@ class QueryDailyCounterTest(unittest.TestCase):
         ])
 
 
+class GroupingTest(unittest.TestCase):
+    ROWS = [
+        ("Kitchen Lights", date(2026, 8, 3), 1.0),
+        ("Kitchen Lights", date(2026, 8, 10), 2.0),   # next week
+        ("Heat pump", date(2026, 8, 3), 5.0),
+        ("Heat pump", date(2026, 8, 4), 6.0),
+        ("Tesla Car Charger", date(2026, 8, 3), 10.0),
+    ]
+
+    def test_local_week_start_is_the_monday_on_or_before(self):
+        self.assertEqual(dr.local_week_start(date(2026, 8, 3)), date(2026, 8, 3))  # Monday
+        self.assertEqual(dr.local_week_start(date(2026, 8, 9)), date(2026, 8, 3))  # Sunday
+
+    def test_category_day_kwh_rolls_up_via_display_bucket(self):
+        out = dr.category_day_kwh(self.ROWS)
+        self.assertEqual(out[date(2026, 8, 3)], {"Lights": 1.0, "HVAC": 5.0, "Car": 10.0})
+        self.assertEqual(out[date(2026, 8, 4)], {"HVAC": 6.0})
+
+    def test_week_totals_sums_seven_days_from_monday(self):
+        day_cat = dr.category_day_kwh(self.ROWS)
+        self.assertEqual(dr.week_totals(day_cat, date(2026, 8, 3)),
+                         {"Lights": 1.0, "HVAC": 11.0, "Car": 10.0})
+        self.assertEqual(dr.week_totals(day_cat, date(2026, 8, 10)), {"Lights": 2.0})
+
+    def test_circuit_week_totals_stays_at_circuit_granularity(self):
+        self.assertEqual(dr.circuit_week_totals(self.ROWS, date(2026, 8, 3)),
+                         {"Kitchen Lights": 1.0, "Heat pump": 11.0, "Tesla Car Charger": 10.0})
+
+    def test_category_top_circuits_filters_and_sorts_descending(self):
+        rows = self.ROWS + [("Auxiliary", date(2026, 8, 3), 1.0)]
+        top = dr.category_top_circuits(rows, date(2026, 8, 3), "HVAC")
+        self.assertEqual(top, [("Heat pump", 11.0), ("Auxiliary", 1.0)])
+
+    def test_trailing_week_starts_is_oldest_first_excluding_target(self):
+        got = dr.trailing_week_starts(date(2026, 8, 17), 3)
+        self.assertEqual(got, [date(2026, 7, 27), date(2026, 8, 3), date(2026, 8, 10)])
+
+    def test_sum_days_is_half_open(self):
+        daily = {date(2026, 8, 3): 1.0, date(2026, 8, 4): 2.0, date(2026, 8, 10): 99.0}
+        self.assertEqual(dr._sum_days(daily, date(2026, 8, 3), date(2026, 8, 5)), 3.0)
+
+    def test_unmonitored_is_panel_minus_known_circuits_floored_at_zero(self):
+        self.assertEqual(dr.unmonitored_week_kwh(100.0, {"a": 40.0, "b": 30.0}), 30.0)
+        self.assertEqual(dr.unmonitored_week_kwh(50.0, {"a": 60.0}), 0.0)  # never negative
+
+    def test_all_categories_matches_categories_json_plus_default(self):
+        cats = dr._all_categories()
+        self.assertEqual(cats, ["Lights", "HVAC", "Car", "Appliances", "Else"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
