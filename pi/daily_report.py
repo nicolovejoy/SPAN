@@ -475,6 +475,8 @@ def headline_stats(week_kwh: float, last_week_kwh: float, trailing12_avg_kwh: fl
     movers = {c: week_cat.get(c, 0.0) - last_week_cat.get(c, 0.0)
              for c in (set(week_cat) | set(last_week_cat)) - {"Unmonitored"}}
     top_mover = max(movers, key=lambda c: abs(movers[c])) if movers else None
+    if top_mover is not None and movers[top_mover] == 0.0:
+        top_mover = None   # a flat week — nothing actually moved, don't name one arbitrarily
     return {
         "kwh": week_kwh,
         "cost": cost_n_days(week_kwh, 7),
@@ -931,10 +933,16 @@ def generate_weekly_report(client: InfluxDBClient, week_start: date):
 
 
 def _day_coverage_flux(target_date: date) -> str:
+    """circuit_1h is stop-stamped — a bucket at time T covers [T-1h, T) — so the
+    query range must be shifted forward by one bucket period (same shift
+    _counter_kwh_flux applies) for the 24 stamps counted here to actually cover
+    [local midnight, local midnight+1d) for `target_date`."""
+    period = ROLLUP_PERIOD[MEAS_1H]
     start, stop = local_day_utc_range(target_date)
+    rng_start, rng_stop = _shift_ts(flux_ts(start), period), _shift_ts(flux_ts(stop), period)
     return f'''
 from(bucket: "{INFLUXDB_BUCKET}")
-  |> range(start: {flux_ts(start)}, stop: {flux_ts(stop)})
+  |> range(start: {rng_start}, stop: {rng_stop})
   |> filter(fn: (r) => r._measurement == "{MEAS_1H}" and r._field == "{COUNTER_FIELD}")
   |> filter(fn: (r) => exists r._value)
   |> group()
@@ -960,9 +968,16 @@ def render_anomaly_email(target_date: date,
     actionable without opening (spec: 'The anomaly email' > Content)."""
     if len(alerts) == 1:
         cat, value, baseline, result = alerts[0]
-        direction = "above" if value > baseline.median else "below"
-        subject = (f"⚡ {cat} {result.pct:.0f}% {direction} normal for a "
-                  f"{target_date.strftime('%A')}")
+        if result.pct is None:
+            # Baseline median is 0 (e.g. a circuit that's normally idle on this
+            # weekday) — a percentage vs. zero is undefined, so fall back to an
+            # absolute comparison instead of rendering "inf%".
+            subject = (f"⚡ {cat} {value:.1f} kWh vs a normal {baseline.median:.1f} kWh "
+                      f"for a {target_date.strftime('%A')}")
+        else:
+            direction = "above" if value > baseline.median else "below"
+            subject = (f"⚡ {cat} {result.pct:.0f}% {direction} normal for a "
+                      f"{target_date.strftime('%A')}")
     else:
         subject = f"⚡ Unusual usage: {', '.join(c for c, *_ in alerts)}"
 
@@ -1019,7 +1034,8 @@ def generate_anomaly_check(client: InfluxDBClient, target_date: date):
     if not alerts:
         return
 
-    top_circuits = {cat: category_top_circuits(rows, local_week_start(target_date), cat, n=3)
+    day_rows = [r for r in rows if r[1] == target_date]
+    top_circuits = {cat: category_top_circuits(day_rows, target_date, cat, n=3)
                     for cat, *_ in alerts}
     subject, html = render_anomaly_email(target_date, alerts, top_circuits)
     send_email(html, subject)

@@ -57,6 +57,18 @@ class EvaluateTest(unittest.TestCase):
         big = rb.evaluate(8.0, baseline)             # 60% over — trips the 50% fallback floor
         self.assertTrue(big.is_anomalous)
 
+    def test_zero_median_baseline_gives_pct_none_not_inf(self):
+        # A category that's genuinely idle on this weekday (e.g. an EV charger
+        # with several zero-usage trailing weekdays) has median == 0. A nonzero,
+        # anomalous value must not produce pct == inf (garbage in the email
+        # subject) — it's undefined, so it should be None.
+        baseline = rb.compute_baseline([0.0] * 8)
+        self.assertEqual(baseline.median, 0.0)
+        result = rb.evaluate(6.0, baseline)
+        self.assertIsNone(result.pct)
+        self.assertTrue(result.is_anomalous)   # 6.0 > max(0.5*0, 1.0) floor
+        self.assertIsNone(result.z)            # mad == 0 -> percentage-fallback branch
+
 
 class WeekdayBucketingTest(unittest.TestCase):
     def test_trailing_same_weekday_dates_is_oldest_first(self):

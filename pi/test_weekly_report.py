@@ -190,6 +190,18 @@ class HeadlineTest(unittest.TestCase):
         stats = dr.headline_stats(0.0, 0.0, 0.0, {}, {})
         self.assertIsNone(stats["top_mover"])
 
+    def test_no_top_mover_named_when_every_delta_is_exactly_zero(self):
+        # A flat week — nothing changed for any category. max() would otherwise
+        # pick one arbitrarily by iteration order and the headline would claim
+        # a meaningless "biggest mover was X (+0.0 kWh)".
+        stats = dr.headline_stats(
+            week_kwh=100.0, last_week_kwh=100.0, trailing12_avg_kwh=100.0,
+            week_cat={"HVAC": 50.0, "Lights": 20.0},
+            last_week_cat={"HVAC": 50.0, "Lights": 20.0},
+        )
+        self.assertIsNone(stats["top_mover"])
+        self.assertEqual(stats["top_mover_delta_kwh"], 0.0)
+
 
 class BuildWeeklyContextTest(unittest.TestCase):
     def test_wires_queries_into_a_consistent_context(self):
@@ -354,6 +366,42 @@ class AnomalyCheckTest(unittest.TestCase):
             save.assert_not_called()
             clear.assert_not_called()
             sent.assert_not_called()
+
+    def test_generate_anomaly_check_sends_an_email_for_a_fresh_anomaly(self):
+        # The actual alert-fires-and-gets-sent path — untested before this fix,
+        # which is exactly where Fix 1 (inf% subject) and Fix 2 (week- vs.
+        # day-scoped "driven by") lived undetected through eleven task reviews.
+        import report_baseline as rb
+        target = date(2026, 8, 18)  # Tuesday
+        sample_dates = rb.trailing_same_weekday_dates(target, 8)
+        rows = [("Heat pump", d, v)
+               for d, v in zip(sample_dates, [9, 10, 11, 10, 9, 11, 10, 9])]
+        rows.append(("Heat pump", target, 40.0))          # the anomalous day itself
+        # A large same-week (Monday) value that is NOT part of the weekday
+        # baseline and NOT the anomalous day. If "driven by" were still scoped
+        # to the whole week (the Fix 2 bug), this would leak into the total.
+        rows.append(("Heat pump", date(2026, 8, 17), 500.0))
+        fresh_state = rb.SuppressionState(last_alert_date=None, last_z=None)
+
+        with mock.patch.object(dr, "query_day_coverage", return_value=1.0), \
+             mock.patch.object(dr, "query_daily_circuit_counter_kwh", return_value=rows), \
+             mock.patch.object(dr.rb, "load_state", return_value=fresh_state), \
+             mock.patch.object(dr.rb, "save_state") as save, \
+             mock.patch.object(dr, "send_email") as sent:
+            dr.generate_anomaly_check(mock.Mock(), target)
+
+        sent.assert_called_once()
+        save.assert_called_once()
+        html, subject = sent.call_args[0]
+
+        self.assertNotIn("inf", subject)
+        self.assertIn("HVAC", subject)
+
+        # Fix 2: "Driven by" must reflect only the target day's circuit total
+        # (40.0), never a week-aggregate figure that includes Monday's 500.0.
+        self.assertIn("Heat pump (40.0 kWh)", html)
+        self.assertNotIn("500.0", html)
+        self.assertNotIn("540.0", html)
 
 
 if __name__ == "__main__":

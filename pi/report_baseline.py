@@ -41,8 +41,10 @@ def compute_baseline(samples: list[float]) -> Baseline:
 @dataclass
 class AnomalyResult:
     is_anomalous: bool
-    z: float | None   # None when mad == 0 and the percentage fallback fired instead
-    pct: float        # |value - median| / median * 100, for the email copy
+    z: float | None    # None when mad == 0 and the percentage fallback fired instead
+    pct: float | None  # |value - median| / median * 100, for the email copy.
+                       # None when the baseline median is 0 and value != 0 (a
+                       # percentage vs. zero is undefined, not infinite).
 
 
 def evaluate(value: float, baseline: Baseline) -> AnomalyResult:
@@ -51,7 +53,7 @@ def evaluate(value: float, baseline: Baseline) -> AnomalyResult:
     |value - m| > max(0.50*m, 1.0)."""
     m = baseline.median
     diff = abs(value - m)
-    pct = (diff / m * 100.0) if m > 0 else (0.0 if diff == 0 else float("inf"))
+    pct = (diff / m * 100.0) if m > 0 else (0.0 if diff == 0 else None)
     if baseline.mad == 0:
         floor = max(0.50 * m, 1.0)
         return AnomalyResult(is_anomalous=diff > floor, z=None, pct=pct)
