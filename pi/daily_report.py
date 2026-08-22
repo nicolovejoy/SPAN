@@ -358,6 +358,57 @@ def _run_segments(query_api, start: str, stop: str, every: str | None, run) -> l
     return rows
 
 
+# ---------- weekly report + anomaly check: energy_wh_counter query layer ----------
+#
+# Deliberately narrower than the #9 segment router above: the weekly briefing and
+# the daily anomaly check both read circuit_1h.energy_wh_counter only, never raw
+# and never circuit_5m (design doc "Data source"). Every window this code asks
+# for ends at least a day in the past, well past circuit_1h's 5-65 min tail lag,
+# so there is no fresh-tail case to handle and no raw fallback is needed.
+# circuit_1h is stop-stamped (verified invariant, influx_tasks/README.md) — that
+# is hard-coded below rather than detected at runtime.
+
+COUNTER_FIELD = "energy_wh_counter"
+
+
+def _counter_kwh_flux(start: str, stop: str, every: str,
+                      name_filter: str | None = None) -> str:
+    """circuit_1h.energy_wh_counter summed into `every`-windows, in kWh.
+    Pacific-aligned for 1d/1mo grids. Re-centred from its stop stamp to the
+    bucket midpoint (shift range forward one period, then timeShift back half a
+    period) so a bucket can never land in the neighbouring output window —
+    the same recentring _circuit_kwh_flux does for stamp="stop"."""
+    period = ROLLUP_PERIOD[MEAS_1H]
+    mid = -period / 2
+    rng_start, rng_stop = _shift_ts(start, period), _shift_ts(stop, period)
+    nf = f'  |> filter(fn: (r) => r.name =~ /(?i){name_filter}/)\n' if name_filter else ''
+    loc = (f'import "timezone"\noption location = timezone.location(name: "{LOCAL_TZ_NAME}")\n\n'
+           if every in ("1d", "1mo") else '')
+    return f'''{loc}from(bucket: "{INFLUXDB_BUCKET}")
+  |> range(start: {rng_start}, stop: {rng_stop})
+  |> filter(fn: (r) => r._measurement == "{MEAS_1H}" and r._field == "{COUNTER_FIELD}")
+  |> filter(fn: (r) => exists r._value)
+{nf}  |> timeShift(duration: {_flux_dur(mid)})
+  |> aggregateWindow(every: {every}, fn: sum, createEmpty: false)
+  |> map(fn: (r) => ({{r with _value: r._value / 1000.0}}))
+'''
+
+
+def query_daily_circuit_counter_kwh(query_api, start: str, stop: str) -> list[tuple[str, date, float]]:
+    """(circuit_name, local_date, kwh) via circuit_1h.energy_wh_counter — one row
+    per circuit per Pacific day covered by [start, stop). The single workhorse
+    query for the weekly briefing and the anomaly check: everything else (week
+    totals, month totals, category rollups) is derived from these rows in pure
+    Python — see the grouping helpers below."""
+    flux = _counter_kwh_flux(start, stop, "1d")
+    out: list[tuple[str, date, float]] = []
+    for table in query_api.query(flux, org=INFLUXDB_ORG):
+        for rec in table.records:
+            out.append((rec.values.get("name", "Unknown"), _local_day(rec.get_time()),
+                       rec.get_value() or 0.0))
+    return out
+
+
 def _merge_keyed(rows) -> list[tuple]:
     """Sum values sharing a key, ascending by key. Segment cuts land on window
     boundaries so collisions shouldn't arise — but sum rather than silently drop
