@@ -17,10 +17,18 @@
 >
 > - **#15's stated rationale is wrong.** Poll gaps do *not* drive the
 >   integral-vs-counter divergence: r = 0.11 over 180 days, and the two largest
->   deviations both occurred at full poll coverage. The real mechanism is
->   **aliasing** — burst loads (the EV charger above all) pulse faster than the
->   30s poll, so `power_w` samples read ~0 while the panel's own meter counts the
->   energy correctly. The switch is still right, on firmer and different grounds.
+>   deviations both occurred at full poll coverage. The actual mechanism is
+>   **day-boundary attribution** — the big deviations come in adjacent pairs with
+>   opposite signs that cancel when summed (−0.50%, −0.61%).
+> - **A retracted claim, recorded so it is not repeated.** The Task 1 report and
+>   an earlier version of this block blamed *aliasing* (burst loads pulsing faster
+>   than the 30s poll). That is **not supported**: the EV charger peaks at 11.6 kW
+>   and reports power normally. The error came from calling `max()` on `power_w`,
+>   which is stored **signed with consumption negative** — so `max()` returns the
+>   least-consuming sample and an actively-charging circuit looks idle. `abs()`
+>   first, as `web/lib/influx.ts` and `pi/daily_report.py` both do.
+> - **One case is still unexplained:** 2026-06-12, charger at ~0 W all day, counter
+>   recorded ~10.7 kWh for it. Larger than a 15-minute batch tail explains.
 > - **This plan is no longer a prerequisite for the weekly report.** Weekly stdev
 >   between the fields is 0.25pp, monthly 0.14pp. Build the report first; finish
 >   this whenever.

@@ -229,11 +229,20 @@ against the same weekday's trailing median: bucketed in UTC, "Tuesday" would mea
 17:00 Monday to 17:00 Tuesday Pacific. See the project's UTC-at-rest /
 Pacific-on-display convention in CLAUDE.md.
 
-Energy still reads `energy_wh_counter` where available — it is the better field,
-immune both to missed polls and (the larger effect) to burst loads whose duty
-cycle aliases against the 30s poll interval. The EV charger reads `power_w` ~0 at
-*every* sample on days it demonstrably consumes energy. That switch is simply an
-independent cleanup rather than a gate.
+Energy still reads `energy_wh_counter` where available — it is immune to missed
+polls, and matched the raw counter exactly on the clean week previously tested.
+That switch is an independent cleanup, not a gate.
+
+**Correction 2026-08-22:** an earlier draft of this section claimed the dominant
+mechanism was *aliasing* — burst loads pulsing faster than the 30s poll, with the
+EV charger reading ~0 W at every sample. **That is wrong.** The charger peaks at
+11.6 kW and reports power normally; the earlier check used `max()` on `power_w`,
+which is stored **signed with consumption negative**, so it returned the
+least-consuming sample and made an actively-charging circuit look idle. Always
+`abs()` first. The real divergence is day-boundary attribution (see above), and
+one case remains unexplained: on 2026-06-12 the charger drew ~0 W all day yet its
+counter recorded ~10.7 kWh. Tracked in #15; resolve before trusting day-level
+per-circuit counter energy.
 
 Invariants from `pi/influx_tasks/README.md` that apply:
 
