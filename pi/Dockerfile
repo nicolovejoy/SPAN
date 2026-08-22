@@ -8,6 +8,7 @@ COPY collector.py .
 COPY bath_detector.py .
 COPY charge_detector.py .
 COPY daily_report.py .
+COPY report_baseline.py .
 COPY rates.py .
 COPY categories.json .
 # backfill_rollups.py reads the task .flux files directly — it does not

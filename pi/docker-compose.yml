@@ -105,6 +105,8 @@ services:
       - RESEND_API_KEY=${RESEND_API_KEY}
       - REPORT_EMAIL=${REPORT_EMAIL}
       - TZ=America/Los_Angeles
+    volumes:
+      - report-state:/app/state
     depends_on:
       - influxdb
 
@@ -122,3 +124,4 @@ volumes:
   influxdb-data:
   influxdb-config:
   grafana-data:
+  report-state:
