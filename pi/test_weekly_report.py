@@ -330,6 +330,31 @@ class AnomalyCheckTest(unittest.TestCase):
             q.assert_not_called()   # short-circuits before even fetching rows
             sent.assert_not_called()
 
+    def test_generate_anomaly_check_leaves_state_untouched_when_suppressed(self):
+        # HVAC ("Heat pump") is genuinely anomalous (median=10, mad~1.4826, value=40
+        # -> z~20.23) but should_alert() says no: a prior alert already exists at
+        # last_z=20.0, and 20.23 is not >25% worse than 20.0 (threshold would be 25.0).
+        # Verified directly against report_baseline.evaluate()/should_alert() with
+        # these exact numbers before writing this test.
+        import report_baseline as rb
+        target = date(2026, 8, 18)  # Tuesday
+        sample_dates = rb.trailing_same_weekday_dates(target, 8)
+        rows = [("Heat pump", d, v)
+               for d, v in zip(sample_dates, [9, 10, 11, 10, 9, 11, 10, 9])]
+        rows.append(("Heat pump", target, 40.0))
+        prior_state = rb.SuppressionState(last_alert_date=sample_dates[-1], last_z=20.0)
+
+        with mock.patch.object(dr, "query_day_coverage", return_value=1.0), \
+             mock.patch.object(dr, "query_daily_circuit_counter_kwh", return_value=rows), \
+             mock.patch.object(dr.rb, "load_state", return_value=prior_state), \
+             mock.patch.object(dr.rb, "save_state") as save, \
+             mock.patch.object(dr.rb, "clear_state") as clear, \
+             mock.patch.object(dr, "send_email") as sent:
+            dr.generate_anomaly_check(mock.Mock(), target)
+            save.assert_not_called()
+            clear.assert_not_called()
+            sent.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
