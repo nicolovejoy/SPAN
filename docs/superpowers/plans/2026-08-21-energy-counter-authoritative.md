@@ -10,6 +10,30 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-21-weekly-energy-report-design.md` (§ Data source). Closes GitHub issue #15.
 
+> **STATUS 2026-08-22 — Task 1 complete, Tasks 2-4 not started.**
+> Task 1's evaluation ran and its findings **change this plan's premise**. Read
+> `.claude/worktrees/energy-counter-authoritative/.superpowers/sdd/2026-08-21-energy-counter-authoritative/task-1-report.md`
+> before continuing.
+>
+> - **#15's stated rationale is wrong.** Poll gaps do *not* drive the
+>   integral-vs-counter divergence: r = 0.11 over 180 days, and the two largest
+>   deviations both occurred at full poll coverage. The real mechanism is
+>   **aliasing** — burst loads (the EV charger above all) pulse faster than the
+>   30s poll, so `power_w` samples read ~0 while the panel's own meter counts the
+>   energy correctly. The switch is still right, on firmer and different grounds.
+> - **This plan is no longer a prerequisite for the weekly report.** Weekly stdev
+>   between the fields is 0.25pp, monthly 0.14pp. Build the report first; finish
+>   this whenever.
+> - **Tasks 2-4 remain valid as written**, with one addition to Task 4's docs:
+>   record that the counter updates in ~15-minute batches, and that day-level
+>   counter bucketing must be Pacific-aligned, not UTC (UTC midnight = 17:00
+>   Pacific, mid-EV-charging, which manufactures ±8-11% day-over-day artifacts).
+> - Work sits on branch `worktree-energy-counter-authoritative` (worktree at
+>   `.claude/worktrees/energy-counter-authoritative`), one commit: the comparison
+>   script. Ledger with all rulings is in that worktree's `.superpowers/` dir.
+> - The composed GitHub comment for #15 is in the task-1 report, **not posted** —
+>   it corrects the issue's narrative and needs Nico's read first.
+
 ## Global Constraints
 
 - **Charts keep the integral.** `energy_wh_counter` is too coarse for fine buckets — three consecutive 30s samples have been observed reading an identical value. Only *energy totals* switch. `power_w` / `power_w_mean` paths are untouched.

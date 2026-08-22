@@ -205,11 +205,35 @@ poll is missed, so some fraction of every delta would be measuring collector
 reliability rather than usage. `energy_wh_counter` is SPAN's own meter delta and
 is immune to missed polls. Both fields are already stored for exactly this A/B.
 
-**This makes #15 a prerequisite, not a follow-up.** Resolving #15 — evaluating
-the two fields and making the counter authoritative — lands *before* the report
-is built on top of it. Building a trend report on the integral and switching the
-energy source underneath it later was considered and rejected: it would silently
-change every historical comparison the report had already shown.
+**#15 was originally called a prerequisite. It is NOT — reversed 2026-08-22 on
+evidence.** The ordering argument was that a fraction of every week-over-week
+delta would be measuring collector reliability rather than usage. Measured over
+180 days of real data (`pi/tools/compare_energy_fields.sh`), the two fields
+differ at **weekly stdev 0.25pp and monthly stdev 0.14pp** — every one of 26
+weeks and 6 months within [-1.13%, -0.19%]. The weekly briefing's numbers are
+materially identical on either field, so nothing about this report is blocked on
+#15. Build the report first.
+
+Two findings from that evaluation *do* bind this design, and neither was
+anticipated:
+
+**The counter updates in ~15-minute batches**, not per poll. This quantifies the
+previously vague "too coarse for fine buckets" constraint, and is why per-bucket
+`circuit_5m` counter values are lumpy even though window sums are exact.
+
+**Day-level buckets must be Pacific-aligned, never UTC.** UTC midnight falls at
+17:00 Pacific — squarely inside evening EV charging — so UTC bucketing splits
+charging sessions and manufactures day-over-day swings of ±8-11% that are pure
+artifact. This matters most for the anomaly detector below, which compares a day
+against the same weekday's trailing median: bucketed in UTC, "Tuesday" would mean
+17:00 Monday to 17:00 Tuesday Pacific. See the project's UTC-at-rest /
+Pacific-on-display convention in CLAUDE.md.
+
+Energy still reads `energy_wh_counter` where available — it is the better field,
+immune both to missed polls and (the larger effect) to burst loads whose duty
+cycle aliases against the 30s poll interval. The EV charger reads `power_w` ~0 at
+*every* sample on days it demonstrably consumes energy. That switch is simply an
+independent cleanup rather than a gate.
 
 Invariants from `pi/influx_tasks/README.md` that apply:
 
@@ -263,8 +287,8 @@ Fixture source: capture 12 weeks of real `circuit_1h` data once to a file.
 
 Each phase ships something usable.
 
-0. **Resolve #15 first** — make `energy_wh_counter` authoritative. Prerequisite,
-   not a follow-up; see Data source.
+0. ~~**Resolve #15 first**~~ — reversed 2026-08-22; #15 is an independent
+   cleanup, not a gate. See Data source. Phase 1 starts here.
 1. **Weekly briefing, blocks 1–4**, plus the on-demand test send. No anomaly
    detection, no HVAC block. This is the bulk of the value.
 2. **HVAC block** — by-day, WoW, MoM.
