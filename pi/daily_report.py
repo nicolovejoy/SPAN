@@ -79,7 +79,9 @@ def local_day_utc_range(d: date) -> tuple[datetime, datetime]:
 #
 # The collector writes raw 30s `circuit`/`power_w`; InfluxDB tasks derive
 # `circuit_5m` / `circuit_1h`, each bucket carrying `energy_wh` (integral of
-# |power_w| over the bucket, in Wh) and `power_w_mean`. Summing energy_wh costs
+# |power_w| over the bucket, in Wh), `energy_wh_counter` (delta of SPAN's own
+# cumulative meter — authoritative for energy since #15, immune to missed polls)
+# and `power_w_mean`. Summing energy_wh_counter costs
 # one row per bucket instead of 120 raw points per hour — that's the whole win.
 #
 # Every circuit query below goes through _run_segments(), which splits the
@@ -256,13 +258,14 @@ def _circuit_kwh_flux(src: str, start: str, stop: str, every: str | None,
                       stamp: str = "stop") -> str:
     """Pipeline yielding circuit energy in kWh — one value per `every`-window, or
     one per series when `every` is None. Raw integrates 30s power exactly as
-    before #9; a rollup just sums its precomputed energy_wh. `mode="mean"`
+    before #9; a rollup just sums its precomputed energy_wh_counter — SPAN's own
+    meter delta, which is immune to missed polls (#15). `mode="mean"`
     reproduces the mean-power-times-window form the hourly query has always used.
 
     Rollup rows are re-stamped to their bucket midpoint (and the range shifted to
     match) so a bucket can never land in the neighbouring output window."""
     raw = src == MEAS_RAW
-    field = "power_w" if raw else ("energy_wh" if mode == "energy" else "power_w_mean")
+    field = "power_w" if raw else ("energy_wh_counter" if mode == "energy" else "power_w_mean")
     nf = f'  |> filter(fn: (r) => r.name =~ /(?i){name_filter}/)\n' if name_filter else ''
     # rollup buckets can be null where the source had no points; raw never is
     nn = '' if raw else '  |> filter(fn: (r) => exists r._value)\n'
