@@ -39,6 +39,54 @@ time** — see [Backfill](#backfill). Nothing should ever exist only in a rollup
 Volume, at 21 circuits and 3 fields: `circuit_5m` is 18,144 pts/day (~7.5% of
 raw `circuit`), `circuit_1h` is 1,512 pts/day (~0.6%).
 
+### Which energy field to read
+
+**`energy_wh_counter` is authoritative for energy** (decided #15, 2026-08-21).
+It is the delta of SPAN's own cumulative `consumedEnergyWh`, which keeps ticking
+inside the panel whether or not the collector is listening — so a missed poll
+costs nothing. `energy_wh` is the integral of our 30s `power_w` samples, and
+InfluxDB interpolates a straight line across any gap, inventing energy that was
+never measured.
+
+`energy_wh` is still stored and is useful as a cross-check. Do not delete it.
+
+Two exceptions, both because the counter is too coarse at fine resolution
+(three consecutive 30s samples have been observed reading an identical value):
+
+- Windows ≤48h (`ENERGY_RAW_MAX_MS`) integrate raw `power_w` instead.
+- Charts read `power_w` / `power_w_mean`, never either energy field.
+
+The mechanism behind that observation: SPAN's own cumulative counter updates in
+**~15-minute batches**, not on every poll. Between batches, consecutive 30s
+samples read the exact same value, so a per-sample delta at fine resolution is
+frequently a real zero even while power is actively flowing — the counter has
+nothing new to report yet, not because usage stopped. That coarseness is why
+short windows must integrate raw `power_w` instead of reading the counter.
+
+Day-level bucketing of counter energy **must be Pacific-aligned, not UTC** —
+this is the project's existing "UTC at rest, Pacific on display" convention
+(see `CLAUDE.md`'s Shared Conventions section), applied to this field
+specifically because getting it wrong is expensive here. UTC midnight is 17:00
+Pacific — mid-EV-charging for this household — so bucketing the counter at UTC
+day boundaries splits real charging sessions across the day line and
+manufactures spurious day-over-day swings. Empirically confirmed: UTC-aligned
+buckets show a ±8–11% day-level artifact that is pure boundary placement, not
+usage; re-bucketing the same data Pacific-aligned collapses it down to a real
+-0.5% to -0.6% signal.
+
+**Never apply Flux `increase()` to the counter.** `nonNegative: true` treats
+SPAN's small backward corrections — observed −5.59 Wh across all 21 circuits
+simultaneously at a panel restart, twice in one sampled week — as a counter
+wrap, and returns the current value: a 14.43 Wh hour becomes 113,114 Wh. The
+rollup tasks use `difference(nonNegative: false)` → drop negatives → `sum()`.
+Consumers read the already-corrected rollup field and need no reset handling,
+but must not re-derive from the raw counter.
+
+One more trap: `_rollup_stamp()` in `pi/daily_report.py` calibrates tail lag by
+comparing rollup sums against the raw integral. It deliberately still reads
+`energy_wh` — giving it the counter would show a constant integral-vs-counter
+offset that it would misread as lag.
+
 ## Timestamp convention
 
 **End-of-bucket.** A point stamped `T` covers the half-open interval
