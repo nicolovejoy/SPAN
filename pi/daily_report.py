@@ -22,6 +22,7 @@ import matplotlib.pyplot as plt
 from influxdb_client import InfluxDBClient
 
 from rates import ENERGY_RATE, BASE_CHARGE_DAILY
+import report_baseline as rb
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,6 +40,7 @@ REPORT_FROM = os.getenv("REPORT_FROM", "SPAN Monitor <energy@span.pianohouseproj
 REPORT_HOUR = int(os.getenv("REPORT_HOUR", "7"))
 LOCAL_TZ_NAME = os.getenv("TZ", "America/Los_Angeles")
 LOCAL_TZ = ZoneInfo(LOCAL_TZ_NAME)
+STATE_PATH = Path(os.getenv("REPORT_STATE_PATH", "/app/state/anomaly_state.json"))
 
 
 def flux_ts(dt: datetime) -> str:
@@ -925,6 +927,104 @@ def generate_weekly_report(client: InfluxDBClient, week_start: date):
     send_email(build_weekly_html(ctx), f"Weekly Energy Report — {ctx.date_str}")
 
 
+# ---------- Task 10: daily anomaly check — wiring report_baseline into I/O ----------
+
+
+def _day_coverage_flux(target_date: date) -> str:
+    start, stop = local_day_utc_range(target_date)
+    return f'''
+from(bucket: "{INFLUXDB_BUCKET}")
+  |> range(start: {flux_ts(start)}, stop: {flux_ts(stop)})
+  |> filter(fn: (r) => r._measurement == "{MEAS_1H}" and r._field == "{COUNTER_FIELD}")
+  |> filter(fn: (r) => exists r._value)
+  |> group()
+  |> distinct(column: "_time")
+  |> count()
+'''
+
+
+def query_day_coverage(query_api, target_date: date) -> float:
+    """Fraction of the 24 expected circuit_1h hours present for `target_date`
+    (Pacific), across any circuit. Gates all anomaly alerting for the day —
+    see report_baseline.day_coverage_ok."""
+    for table in query_api.query(_day_coverage_flux(target_date), org=INFLUXDB_ORG):
+        for rec in table.records:
+            return min(1.0, (rec.get_value() or 0) / 24.0)
+    return 0.0
+
+
+def render_anomaly_email(target_date: date,
+                         alerts: list[tuple[str, float, "rb.Baseline", "rb.AnomalyResult"]],
+                         top_circuits: dict[str, list[tuple[str, float]]]) -> tuple[str, str]:
+    """(subject, html). Subject carries the whole message — most days it's
+    actionable without opening (spec: 'The anomaly email' > Content)."""
+    if len(alerts) == 1:
+        cat, value, baseline, result = alerts[0]
+        direction = "above" if value > baseline.median else "below"
+        subject = (f"⚡ {cat} {result.pct:.0f}% {direction} normal for a "
+                  f"{target_date.strftime('%A')}")
+    else:
+        subject = f"⚡ Unusual usage: {', '.join(c for c, *_ in alerts)}"
+
+    blocks = []
+    for cat, value, baseline, result in alerts:
+        circuits = ", ".join(f"{n} ({k:.1f} kWh)" for n, k in top_circuits.get(cat, [])[:3])
+        blocks.append(f'''<h3>{cat}</h3>
+<p>{value:.1f} kWh vs a normal {baseline.median:.1f} kWh for a
+{target_date.strftime("%A")} (${value * ENERGY_RATE:.2f}).</p>
+<p style="font-size:13px;color:#666;">Driven by: {circuits or "no single circuit stands out"}</p>''')
+
+    html = f'''<!DOCTYPE html>
+<html><head><style>{CSS}</style></head>
+<body>
+<h2>Unusual usage &mdash; {target_date.strftime("%A, %B %-d")}</h2>
+{"".join(blocks)}
+</body></html>'''
+    return subject, html
+
+
+def generate_anomaly_check(client: InfluxDBClient, target_date: date):
+    """Runs daily for `target_date` (the previous local day, at 07:00). Sends
+    nothing on a normal day."""
+    query_api = client.query_api()
+    coverage = query_day_coverage(query_api, target_date)
+    if not rb.day_coverage_ok(coverage):
+        logger.warning(f"{target_date}: coverage {coverage:.0%} < 90%, suppressing all alerts")
+        return
+
+    sample_dates = rb.trailing_same_weekday_dates(target_date, 8)
+    fetch_start = flux_ts(local_day_utc_range(sample_dates[0])[0])
+    fetch_stop = flux_ts(local_day_utc_range(target_date + timedelta(days=1))[0])
+    rows = query_daily_circuit_counter_kwh(query_api, fetch_start, fetch_stop)
+    day_cat = category_day_kwh(rows)
+
+    alerts = []
+    for category in _all_categories():
+        samples = [day_cat[d][category] for d in sample_dates
+                  if d in day_cat and category in day_cat[d]]
+        if not rb.category_coverage_ok(len(samples)):
+            logger.info(f"{category}: only {len(samples)}/8 baseline samples, skipping")
+            continue
+        baseline = rb.compute_baseline(samples)
+        value = day_cat.get(target_date, {}).get(category, 0.0)
+        result = rb.evaluate(value, baseline)
+        state = rb.load_state(STATE_PATH, category)
+        if result.is_anomalous:
+            if rb.should_alert(result, state):
+                alerts.append((category, value, baseline, result))
+                rb.save_state(STATE_PATH, category, target_date, result.z)
+        else:
+            rb.clear_state(STATE_PATH, category)
+
+    if not alerts:
+        return
+
+    top_circuits = {cat: category_top_circuits(rows, local_week_start(target_date), cat, n=3)
+                    for cat, *_ in alerts}
+    subject, html = render_anomaly_email(target_date, alerts, top_circuits)
+    send_email(html, subject)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Weekly energy report + daily anomaly check")
     parser.add_argument("--loop", action="store_true",
@@ -933,6 +1033,8 @@ def main():
     parser.add_argument("--date", type=str,
                        help="Send the weekly briefing for the week containing this date "
                             "(YYYY-MM-DD) — on-demand test send")
+    parser.add_argument("--anomaly-date", type=str,
+                       help="Run the anomaly check for this date (YYYY-MM-DD) — on-demand test")
     args = parser.parse_args()
 
     for var, name in [(INFLUXDB_TOKEN, "INFLUXDB_TOKEN"), (RESEND_API_KEY, "RESEND_API_KEY"),
@@ -947,20 +1049,28 @@ def main():
         target = datetime.strptime(args.date, "%Y-%m-%d").date()
         logger.info(f"Generating weekly briefing for the week containing {args.date}")
         generate_weekly_report(client, local_week_start(target))
+    elif args.anomaly_date:
+        target = datetime.strptime(args.anomaly_date, "%Y-%m-%d").date()
+        logger.info(f"Running anomaly check for {args.anomaly_date}")
+        generate_anomaly_check(client, target)
     elif args.loop:
-        logger.info(f"Loop mode: weekly briefing Mondays at {REPORT_HOUR}:00")
+        logger.info(f"Loop mode: anomaly check daily, weekly briefing Mondays, at {REPORT_HOUR}:00")
         while True:
             wait = seconds_until_hour(REPORT_HOUR)
             logger.info(f"Next run in {wait / 3600:.1f} hours")
             time.sleep(wait)
             yesterday = (datetime.now() - timedelta(days=1)).date()
+            try:
+                generate_anomaly_check(client, yesterday)
+            except Exception as e:
+                logger.error(f"Anomaly check failed: {e}")
             if datetime.now().weekday() == 0:   # Monday: yesterday closed last week
                 try:
                     generate_weekly_report(client, local_week_start(yesterday))
                 except Exception as e:
                     logger.error(f"Weekly report failed: {e}")
     else:
-        generate_weekly_report(client, local_week_start(datetime.now().date() - timedelta(days=7)))
+        generate_anomaly_check(client, datetime.now().date() - timedelta(days=1))
 
     client.close()
 

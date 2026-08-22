@@ -293,5 +293,43 @@ class HvacBlockTest(unittest.TestCase):
         self.assertIn("HVAC", html)
 
 
+class AnomalyCheckTest(unittest.TestCase):
+    def test_query_day_coverage_flux_shape(self):
+        flux = dr._day_coverage_flux(date(2026, 8, 17))
+        self.assertIn('r._measurement == "circuit_1h" and r._field == "energy_wh_counter"', flux)
+        self.assertIn('distinct(column: "_time")', flux)
+
+    def test_render_anomaly_email_subject_names_category_and_direction(self):
+        import report_baseline as rb
+        baseline = rb.compute_baseline([10, 11, 10, 9, 10, 11, 10, 9])
+        result = rb.evaluate(20.0, baseline)
+        subject, html = dr.render_anomaly_email(
+            date(2026, 8, 18),  # Tuesday
+            [("HVAC", 20.0, baseline, result)],
+            {"HVAC": [("Heat pump", 18.0)]},
+        )
+        self.assertIn("HVAC", subject)
+        self.assertIn("above normal for a Tuesday", subject)
+        self.assertIn("Heat pump", html)
+
+    def test_generate_anomaly_check_sends_nothing_on_a_normal_day(self):
+        with mock.patch.object(dr, "query_day_coverage", return_value=1.0), \
+             mock.patch.object(dr, "query_daily_circuit_counter_kwh",
+                              return_value=[("Heat pump", d, 10.0)
+                                           for d in [date(2026, 8, 18) - timedelta(weeks=w)
+                                                    for w in range(9)]]), \
+             mock.patch.object(dr, "send_email") as sent:
+            dr.generate_anomaly_check(mock.Mock(), date(2026, 8, 18))
+            sent.assert_not_called()
+
+    def test_generate_anomaly_check_suppresses_on_low_coverage(self):
+        with mock.patch.object(dr, "query_day_coverage", return_value=0.4), \
+             mock.patch.object(dr, "query_daily_circuit_counter_kwh") as q, \
+             mock.patch.object(dr, "send_email") as sent:
+            dr.generate_anomaly_check(mock.Mock(), date(2026, 8, 18))
+            q.assert_not_called()   # short-circuits before even fetching rows
+            sent.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
