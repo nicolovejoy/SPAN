@@ -85,7 +85,7 @@ const ROLLUP_1H_POWER: PowerSource = {
  * the same number of raw samples. The collector polls on a fixed 30s cadence so
  * that's true except across dropouts, where a sparse bucket gets the same weight
  * as a full one. Good enough for a chart line; the breakdown *table* does not
- * rely on this — it sums `energy_wh`, which is exact regardless.
+ * rely on this — it sums `energy_wh_counter`, which is exact regardless.
  */
 export function sourceForInterval(interval: IntervalKey): PowerSource {
   switch (interval) {
@@ -109,7 +109,7 @@ export type EnergySource = {
 
 /** Windows up to this span integrate raw points (most accurate). */
 export const ENERGY_RAW_MAX_MS = 48 * HOUR_MS;
-/** Windows up to this span sum `circuit_5m.energy_wh`. */
+/** Windows up to this span sum `circuit_5m.energy_wh_counter`. */
 export const ENERGY_5M_MAX_MS = 7 * DAY_MS;
 
 export const RAW_ENERGY_SOURCE: EnergySource = {
