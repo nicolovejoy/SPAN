@@ -103,7 +103,7 @@ export type EnergySource = {
   measurement: MeasurementId;
   /** "integral": derive Wh from raw watt samples. "sum": add stored Wh. */
   mode: "integral" | "sum";
-  field: "power_w" | "energy_wh";
+  field: "power_w" | "energy_wh" | "energy_wh_counter";
   bucketMs: number;
 };
 
@@ -122,12 +122,20 @@ export const RAW_ENERGY_SOURCE: EnergySource = {
 /**
  * Energy source by window span:
  *
- *   ≤ 48h → raw integral (existing pipeline, most accurate)
- *   ≤ 7d  → sum(circuit_5m.energy_wh)
- *   > 7d  → sum(circuit_1h.energy_wh)
+ *   ≤ 48h → raw integral (existing pipeline, most accurate at fine buckets)
+ *   ≤ 7d  → sum(circuit_5m.energy_wh_counter)
+ *   > 7d  → sum(circuit_1h.energy_wh_counter)
  *
  * Summing pre-computed Wh is *exact* — there is no re-integration error — which
  * is why this is the big win over `queryPower`'s mean-of-means.
+ *
+ * Since #15 the summed field is `energy_wh_counter`, the delta of SPAN's own
+ * cumulative meter, rather than `energy_wh`, the integral of our 30s samples.
+ * The counter keeps ticking inside the panel whether or not we poll, so a
+ * missed poll costs nothing; the integral interpolates across the gap and
+ * invents energy that was never measured. `energy_wh` is still stored as a
+ * cross-check. Short windows stay on the raw integral because the counter is
+ * too coarse for fine buckets.
  *
  * The 5m→1h boundary was originally 30d, but `circuit_5m` returns ~12x more
  * points per unit time than `circuit_1h` (18,144/day vs 1,512/day), so a 30d
@@ -142,14 +150,14 @@ export function energySourceForSpan(spanMs: number): EnergySource {
     return {
       measurement: "circuit_5m",
       mode: "sum",
-      field: "energy_wh",
+      field: "energy_wh_counter",
       bucketMs: 5 * MINUTE_MS,
     };
   }
   return {
     measurement: "circuit_1h",
     mode: "sum",
-    field: "energy_wh",
+    field: "energy_wh_counter",
     bucketMs: HOUR_MS,
   };
 }

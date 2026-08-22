@@ -78,12 +78,33 @@ describe("energySourceForSpan", () => {
     expect(energySourceForSpan(ENERGY_RAW_MAX_MS + 1)).toMatchObject({
       measurement: "circuit_5m",
       mode: "sum",
-      field: "energy_wh",
+      field: "energy_wh_counter",
     });
     expect(energySourceForSpan(ENERGY_5M_MAX_MS)).toMatchObject({
       measurement: "circuit_5m",
       mode: "sum",
     });
+  });
+
+  it("sums the counter, not the integral, for rollup-backed windows", () => {
+    const fiveMin = energySourceForSpan(3 * DAY_MS);
+    expect(fiveMin.measurement).toBe("circuit_5m");
+    expect(fiveMin.field).toBe("energy_wh_counter");
+    expect(fiveMin.mode).toBe("sum");
+
+    const hourly = energySourceForSpan(30 * DAY_MS);
+    expect(hourly.measurement).toBe("circuit_1h");
+    expect(hourly.field).toBe("energy_wh_counter");
+    expect(hourly.mode).toBe("sum");
+  });
+
+  it("keeps short windows on the raw integral", () => {
+    // The counter is too coarse for fine buckets — three consecutive 30s
+    // samples have been seen reading an identical value (#15).
+    const short = energySourceForSpan(12 * HOUR_MS);
+    expect(short.measurement).toBe("circuit");
+    expect(short.field).toBe("power_w");
+    expect(short.mode).toBe("integral");
   });
 
   it("sums the 1h rollup past 7d", () => {
