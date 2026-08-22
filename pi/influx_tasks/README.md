@@ -26,11 +26,14 @@ Two measurements, in the **same `span` bucket** as the raw data.
 already do (`web/lib/influx.ts`), since SPAN reports some circuits with inverted
 sign. It is emphatically *not* applied to the cumulative meter.
 
-**`energy_wh` and `energy_wh_counter` are two independent estimates of the same
-quantity**, stored side by side on purpose so they can be A/B'd over real
-history before either the site or the daily report commits to one. Neither
-replaces the other. See [Accuracy](#accuracy-vs-raw-integral) for how far apart
-they actually run (~0.4–0.6% on clean data).
+`energy_wh` and `energy_wh_counter` were two independent estimates of the same
+quantity, stored side by side so they could be A/B'd over real history before
+either the site or the daily report committed to one. **#15 resolved this:**
+`energy_wh_counter` is now authoritative — see [Which energy field to
+read](#which-energy-field-to-read) below. Both fields stay stored: `energy_wh`
+remains as a cross-check, not a discarded competitor. See
+[Accuracy](#accuracy-vs-raw-integral) for how far apart they actually run
+(~0.4–0.6% on clean data).
 
 Raw `circuit` is never deleted (bucket retention is infinite), so **the rollups
 are a pure speed optimisation and are fully rebuildable from scratch at any
