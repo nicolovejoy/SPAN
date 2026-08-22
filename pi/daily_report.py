@@ -3,6 +3,7 @@
 
 import argparse
 import base64
+import calendar
 import io
 import json
 import os
@@ -854,8 +855,59 @@ def render_usage_table(ctx: WeeklyContext) -> str:
 </table>'''
 
 
+def mom_comparison(day_cat: dict[date, dict[str, float]], as_of: date,
+                   category: str) -> tuple[float, float]:
+    """(this-month-to-date, same-cutoff last month) kWh for `category` — both
+    covering day 1 through as_of.day of their respective months, so a
+    16-days-in month compares fairly against a full 30-day one instead of
+    against a partial vs. complete mismatch."""
+    this_start = as_of.replace(day=1)
+
+    def total(lo: date, hi: date) -> float:
+        return sum(cats.get(category, 0.0) for d, cats in day_cat.items() if lo <= d <= hi)
+
+    this_month = total(this_start, as_of)
+
+    prev_y, prev_m = add_months(as_of.year, as_of.month, -1)
+    prev_start = date(prev_y, prev_m, 1)
+    prev_cutoff = min(as_of.day, calendar.monthrange(prev_y, prev_m)[1])
+    prev_end = date(prev_y, prev_m, prev_cutoff)
+    last_month = total(prev_start, prev_end)
+
+    return this_month, last_month
+
+
+def render_hvac_block(ctx: WeeklyContext) -> str:
+    """Block 5 — HVAC by day (this week), week-over-week, month-over-month.
+    Renders without a hot-water/space-conditioning split; gains a row when
+    that detector work (out of scope here) lands."""
+    hvac_by_day = [cats.get("HVAC", 0.0) for _, cats in ctx.week_by_day]
+    if not any(hvac_by_day):
+        return ""
+    labels = [d.strftime("%a") for d, _ in ctx.week_by_day]
+    fig, ax = plt.subplots(figsize=(7, 2.8), dpi=120)
+    ax.bar(labels, hvac_by_day, width=0.6, color=CATEGORY_COLORS["HVAC"])
+    ax.set_ylabel("kWh")
+    ax.grid(True, alpha=0.3, axis="y")
+    fig.tight_layout()
+    b64 = _fig_to_b64(fig)
+
+    week_end = ctx.week_start + timedelta(days=6)
+    this_week = sum(hvac_by_day)
+    last_week = week_totals(ctx.day_cat, ctx.week_start - timedelta(days=7)).get("HVAC", 0.0)
+    this_month, last_month = mom_comparison(ctx.day_cat, week_end, "HVAC")
+
+    wow = _delta_arrow_pct(_pct_delta(this_week, last_week), " vs last week")
+    mom = _delta_arrow_pct(_pct_delta(this_month, last_month), " vs last month")
+    return f'''<h3>HVAC</h3>
+{_chart_img(b64, "HVAC by day this week")}
+<p style="font-size:13px;color:#444;">
+{this_week:.1f} kWh this week{wow} &middot; {this_month:.1f} kWh this month{mom}
+</p>'''
+
+
 WEEKLY_SECTIONS = [render_headline, render_week_by_day_chart, render_12wk_trend_chart,
-                  render_usage_table]
+                  render_usage_table, render_hvac_block]
 
 
 def build_weekly_html(ctx: WeeklyContext) -> str:

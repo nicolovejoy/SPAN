@@ -257,5 +257,38 @@ class RenderTest(unittest.TestCase):
         self.assertIn("HVAC", html)
 
 
+class HvacBlockTest(unittest.TestCase):
+    def test_mom_comparison_is_a_fair_partial_month_comparison(self):
+        day_cat = {
+            date(2026, 8, 1): {"HVAC": 3.0}, date(2026, 8, 10): {"HVAC": 4.0},
+            date(2026, 7, 1): {"HVAC": 2.0}, date(2026, 7, 10): {"HVAC": 1.0},
+            date(2026, 7, 25): {"HVAC": 100.0},   # after the day-10 cutoff — excluded
+        }
+        this_month, last_month = dr.mom_comparison(day_cat, date(2026, 8, 10), "HVAC")
+        self.assertAlmostEqual(this_month, 7.0)    # Aug 1 + Aug 10
+        self.assertAlmostEqual(last_month, 3.0)    # Jul 1 + Jul 10 (day-of-month cutoff)
+
+    def test_mom_comparison_clamps_cutoff_to_shorter_month(self):
+        day_cat = {date(2026, 2, 28): {"HVAC": 5.0}}
+        # Jan has 31 days; as_of.day=31 should clamp to Feb 28
+        this_month, last_month = dr.mom_comparison(day_cat, date(2026, 1, 31), "HVAC")
+        self.assertAlmostEqual(this_month, 0.0)
+
+    def test_render_hvac_block_smoke(self):
+        day_cat = {date(2026, 8, 3) + timedelta(days=i): {"HVAC": float(i)} for i in range(7)}
+        day_cat.update({date(2026, 7, 27) + timedelta(days=i): {"HVAC": 1.0} for i in range(7)})
+        ctx = dr.WeeklyContext(
+            week_start=date(2026, 8, 3), rows=[], panel_daily={}, day_cat=day_cat,
+            categories=["Lights", "HVAC", "Car", "Appliances", "Else"],
+            headline={"kwh": 0, "cost": 0, "delta_vs_last_week_pct": None,
+                     "delta_vs_12wk_pct": None, "top_mover": None, "top_mover_delta_kwh": 0},
+            usage_rows=[], week_by_day=[(date(2026, 8, 3) + timedelta(days=i),
+                                       {"HVAC": float(i)}) for i in range(7)],
+            trend=[],
+        )
+        html = dr.render_hvac_block(ctx)
+        self.assertIn("HVAC", html)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
