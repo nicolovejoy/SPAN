@@ -198,6 +198,19 @@ Everything reads the **`circuit_1h` rollup**, never raw. It is already built and
 verified to −0.0032% against raw integral. A 12-week stacked chart off raw 30s
 points would be a punishing query.
 
+**Energy field: `energy_wh_counter`, not `energy_wh`** — decided 2026-08-21.
+This report is built entirely on deltas: week-over-week, month-over-month, vs
+12-week average. `energy_wh` is a 30s `integral()` and undercounts whenever a
+poll is missed, so some fraction of every delta would be measuring collector
+reliability rather than usage. `energy_wh_counter` is SPAN's own meter delta and
+is immune to missed polls. Both fields are already stored for exactly this A/B.
+
+**This makes #15 a prerequisite, not a follow-up.** Resolving #15 — evaluating
+the two fields and making the counter authoritative — lands *before* the report
+is built on top of it. Building a trend report on the integral and switching the
+energy source underneath it later was considered and rejected: it would silently
+change every historical comparison the report had already shown.
+
 Invariants from `pi/influx_tasks/README.md` that apply:
 
 - Timestamps are **end-of-bucket**: a point at T covers `[T − 1h, T)`.
@@ -250,6 +263,8 @@ Fixture source: capture 12 weeks of real `circuit_1h` data once to a file.
 
 Each phase ships something usable.
 
+0. **Resolve #15 first** — make `energy_wh_counter` authoritative. Prerequisite,
+   not a follow-up; see Data source.
 1. **Weekly briefing, blocks 1–4**, plus the on-demand test send. No anomaly
    detection, no HVAC block. This is the bulk of the value.
 2. **HVAC block** — by-day, WoW, MoM.
