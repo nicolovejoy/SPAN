@@ -160,9 +160,12 @@ failure this whole design exists to avoid — and is precisely the failure mode
 that consumed 2026-08-21 (a flapping Cloudflare outage produced ~30 UptimeRobot
 emails).
 
-Rule: do not re-alert a category within **3 days** unless the deviation
-materially worsens (`|z|` grows by more than 25%). State clears when the
-category returns to normal (`|z| < 3`).
+Rule: an anomalous category is suppressed indefinitely for a continuing episode
+of the same or lesser severity — no email is sent for it again — unless the
+deviation materially worsens (`|z|` grows by more than 25% relative to the
+z-value at the last alert). State clears when the category returns to normal
+(`|z| < 3` — or, when the baseline's MAD is 0, the percentage-fallback test
+passes), which resets the suppression for any future, separate episode.
 
 ### Guard: coverage check
 

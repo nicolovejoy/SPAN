@@ -40,7 +40,7 @@ cd pi && docker compose up -d
   - `collector.py` - Polls SPAN every 30s, writes to InfluxDB
   - `bath_detector.py` - Detects bath events from heat pump signature (10min loop)
   - `charge_detector.py` - Detects EV charging sessions (10min loop)
-  - `daily_report.py` - HTML email report via Resend at 7am daily
+  - `daily_report.py` - Weekly energy briefing (Mondays) + daily anomaly-check email via Resend, both at 7am
   - `rates.py` - TOU rate schedule for cost calculations
   - `docker-compose.yml` - InfluxDB, Grafana, collector, bath-detector, charge-detector, daily-report, cloudflared
   - `grafana/provisioning/` - Auto-configured datasource + dashboard
@@ -91,14 +91,21 @@ GitHub pushes via the Vercel Git integration. Pi-hosted as a Docker service
 subagent. The list below is near-term mechanics; the roadmap explains ordering and why.
 
 - **~~Manifest CORS~~ — resolved by the 2026-08-13 re-home to Vercel.** The premise (`/manifest.webmanifest` gated by CF Access on the Pi-hosted dashboard) no longer applies to the new topology. Previously: decided 2026-05-24 to live with the credential-less manifest fetch hitting the CF Access login redirect (cosmetic console error).
-- **Weekly energy report + anomaly email** — design approved 2026-08-21, spec at
-  `docs/superpowers/specs/2026-08-21-weekly-energy-report-design.md`. Replaces the nine-section
-  daily email with a Monday briefing (headline, week-by-day stacked bars, 12-week trend, one
-  merged category+circuit table with an Unmonitored row, HVAC block) plus a daily mail that fires
-  only on a baseline anomaly. **Build this next — it is not blocked on anything.** Two hard
-  constraints found 2026-08-22: day buckets must be Pacific-aligned (UTC midnight = 17:00 Pacific,
-  mid-EV-charging, manufactures ±8-11% artifacts), and SPAN's energy counter updates in ~15-minute
-  batches.
+- **Weekly energy report + anomaly email** — code DONE 2026-08-22, **PR #19 open against main, not yet
+  merged**. Built on branch `worktree-weekly-energy-report` via 11-task subagent-driven plan
+  (`docs/superpowers/plans/2026-08-22-weekly-energy-report.md`) + a final whole-branch review that caught
+  and fixed 4 real bugs (garbage "inf%" anomaly subject on a zero baseline, week- vs day-scoped "driven by"
+  circuits, an off-by-one-bucket coverage-guard window, and the untested alert-send path all four lived in).
+  80/80 tests pass. **Before merging:** no Flux query has run against real InfluxDB and no chart has been
+  drawn by real matplotlib — run `docker compose run --rm daily-report python daily_report.py --date <past
+  Monday>` and `--anomaly-date <past date>` against the Pi (sends real test emails) before rebuilding the
+  live container. Weekly briefing Mondays 07:00 (headline, week-by-day chart, 12-week trend, usage table
+  with Unmonitored row, HVAC block); daily anomaly check at 07:00, silent unless a category's median/MAD
+  baseline is exceeded. Suppression state in `/app/state/anomaly_state.json` on the `report-state` volume.
+  Retired: the nine-section daily email, the aux-heat alarm, `pi/rates.py`'s already-flat cost model needed
+  no change. Left in place but now unreferenced by the report: the #9 raw/rollup segment router in
+  `daily_report.py` (`_run_segments` and friends), `query_total_kwh` (a standalone helper), and
+  `_delta_arrow` — candidates for a future cleanup pass if nothing else picks them up.
 - **#15 `energy_wh_counter`** — Task 1 (evaluation) done; consumer switch not started, on branch
   `worktree-energy-counter-authoritative`. Independent cleanup, **not** a prerequisite for the
   report (weekly stdev between the two fields is 0.25pp). Plan at
@@ -120,13 +127,11 @@ subagent. The list below is near-term mechanics; the roadmap explains ordering a
   - Tail lag: `circuit_5m` 1–6 min, `circuit_1h` 5–65 min. Consumers hybridise with raw.
   - ~~Follow-up: retune the 30d threshold~~ — done 2026-08-03, `ENERGY_5M_MAX_MS` now 7d.
   - Contract + tail-lag invariants: `pi/influx_tasks/README.md`. Read before wiring a new consumer.
-- **Verify the daily report** against rollups — run `daily_report.py --date <a past date>` and check
-  the logs for `rollup circuit_1h:` lines and any `falling back to raw` warnings. Not yet done.
 - **Power explorer chart E2E** (#13) — Playwright harness via a `MOCK_INFLUX` fixture mode (hermetic local build — no live Influx dependency in CI). Locks in the 2026-06-19 pan/zoom fix: bounded-to-data, no blank-out, intent-only URL, cache hits, table-follows-zoom. Plan in the issue.
 - **Zoom-in detail follow-up** — since 2026-06-19 pan/zoom stays *within* the loaded preset window (bounded by `fixLeftEdge/fixRightEdge`); zoom-in no longer auto-fetches a finer bucket. If wanted, add a deliberate "load detail at this zoom" that widens the loaded window. Low priority.
 - **In-email settings link** (#8) — clickable link in the daily email to change report cadence + aux-heat threshold without redeploying. Deferred 2026-06-14 (needs persistent store + web page + report-loop rework). Cadence stays daily for now.
-- **Dashboard UX backlog** — web app. Done 2026-06-19 (all in `PowerChart.tsx`): ~~time range in PST~~, ~~all-axes labels~~, ~~legend moved left~~. Done 2026-08-03: ~~per-circuit lines (#12)~~ (drill via `⌄` chip; `lib/drill.ts`), ~~time-nav beyond swiping~~ (`OverviewStrip` all-history brush + `‹ ›` step buttons), pan restored (slack window, `lib/panWindow.ts` — loaded ≈ 3× visible with silent edge extension), cost columns in the breakdown (`lib/rates.ts`, flat SCL $0.1241/kWh + $0.83/day prorated base + Δ vs previous window). Open: polling cadence (#5), ~~relax CF Access login (#6)~~ (closed 2026-08-21, superseded by the 2026-08-13 Vercel re-home — see "Dashboard access model"), 1m smoothing (#7). Custom PWA icon. **Open — cost model divergence:** web costs with flat SCL ($0.1241/kWh) via `web/lib/rates.ts`; the daily report still costs with the TOU model in `pi/rates.py`. The two disagree. Pick one and converge them. (Rate-plan shopping — whether RSC tiered or TOU would be cheaper — was dropped 2026-08-21; the billed plan is flat "Small General Energy", so flat is the model to standardise on.)
-- **HVAC cooling watch** — cooling fault found 2026-06-14 (aux resistance firing + compressor short-cycling on a hot day); turning off the HRV apparently fixed it. Confirm with a 3–6h `pi/hvac_probe.py` run during active cooling. Aux-heat alarm: Auxiliary/Heat Pump cost ≥ `$AUX_HEAT_ALARM_USD` (default $0.50/day, ≈4 kWh) → red banner + `⚠ Aux heat —` subject. Cost-based since that circuit also draws during cooling. Cold-weather suppression at #3.
+- **Dashboard UX backlog** — web app. Done 2026-06-19 (all in `PowerChart.tsx`): ~~time range in PST~~, ~~all-axes labels~~, ~~legend moved left~~. Done 2026-08-03: ~~per-circuit lines (#12)~~ (drill via `⌄` chip; `lib/drill.ts`), ~~time-nav beyond swiping~~ (`OverviewStrip` all-history brush + `‹ ›` step buttons), pan restored (slack window, `lib/panWindow.ts` — loaded ≈ 3× visible with silent edge extension), cost columns in the breakdown (`lib/rates.ts`, flat SCL $0.1241/kWh + $0.83/day prorated base + Δ vs previous window). Open: polling cadence (#5), ~~relax CF Access login (#6)~~ (closed 2026-08-21, superseded by the 2026-08-13 Vercel re-home — see "Dashboard access model"), 1m smoothing (#7). Custom PWA icon. **Cost model — converged.** Web costs with flat SCL ($0.1241/kWh) via `web/lib/rates.ts`; `pi/rates.py` has also used a flat SCL rate since 2026-05-15 (`is_peak()` returns `False` unconditionally), so the daily/weekly report and the web dashboard agree. (Rate-plan shopping — whether RSC tiered or TOU would be cheaper — was dropped 2026-08-21; the billed plan is flat "Small General Energy", so flat is the model to standardise on.)
+- **HVAC cooling watch** — cooling fault found 2026-06-14 (aux resistance firing + compressor short-cycling on a hot day); turning off the HRV apparently fixed it. Confirm with a 3–6h `pi/hvac_probe.py` run during active cooling. ~~Aux-heat alarm~~ — retired 2026-08-22, folded into the general anomaly-detection system (the weekly report's daily anomaly check) instead of its own dedicated cost threshold/banner. Cold-weather suppression at #3.
 
 ## SPAN API
 
