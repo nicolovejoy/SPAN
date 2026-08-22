@@ -91,6 +91,22 @@ GitHub pushes via the Vercel Git integration. Pi-hosted as a Docker service
 subagent. The list below is near-term mechanics; the roadmap explains ordering and why.
 
 - **~~Manifest CORS~~ — resolved by the 2026-08-13 re-home to Vercel.** The premise (`/manifest.webmanifest` gated by CF Access on the Pi-hosted dashboard) no longer applies to the new topology. Previously: decided 2026-05-24 to live with the credential-less manifest fetch hitting the CF Access login redirect (cosmetic console error).
+- **Weekly energy report + anomaly email** — design approved 2026-08-21, spec at
+  `docs/superpowers/specs/2026-08-21-weekly-energy-report-design.md`. Replaces the nine-section
+  daily email with a Monday briefing (headline, week-by-day stacked bars, 12-week trend, one
+  merged category+circuit table with an Unmonitored row, HVAC block) plus a daily mail that fires
+  only on a baseline anomaly. **Build this next — it is not blocked on anything.** Two hard
+  constraints found 2026-08-22: day buckets must be Pacific-aligned (UTC midnight = 17:00 Pacific,
+  mid-EV-charging, manufactures ±8-11% artifacts), and SPAN's energy counter updates in ~15-minute
+  batches.
+- **#15 `energy_wh_counter`** — Task 1 (evaluation) done; consumer switch not started, on branch
+  `worktree-energy-counter-authoritative`. Independent cleanup, **not** a prerequisite for the
+  report (weekly stdev between the two fields is 0.25pp). Plan at
+  `docs/superpowers/plans/2026-08-21-energy-counter-authoritative.md` — read its STATUS block
+  first; #15's own stated rationale (missed polls) is wrong, the real mechanism is burst-load
+  aliasing against the 30s poll.
+- **Make bath + charge events explorable over time** — requested 2026-08-21. Their sections leave
+  the email; the detectors keep writing. Probably belongs in `web/`, needs its own design.
 - **Dashboard access model** — decision pending (2026-08-13); candidate: signed-cookie unlock link in Next.js middleware. /api/health (observer endpoint, see prompt-lab uptime convention) must stay exempt.
 - **EV monthly + annual cost rollup** in daily report (request #3 from 2026-05-23 batch — last unaddressed item). *2026-06-15: weekly section now excludes EV (per-2h-bucket subtract) with this-week-vs-5wk + vs-12wk charts and an EV-charging-vs-weekly-avg callout; EV accounting (weekly + monthly) pinned to the exact `CHARGE_CIRCUIT` name shared with `charge_detector`, not the Car regex.*
 - **~~Power explorer perf~~ (#9) — DONE, deployed 2026-07-31.** `circuit_5m`/`circuit_1h` tasks
