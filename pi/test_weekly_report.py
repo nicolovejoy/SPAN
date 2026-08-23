@@ -420,6 +420,46 @@ class AnomalyCheckTest(unittest.TestCase):
             clear.assert_not_called()
             sent.assert_not_called()
 
+    def test_generate_anomaly_check_skips_car_under_full_charge_cap(self):
+        # Car/EV charging is normally ~0 on this weekday, so a naive z-score
+        # would flag any charging as anomalous -- but up to a full charge's
+        # worth should never alert (Nico, 2026-08-23: two false-positive-feeling
+        # emails, one for exactly this).
+        import report_baseline as rb
+        target = date(2026, 8, 22)  # Saturday
+        sample_dates = rb.trailing_same_weekday_dates(target, 8)
+        rows = [("Tesla Car Charger", d, 0.0) for d in sample_dates]
+        rows.append(("Tesla Car Charger", target, 20.6))
+        fresh_state = rb.SuppressionState(last_alert_date=None, last_z=None)
+
+        with mock.patch.object(dr, "query_day_coverage", return_value=1.0), \
+             mock.patch.object(dr, "query_daily_circuit_counter_kwh", return_value=rows), \
+             mock.patch.object(dr.rb, "load_state", return_value=fresh_state), \
+             mock.patch.object(dr.rb, "save_state") as save, \
+             mock.patch.object(dr, "send_email") as sent:
+            dr.generate_anomaly_check(mock.Mock(), target)
+
+        sent.assert_not_called()
+        save.assert_not_called()
+
+    def test_generate_anomaly_check_still_alerts_car_over_full_charge_cap(self):
+        import report_baseline as rb
+        target = date(2026, 8, 22)  # Saturday
+        sample_dates = rb.trailing_same_weekday_dates(target, 8)
+        rows = [("Tesla Car Charger", d, 0.0) for d in sample_dates]
+        rows.append(("Tesla Car Charger", target, 150.0))  # over the 120 kWh cap
+        fresh_state = rb.SuppressionState(last_alert_date=None, last_z=None)
+
+        with mock.patch.object(dr, "query_day_coverage", return_value=1.0), \
+             mock.patch.object(dr, "query_daily_circuit_counter_kwh", return_value=rows), \
+             mock.patch.object(dr.rb, "load_state", return_value=fresh_state), \
+             mock.patch.object(dr.rb, "save_state") as save, \
+             mock.patch.object(dr, "send_email") as sent:
+            dr.generate_anomaly_check(mock.Mock(), target)
+
+        sent.assert_called_once()
+        save.assert_called_once()
+
     def test_generate_anomaly_check_sends_an_email_for_a_fresh_anomaly(self):
         # The actual alert-fires-and-gets-sent path — untested before this fix,
         # which is exactly where Fix 1 (inf% subject) and Fix 2 (week- vs.

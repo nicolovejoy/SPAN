@@ -43,6 +43,10 @@ REPORT_HOUR = int(os.getenv("REPORT_HOUR", "7"))
 LOCAL_TZ_NAME = os.getenv("TZ", "America/Los_Angeles")
 LOCAL_TZ = ZoneInfo(LOCAL_TZ_NAME)
 STATE_PATH = Path(os.getenv("REPORT_STATE_PATH", "/app/state/anomaly_state.json"))
+# A full charge on the largest common EV pack (~100 kWh) plus AC charging
+# losses; any single day's Car usage under this is normal EV behavior, not an
+# anomaly, regardless of how irregular the historical baseline looks.
+EV_FULL_CHARGE_KWH = float(os.getenv("EV_FULL_CHARGE_KWH", "120"))
 
 
 def flux_ts(dt: datetime) -> str:
@@ -1062,8 +1066,14 @@ def generate_anomaly_check(client: InfluxDBClient, target_date: date):
         if not rb.category_coverage_ok(len(samples)):
             logger.info(f"{category}: only {len(samples)}/8 baseline samples, skipping")
             continue
-        baseline = rb.compute_baseline(samples)
         value = day_cat.get(target_date, {}).get(category, 0.0)
+        if category == "Car" and value <= EV_FULL_CHARGE_KWH:
+            # EV charging is legitimately irregular day-to-day (the weekly
+            # report excludes it from comparisons for the same reason) -- up
+            # to a full charge's worth is normal any day, not an anomaly.
+            rb.clear_state(STATE_PATH, category)
+            continue
+        baseline = rb.compute_baseline(samples)
         result = rb.evaluate(value, baseline)
         state = rb.load_state(STATE_PATH, category)
         if result.is_anomalous:
