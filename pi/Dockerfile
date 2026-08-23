@@ -5,6 +5,7 @@ WORKDIR /app
 RUN pip install --no-cache-dir httpx influxdb-client tzdata matplotlib
 
 COPY collector.py .
+COPY collector_health.py .
 COPY bath_detector.py .
 COPY charge_detector.py .
 COPY daily_report.py .
