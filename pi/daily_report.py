@@ -749,7 +749,7 @@ def send_email(html: str, subject: str):
     """Send report email via Resend API. DRY_RUN=1 logs instead of sending —
     used for read-only dry-runs against real data (#16 gap check) and is
     useful permanently for any manual on-demand run."""
-    if os.getenv("DRY_RUN"):
+    if os.getenv("DRY_RUN", "0").lower() not in ("0", "false", "no"):
         logger.info(f"DRY_RUN: would send '{subject}' ({len(html)} chars html)")
         return
     resp = httpx.post(

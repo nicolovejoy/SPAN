@@ -416,6 +416,17 @@ class SendEmailDryRunTest(unittest.TestCase):
                 dr.send_email("<html></html>", "a subject")
         self.assertTrue(any("DRY_RUN" in line and "a subject" in line for line in cm.output))
 
+    def test_dry_run_0_is_off_matching_the_use_rollups_convention(self):
+        # Same string-parsing convention as USE_ROLLUPS: DRY_RUN=0 must mean
+        # "off", not "truthy because the env var is set".
+        fake_resp = mock.Mock()
+        fake_resp.json.return_value = {"id": "abc"}
+        with mock.patch.dict(os.environ, {"DRY_RUN": "0"}), \
+             mock.patch.object(dr.httpx, "post", create=True, return_value=fake_resp) as post:
+            dr.send_email("<html></html>", "a subject")
+        post.assert_called_once()
+        fake_resp.raise_for_status.assert_called_once()
+
 
 class GapEmailTest(unittest.TestCase):
     def test_subject_includes_gap_clause_for_a_long_gap(self):
@@ -473,6 +484,24 @@ class QueryPollTimestampsTest(unittest.TestCase):
         out = dr.query_poll_timestamps(
             FakeApi(tables), "2026-07-30T00:00:00Z", "2026-07-31T00:00:00Z")
         self.assertEqual(out, [ts])
+
+
+class QueryPollFailuresTest(unittest.TestCase):
+    def test_returns_error_tag_to_count_dict(self):
+        # group(columns: ["error"]) |> count() -- one table/record per error
+        # tag value, _value carrying the count, error still in rec.values.
+        tables = [
+            FakeTable([FakeRecord(None, 40, {"error": "timeout"})]),
+            FakeTable([FakeRecord(None, 12, {"error": "connect"})]),
+        ]
+        out = dr.query_poll_failures(
+            FakeApi(tables), "2026-07-30T00:00:00Z", "2026-07-31T00:00:00Z")
+        self.assertEqual(out, {"timeout": 40, "connect": 12})
+
+    def test_empty_result_gives_empty_dict(self):
+        out = dr.query_poll_failures(
+            FakeApi([]), "2026-08-21T00:00:00Z", "2026-08-22T00:00:00Z")
+        self.assertEqual(out, {})
 
 
 class GenerateGapCheckTest(unittest.TestCase):
