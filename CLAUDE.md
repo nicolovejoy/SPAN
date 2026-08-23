@@ -97,87 +97,22 @@ GitHub pushes via the Vercel Git integration. Pi-hosted as a Docker service
 **Start at `docs/roadmap.md`** — phased, dependency-ordered, each phase scoped to hand to a
 subagent. The list below is near-term mechanics; the roadmap explains ordering and why.
 
-- **~~Manifest CORS~~ — resolved by the 2026-08-13 re-home to Vercel.** The premise (`/manifest.webmanifest` gated by CF Access on the Pi-hosted dashboard) no longer applies to the new topology. Previously: decided 2026-05-24 to live with the credential-less manifest fetch hitting the CF Access login redirect (cosmetic console error).
-- **~~Weekly energy report + anomaly email~~ — DONE, merged 2026-08-22 (PR #19).** Manually verified
-  against real InfluxDB/matplotlib on the Pi before rebuild. Weekly briefing Mondays 07:00 (headline,
-  week-by-day chart, 12-week trend, usage table with Unmonitored row, HVAC block); daily anomaly check
-  at 07:00, silent unless a category's median/MAD baseline is exceeded. Suppression state in
-  `/app/state/anomaly_state.json` on the `report-state` volume. Retired: the nine-section daily email,
-  the aux-heat alarm.
-- **~~#15 `energy_wh_counter`~~ — DONE, merged 2026-08-22 (PR #20).** Both consumers
-  (`pi/daily_report.py`, `web/lib/rollup.ts`) now sum `energy_wh_counter` for rollup-backed energy
-  totals; `energy_wh` retained as a cross-check. Real justification (confirmed by per-circuit tracing,
-  not #15's original hypothesis): the integral under-counts burst/impulse loads — chiefly the EV
-  charger — that pulse faster than the 30s poll; missed-poll correlation tested at r=0.11, essentially
-  none. Day-level bucketing of the counter must stay Pacific-aligned (UTC midnight = 17:00 Pacific =
-  mid-EV-charging) or it manufactures spurious day-over-day swings; this mostly cancels at week/month
-  scale (0.25pp / 0.14pp stdev). **Not yet done:** post-merge dashboard check — load
-  https://span.pianohouseproject.org, 30d preset, confirm non-zero kWh across every category. **Dead
-  code note:** Task 2's edit landed in `_circuit_kwh_flux()`/`_run_segments()` — the #9 segment router —
-  which PR #19 (merged first) already made unreferenced by the shipped report. Folds into the cleanup
-  candidate below rather than being a live risk.
+- **#17 part 2 — dryer (then washer) detection**, off `panel.feedthrough_power_w`. Part 1
+  ("Unmonitored" breakdown row) shipped 2026-08-23 (commit d3bb6a0) and reconciles live at ~11%
+  share; part 2 is the next Phase 2 item and *does* need the sign/`abs()` handling part 1 deliberately
+  deferred (`feedthrough_power_w` swings negative). Detail: `docs/roadmap.md` Phase 2, issue #17.
 - **#9 segment-router cleanup candidate** — `daily_report.py`'s `_run_segments` and friends,
-  `query_total_kwh`, `_delta_arrow` are unreferenced by the shipped report (superseded by the weekly
-  report's own query layer). Candidate for a future cleanup pass if nothing else picks them up first.
-- **~~#16 Pi observability~~ — DONE, merged + deployed 2026-08-22 (PR #21, hotfix #22).** `collector.py` writes a
-  `collector_poll` point per iteration (result ∈ {ok, panel_fail, circuits_fail, both_fail,
-  write_fail}, error ∈ {none, timeout, connect, http_4xx, http_5xx, decode, other}); `daily_report.py`
-  emails a data-gap alert at 07:00 (after the anomaly check) when yesterday's raw poll coverage
-  drops below 98% (`GAP_COVERAGE_MIN`) or the longest gap reaches 30 min (`GAP_LONGEST_MIN_S`),
-  both env-overridable, silent otherwise; `status.sh` prints yesterday's coverage. `telegraf` (new,
-  8th service) writes host + per-container metrics to a new `telemetry` bucket (30d retention);
-  Grafana's `pi-health` dashboard (uid `pi-health`) visualizes it plus collector_poll failure rate.
-  `grafana` pinned 12.3.1, `cloudflared` pinned 2026.3.0 (both match what was already running).
-  Found and fixed in passing: the anomaly check's `circuit_1h` coverage gate had been crashing
-  every morning since PR #19 (2026-08-22) — `distinct(column:"_time") |> count()` errors in real
-  Influx ("count: unsupported aggregate column type time") — so it never could have alerted; fixed
-  with `map({_time: r._value, _value: 1}) |> sum()` (the tempting `{r with _value: 1}` form
-  silently returns zero rows). Deliberately not done: compose-project rename (orphans volumes,
-  manual), TimescaleDB image tag pin (separate compose project). Post-merge verified: collector_poll
-  flowing, telemetry bucket populated, pi-health provisioned. ~~Open caveat~~ — container-memory stats read 0 (Pi 5 firmware injects
-  `cgroup_disable=memory`); fixed 2026-08-22 by appending `cgroup_enable=memory cgroup_memory=1` to
-  `/boot/firmware/cmdline.txt` (backup `cmdline.txt.bak-2026-08-22`) + reboot — `docker stats` now
-  reports real memory. **Deploy
-  lessons:** the Pi checkout had been left on PR #19's branch (pull failed, old code rebuilt) — always
-  `git checkout main && git pull --ff-only` there first; and `pi/Dockerfile` COPYs files explicitly,
-  so any new `pi/*.py` module needs a COPY line (missed `collector_health.py` → ~3 min crash-loop).
-- **~~#17 part 1 "Unmonitored (subpanel)" category~~ — DONE, deployed 2026-08-23 (commit d3bb6a0).**
-  `web/`'s breakdown table omitted the ~28% of consumption drawn by the Square D overflow subpanel
-  (Washer/Dryer/Garage/Attic/Bath/Recirc Pump/Pwdr Rm — `panel.feedthrough_power_w`, no per-circuit
-  sensor); `pi/daily_report.py`'s weekly email already had this via #19. Shipped as the simpler of
-  two designs: an "Unmonitored" row = `panel.grid_power_w` (integral) minus circuit totals, floored
-  at zero (`web/lib/energyWindow.ts` `unmonitoredKwh`, mirroring the Python side's
-  `unmonitored_week_kwh`) — **not** sourced from `feedthrough_power_w` directly, since the residual
-  reconciles to the bill by construction and reuses proven logic instead of new sign-handling Flux.
-  No rollup exists for `panel` (unlike `circuit` since #9); `queryPanelKwh` runs the same raw
-  integral pi/'s 98-day weekly fetch already does, fetched concurrently with the circuit segments.
-  Live-verified on span.pianohouseproject.org across 24h/30d/90d — reconciles exactly, ~11% share at
-  30d/90d (lower than the issue's 266W/28% snapshot, plausibly the recirc pump's 2026-04-09 unplug —
-  see Phase 4's open question below), no perf issues even at 90d raw. **#17 part 2** (dryer/washer
-  detection off `feedthrough_power_w`, which *does* need the sign/abs() handling) is next.
+  `query_total_kwh`, `_delta_arrow` are unreferenced by the shipped weekly report. Candidate for a
+  future cleanup pass if nothing else picks them up first.
 - **Make bath + charge events explorable over time** — requested 2026-08-21. Their sections leave
   the email; the detectors keep writing. Probably belongs in `web/`, needs its own design.
 - **Dashboard access model** — decision pending (2026-08-13); candidate: signed-cookie unlock link in Next.js middleware. /api/health (observer endpoint, see prompt-lab uptime convention) must stay exempt.
-- **EV monthly + annual cost rollup** in daily report (request #3 from 2026-05-23 batch — last unaddressed item). *2026-06-15: weekly section now excludes EV (per-2h-bucket subtract) with this-week-vs-5wk + vs-12wk charts and an EV-charging-vs-weekly-avg callout; EV accounting (weekly + monthly) pinned to the exact `CHARGE_CIRCUIT` name shared with `charge_detector`, not the Car regex.*
-- **~~Power explorer perf~~ (#9) — DONE, deployed 2026-07-31.** `circuit_5m`/`circuit_1h` tasks
-  active, 7 months backfilled (3.77M + 314k pts), verified **-0.0032%** vs raw integral on a
-  gap-free week. `web/` and `pi/daily_report.py` read them; containers rebuilt.
-  - Fields: `power_w_mean`, `energy_wh` (integral), `energy_wh_counter` (SPAN's own
-    meter delta). **`energy_wh_counter` is authoritative for energy since #15** — the
-    integral under-counts burst loads (EV charger) faster than our 30s poll, not
-    primarily a missed-poll issue as originally assumed. `energy_wh` is
-    retained as a cross-check. Windows ≤48h still integrate raw; charts still read
-    power. Contract: `pi/influx_tasks/README.md`.
-  - Timestamps are **end-of-bucket** — a point at T covers `[T - bucket, T)`. Comparison queries
-    must shift by one bucket or edges silently mismatch.
-  - Tail lag: `circuit_5m` 1–6 min, `circuit_1h` 5–65 min. Consumers hybridise with raw.
-  - ~~Follow-up: retune the 30d threshold~~ — done 2026-08-03, `ENERGY_5M_MAX_MS` now 7d.
-  - Contract + tail-lag invariants: `pi/influx_tasks/README.md`. Read before wiring a new consumer.
-- **Power explorer chart E2E** (#13) — Playwright harness via a `MOCK_INFLUX` fixture mode (hermetic local build — no live Influx dependency in CI). Locks in the 2026-06-19 pan/zoom fix: bounded-to-data, no blank-out, intent-only URL, cache hits, table-follows-zoom. Plan in the issue.
-- **Zoom-in detail follow-up** — since 2026-06-19 pan/zoom stays *within* the loaded preset window (bounded by `fixLeftEdge/fixRightEdge`); zoom-in no longer auto-fetches a finer bucket. If wanted, add a deliberate "load detail at this zoom" that widens the loaded window. Low priority.
-- **In-email settings link** (#8) — clickable link in the daily email to change report cadence + aux-heat threshold without redeploying. Deferred 2026-06-14 (needs persistent store + web page + report-loop rework). Cadence stays daily for now.
-- **Dashboard UX backlog** — web app. Done 2026-06-19 (all in `PowerChart.tsx`): ~~time range in PST~~, ~~all-axes labels~~, ~~legend moved left~~. Done 2026-08-03: ~~per-circuit lines (#12)~~ (drill via `⌄` chip; `lib/drill.ts`), ~~time-nav beyond swiping~~ (`OverviewStrip` all-history brush + `‹ ›` step buttons), pan restored (slack window, `lib/panWindow.ts` — loaded ≈ 3× visible with silent edge extension), cost columns in the breakdown (`lib/rates.ts`, flat SCL $0.1241/kWh + $0.83/day prorated base + Δ vs previous window). Open: polling cadence (#5), ~~relax CF Access login (#6)~~ (closed 2026-08-21, superseded by the 2026-08-13 Vercel re-home — see "Dashboard access model"), 1m smoothing (#7). Custom PWA icon. **Cost model — converged.** Web costs with flat SCL ($0.1241/kWh) via `web/lib/rates.ts`; `pi/rates.py` has also used a flat SCL rate since 2026-05-15 (`is_peak()` returns `False` unconditionally), so the daily/weekly report and the web dashboard agree. (Rate-plan shopping — whether RSC tiered or TOU would be cheaper — was dropped 2026-08-21; the billed plan is flat "Small General Energy", so flat is the model to standardise on.)
-- **HVAC cooling watch** — cooling fault found 2026-06-14 (aux resistance firing + compressor short-cycling on a hot day); turning off the HRV apparently fixed it. Confirm with a 3–6h `pi/hvac_probe.py` run during active cooling. ~~Aux-heat alarm~~ — retired 2026-08-22, folded into the general anomaly-detection system (the weekly report's daily anomaly check) instead of its own dedicated cost threshold/banner. Cold-weather suppression at #3.
+- **EV monthly + annual cost rollup** in daily report (request #3 from 2026-05-23 batch — last unaddressed item). Weekly section already excludes EV (per-2h-bucket subtract); EV accounting is pinned to the exact `CHARGE_CIRCUIT` name shared with `charge_detector`, not the Car regex.
+- **Power explorer chart E2E** (#13) — Playwright harness via a `MOCK_INFLUX` fixture mode. Plan in the issue.
+- **Dashboard UX backlog** — open: polling cadence (#5), 1m smoothing (#7), custom PWA icon,
+  zoom-in-loads-detail (#12 follow-up, low priority), in-email settings link (#8, needs persistent
+  store + report-loop rework).
+- **HVAC cooling watch** — cooling fault found 2026-06-14 (aux resistance firing + compressor short-cycling on a hot day); turning off the HRV apparently fixed it. Confirm with a 3–6h `pi/hvac_probe.py` run during active cooling. Cold-weather suppression at #3.
 
 ## SPAN API
 
