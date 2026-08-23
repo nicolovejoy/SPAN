@@ -8,10 +8,10 @@
 //     fields: power_w_mean      — mean of abs(power_w) over the bucket
 //             energy_wh         — integral(unit: 1h) of abs(power_w), in Wh
 //             energy_wh_counter — increase in SPAN's own consumed_energy_wh
-//                                 meter across the bucket. Not read here yet;
-//                                 kept alongside energy_wh so the two can be
-//                                 A/B'd over real history before either is
-//                                 made authoritative.
+//                                 meter across the bucket. Authoritative for
+//                                 energy since #15 — this module sums it for
+//                                 rollup-backed windows; energy_wh is retained
+//                                 alongside it as a cross-check.
 //
 // Raw `circuit` is retained forever, so raw is always a valid fallback and the
 // rollups are a pure speed optimisation. Everything here is pure: the Flux
@@ -131,11 +131,12 @@ export const RAW_ENERGY_SOURCE: EnergySource = {
  *
  * Since #15 the summed field is `energy_wh_counter`, the delta of SPAN's own
  * cumulative meter, rather than `energy_wh`, the integral of our 30s samples.
- * The counter keeps ticking inside the panel whether or not we poll, so a
- * missed poll costs nothing; the integral interpolates across the gap and
- * invents energy that was never measured. `energy_wh` is still stored as a
- * cross-check. Short windows stay on the raw integral because the counter is
- * too coarse for fine buckets.
+ * Burst/impulse loads — the EV charger above all — pulse faster than our 30s
+ * poll, so many samples read ~0 even while real power flows; the integral
+ * under-counts that energy, which is why the counter reads ~0.7% higher on
+ * average. The counter is also immune to missed polls, a smaller effect.
+ * `energy_wh` is still stored as a cross-check. Short windows stay on the raw
+ * integral because the counter is too coarse for fine buckets.
  *
  * The 5m→1h boundary was originally 30d, but `circuit_5m` returns ~12x more
  * points per unit time than `circuit_1h` (18,144/day vs 1,512/day), so a 30d

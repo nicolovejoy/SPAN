@@ -45,11 +45,19 @@ raw `circuit`), `circuit_1h` is 1,512 pts/day (~0.6%).
 ### Which energy field to read
 
 **`energy_wh_counter` is authoritative for energy** (decided #15, 2026-08-21).
-It is the delta of SPAN's own cumulative `consumedEnergyWh`, which keeps ticking
-inside the panel whether or not the collector is listening — so a missed poll
-costs nothing. `energy_wh` is the integral of our 30s `power_w` samples, and
-InfluxDB interpolates a straight line across any gap, inventing energy that was
-never measured.
+`energy_wh` is the integral of our 30s `power_w` samples, and burst/impulse
+loads — the EV charger above all, also disposal/dishwasher/speed-oven/fireplace
+— draw real power in pulses shorter than the 30s poll, so many consecutive
+samples read ~0 even while the load draws real energy. The integral
+under-counts that energy; SPAN's own cumulative `consumedEnergyWh` meter
+counts it correctly. Empirically this is a persistent ~0.7% average
+under-count (stdev 1.7 points across 180 days of history), up to 11% on
+individual EV-charging days — confirmed via per-circuit tracing that ruled
+out counter resets as the cause. It is also immune to missed polls, since it
+keeps ticking inside the panel whether or not the collector is listening — but
+that turns out to be a secondary effect, not the dominant one: tested
+correlation between poll coverage and the integral/counter gap is r=0.11
+across 180 days, essentially none.
 
 `energy_wh` is still stored and is useful as a cross-check. Do not delete it.
 
@@ -208,8 +216,8 @@ Per-day over July, `circuit_5m` `energy_wh` tracks raw `integral()` within
 
 **The two energy estimates agree to within 0.4–0.6% over multi-day windows**,
 with the counter consistently the *higher* of the two — the expected direction,
-since the integral loses a sliver at every missed poll while SPAN's meter does
-not. Nothing here suggests either field is wrong.
+since the integral misses real energy from burst loads (like the EV charger)
+that pulse faster than our 30s poll. Nothing here suggests either field is wrong.
 
 The small negative bias of the rollups against their own raw baselines comes
 from missed collector polls: when the gap to the next sample exceeds 30s, the

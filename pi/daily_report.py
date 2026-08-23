@@ -80,7 +80,9 @@ def local_day_utc_range(d: date) -> tuple[datetime, datetime]:
 # The collector writes raw 30s `circuit`/`power_w`; InfluxDB tasks derive
 # `circuit_5m` / `circuit_1h`, each bucket carrying `energy_wh` (integral of
 # |power_w| over the bucket, in Wh), `energy_wh_counter` (delta of SPAN's own
-# cumulative meter — authoritative for energy since #15, immune to missed polls)
+# cumulative meter — authoritative for energy since #15: the 30s power integral
+# undercounts burst/impulse loads (EV charger above all) that pulse faster than
+# our poll cadence; the counter is also immune to missed polls, a smaller effect)
 # and `power_w_mean`. Summing energy_wh_counter costs
 # one row per bucket instead of 120 raw points per hour — that's the whole win.
 #
@@ -259,7 +261,8 @@ def _circuit_kwh_flux(src: str, start: str, stop: str, every: str | None,
     """Pipeline yielding circuit energy in kWh — one value per `every`-window, or
     one per series when `every` is None. Raw integrates 30s power exactly as
     before #9; a rollup just sums its precomputed energy_wh_counter — SPAN's own
-    meter delta, which is immune to missed polls (#15). `mode="mean"`
+    meter delta, which avoids the raw integral's under-count of pulse-fast burst
+    loads like the EV charger (#15). `mode="mean"`
     reproduces the mean-power-times-window form the hourly query has always used.
 
     Rollup rows are re-stamped to their bucket midpoint (and the range shifted to

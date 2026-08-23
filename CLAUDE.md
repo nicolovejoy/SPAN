@@ -98,7 +98,8 @@ subagent. The list below is near-term mechanics; the roadmap explains ordering a
   gap-free week. `web/` and `pi/daily_report.py` read them; containers rebuilt.
   - Fields: `power_w_mean`, `energy_wh` (integral), `energy_wh_counter` (SPAN's own
     meter delta). **`energy_wh_counter` is authoritative for energy since #15** — the
-    integral invents energy across missed polls, the counter cannot. `energy_wh` is
+    integral under-counts burst loads (EV charger) faster than our 30s poll, not
+    primarily a missed-poll issue as originally assumed. `energy_wh` is
     retained as a cross-check. Windows ≤48h still integrate raw; charts still read
     power. Contract: `pi/influx_tasks/README.md`.
   - Timestamps are **end-of-bucket** — a point at T covers `[T - bucket, T)`. Comparison queries
