@@ -134,10 +134,10 @@ subagent. The list below is near-term mechanics; the roadmap explains ordering a
   with `map({_time: r._value, _value: 1}) |> sum()` (the tempting `{r with _value: 1}` form
   silently returns zero rows). Deliberately not done: compose-project rename (orphans volumes,
   manual), TimescaleDB image tag pin (separate compose project). Post-merge verified: collector_poll
-  flowing, telemetry bucket populated, pi-health provisioned. **Open caveat:** every
-  `docker_container_mem` field reads 0 because the Pi boots with `cgroup_disable=memory`
-  (`/proc/cmdline`; `docker stats` shows `0B / 0B`) — fix is `cgroup_enable=memory cgroup_memory=1`
-  in `/boot/firmware/cmdline.txt` + reboot (Nico's call; brief full-stack outage). **Deploy
+  flowing, telemetry bucket populated, pi-health provisioned. ~~Open caveat~~ — container-memory stats read 0 (Pi 5 firmware injects
+  `cgroup_disable=memory`); fixed 2026-08-22 by appending `cgroup_enable=memory cgroup_memory=1` to
+  `/boot/firmware/cmdline.txt` (backup `cmdline.txt.bak-2026-08-22`) + reboot — `docker stats` now
+  reports real memory. **Deploy
   lessons:** the Pi checkout had been left on PR #19's branch (pull failed, old code rebuilt) — always
   `git checkout main && git pull --ff-only` there first; and `pi/Dockerfile` COPYs files explicitly,
   so any new `pi/*.py` module needs a COPY line (missed `collector_health.py` → ~3 min crash-loop).
