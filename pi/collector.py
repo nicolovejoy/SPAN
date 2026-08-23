@@ -75,6 +75,7 @@ def collect_and_write(http_client: httpx.Client, write_api) -> None:
         )
     except Exception as e:
         panel_err = classify_error(e)
+        logger.error(f"Panel processing failed (classified as {panel_err}): {e}")
     panel_ms = int((time.monotonic() - t0) * 1000)
 
     # Fetch circuit data
@@ -97,6 +98,7 @@ def collect_and_write(http_client: httpx.Client, write_api) -> None:
             )
     except Exception as e:
         circuits_err = classify_error(e)
+        logger.error(f"Circuits processing failed (classified as {circuits_err}): {e}")
     circuits_ms = int((time.monotonic() - t0) * 1000)
 
     # Write to InfluxDB
