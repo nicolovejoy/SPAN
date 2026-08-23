@@ -141,6 +141,20 @@ subagent. The list below is near-term mechanics; the roadmap explains ordering a
   lessons:** the Pi checkout had been left on PR #19's branch (pull failed, old code rebuilt) — always
   `git checkout main && git pull --ff-only` there first; and `pi/Dockerfile` COPYs files explicitly,
   so any new `pi/*.py` module needs a COPY line (missed `collector_health.py` → ~3 min crash-loop).
+- **~~#17 part 1 "Unmonitored (subpanel)" category~~ — DONE, deployed 2026-08-23 (commit d3bb6a0).**
+  `web/`'s breakdown table omitted the ~28% of consumption drawn by the Square D overflow subpanel
+  (Washer/Dryer/Garage/Attic/Bath/Recirc Pump/Pwdr Rm — `panel.feedthrough_power_w`, no per-circuit
+  sensor); `pi/daily_report.py`'s weekly email already had this via #19. Shipped as the simpler of
+  two designs: an "Unmonitored" row = `panel.grid_power_w` (integral) minus circuit totals, floored
+  at zero (`web/lib/energyWindow.ts` `unmonitoredKwh`, mirroring the Python side's
+  `unmonitored_week_kwh`) — **not** sourced from `feedthrough_power_w` directly, since the residual
+  reconciles to the bill by construction and reuses proven logic instead of new sign-handling Flux.
+  No rollup exists for `panel` (unlike `circuit` since #9); `queryPanelKwh` runs the same raw
+  integral pi/'s 98-day weekly fetch already does, fetched concurrently with the circuit segments.
+  Live-verified on span.pianohouseproject.org across 24h/30d/90d — reconciles exactly, ~11% share at
+  30d/90d (lower than the issue's 266W/28% snapshot, plausibly the recirc pump's 2026-04-09 unplug —
+  see Phase 4's open question below), no perf issues even at 90d raw. **#17 part 2** (dryer/washer
+  detection off `feedthrough_power_w`, which *does* need the sign/abs() handling) is next.
 - **Make bath + charge events explorable over time** — requested 2026-08-21. Their sections leave
   the email; the detectors keep writing. Probably belongs in `web/`, needs its own design.
 - **Dashboard access model** — decision pending (2026-08-13); candidate: signed-cookie unlock link in Next.js middleware. /api/health (observer endpoint, see prompt-lab uptime convention) must stay exempt.

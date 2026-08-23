@@ -74,8 +74,10 @@ Do these first because every later number inherits their accuracy, and because
 Garage, Attic, Bath, Recirc Pump, Pwdr Rm — at 30s back to January. It reconciles:
 grid 964 W = named circuits 681 W + feedthrough 266 W.
 
-- **#17 part 1** — add an "Unmonitored (subpanel)" category so totals match the bill.
-  Small, and fixes a correctness bug that has always been present.
+- **~~#17 part 1~~ — DONE, deployed 2026-08-23.** "Unmonitored" category added to both `web/` and
+  `pi/daily_report.py`'s breakdowns so totals reconcile to the bill. Shipped as a panel-residual
+  (`grid_power_w` integral minus circuits), not sourced from `feedthrough_power_w` directly — see
+  CLAUDE.md and issue #17 for why. Settles ~11% share live, not the 28% snapshot above.
 - **#12** — per-circuit drill-down. Cheap now that rollups exist; same query with
   `group(["name"])`.
 - **#17 part 2** — dryer detection off the feedthrough series (6.6 kW peaks against a
