@@ -4,6 +4,7 @@ import {
   computeDelta,
   mergeDrillRows,
   previousWindowRange,
+  unmonitoredKwh,
 } from "./energyWindow";
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -58,6 +59,20 @@ describe("computeDelta", () => {
 
   it("returns none when prevKwh is undefined", () => {
     expect(computeDelta(5, undefined)).toEqual({ kind: "none" });
+  });
+});
+
+describe("unmonitoredKwh", () => {
+  it("returns the panel total minus the circuit total", () => {
+    expect(unmonitoredKwh(100, 72)).toBe(28);
+  });
+
+  it("floors at zero when circuit total exceeds a noisy panel integral", () => {
+    expect(unmonitoredKwh(50, 60)).toBe(0);
+  });
+
+  it("returns zero when panel and circuits agree exactly", () => {
+    expect(unmonitoredKwh(40, 40)).toBe(0);
   });
 });
 

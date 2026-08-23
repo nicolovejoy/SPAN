@@ -2,6 +2,7 @@ import { InfluxDB } from "@influxdata/influxdb-client";
 import type { IntervalKey } from "./interval";
 import { fluxEvery } from "./interval";
 import { categoryFromNameFlux, nameMatchesCategoriesFlux } from "./categories";
+import { unmonitoredKwh } from "./energyWindow";
 import {
   RAW_ENERGY_SOURCE,
   energySourceForSpan,
@@ -303,6 +304,29 @@ from(bucket: "${BUCKET}")
 `;
 }
 
+/**
+ * Whole-house grid energy (kWh) over [fromMs, toMs), via integral(grid_power_w).
+ * No rollup exists for `panel` (unlike `circuit`, since #9) — this mirrors
+ * pi/daily_report.py's query_daily_panel_kwh, which already runs the same raw
+ * integral over windows up to 98 days in production without a perf problem.
+ * Feeds the "Unmonitored" breakdown row (#17); returns 0 if the window has
+ * no panel data rather than failing the whole breakdown.
+ */
+async function queryPanelKwh(fromMs: number, toMs: number): Promise<number> {
+  const flux = `
+from(bucket: "${BUCKET}")
+  |> range(start: ${fluxDate(fromMs)}, stop: ${fluxDate(toMs)})
+  |> filter(fn: (r) => r._measurement == "panel" and r._field == "grid_power_w")
+  |> filter(fn: (r) => exists r._value)
+  |> group(columns: ["_start", "_stop"])
+  |> integral(unit: 1h)
+`;
+  const rows = await makeClient()
+    .getQueryApi(ORG)
+    .collectRows<{ _value: number }>(flux);
+  return (rows[0]?._value ?? 0) / 1000.0;
+}
+
 async function runEnergyFlux(flux: string): Promise<EnergyRow[]> {
   const queryApi = makeClient().getQueryApi(ORG);
   const out: EnergyRow[] = [];
@@ -325,6 +349,11 @@ async function runEnergyFlux(flux: string): Promise<EnergyRow[]> {
  * Wide windows sum pre-computed `energy_wh_counter` from the rollups; the trailing
  * period the rollup task hasn't covered yet is integrated from raw, so a window
  * ending "now" reports today's energy in full rather than silently short.
+ *
+ * The category view (not a drill) also appends an "Unmonitored" row — the
+ * panel's own grid total minus every named circuit, which is the Square D
+ * overflow subpanel plus any metering slop (#17). Fetched concurrently with
+ * the circuit segments so it costs no extra latency.
  */
 export async function queryEnergyByCategory(opts: {
   fromMs: number;
@@ -344,21 +373,26 @@ export async function queryEnergyByCategory(opts: {
     bucketMs: src.mode === "sum" ? src.bucketMs : RAW_ENERGY_SOURCE.bucketMs,
   });
 
-  const parts = await Promise.all(
-    segments.map(async (seg) => {
-      if (seg.kind === "raw") return runEnergyFlux(rawEnergyFlux(seg, g));
-      const rows = await runEnergyFlux(rollupEnergyFlux(seg, src, g));
-      if (needsRawFallback(rows.length)) return runEnergyFlux(rawEnergyFlux(seg, g));
-      return rows;
-    }),
-  );
+  const [parts, panelKwh] = await Promise.all([
+    Promise.all(
+      segments.map(async (seg) => {
+        if (seg.kind === "raw") return runEnergyFlux(rawEnergyFlux(seg, g));
+        const rows = await runEnergyFlux(rollupEnergyFlux(seg, src, g));
+        if (needsRawFallback(rows.length)) return runEnergyFlux(rawEnergyFlux(seg, g));
+        return rows;
+      }),
+    ),
+    g.kind === "circuit" ? Promise.resolve(0) : queryPanelKwh(fromMs, toMs),
+  ]);
 
   const merged = mergeEnergyRows(parts.flat());
   // Drilled rows carry their parent so the table can nest them without
   // re-deriving membership client-side.
-  return g.kind === "circuit"
-    ? merged.map((r) => ({ ...r, parent: g.category }))
-    : merged;
+  if (g.kind === "circuit") {
+    return merged.map((r) => ({ ...r, parent: g.category }));
+  }
+  const circuitKwh = merged.reduce((sum, r) => sum + r.kwh, 0);
+  return [...merged, { category: "Unmonitored", kwh: unmonitoredKwh(panelKwh, circuitKwh) }];
 }
 
 /** Segments partition the window, so per-series totals add. */

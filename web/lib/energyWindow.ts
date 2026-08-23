@@ -14,6 +14,18 @@ export function previousWindowRange(
 }
 
 /**
+ * Panel total minus circuit total — the energy the panel meters but no named
+ * circuit does (the Square D overflow subpanel, plus any metering slop; see
+ * #17). Floored at zero: circuit-level counter totals can occasionally exceed
+ * a noisy panel integral over a short window, and a negative "unmonitored"
+ * number is never meaningful. Mirrors pi/daily_report.py's
+ * unmonitored_week_kwh so the email and the dashboard agree on the method.
+ */
+export function unmonitoredKwh(panelKwh: number, circuitKwh: number): number {
+  return Math.max(0, panelKwh - circuitKwh);
+}
+
+/**
  * Combine current-window rows with the previous window's per-category kWh and
  * the window length (needed downstream to prorate the base charge). Additive
  * to EnergyRow — categories present now but absent previously get prevKwh: 0
