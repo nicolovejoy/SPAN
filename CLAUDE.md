@@ -91,27 +91,30 @@ GitHub pushes via the Vercel Git integration. Pi-hosted as a Docker service
 subagent. The list below is near-term mechanics; the roadmap explains ordering and why.
 
 - **~~Manifest CORS~~ — resolved by the 2026-08-13 re-home to Vercel.** The premise (`/manifest.webmanifest` gated by CF Access on the Pi-hosted dashboard) no longer applies to the new topology. Previously: decided 2026-05-24 to live with the credential-less manifest fetch hitting the CF Access login redirect (cosmetic console error).
-- **Weekly energy report + anomaly email** — code DONE 2026-08-22, **PR #19 open against main, not yet
-  merged**. Built on branch `worktree-weekly-energy-report` via 11-task subagent-driven plan
-  (`docs/superpowers/plans/2026-08-22-weekly-energy-report.md`) + a final whole-branch review that caught
-  and fixed 4 real bugs (garbage "inf%" anomaly subject on a zero baseline, week- vs day-scoped "driven by"
-  circuits, an off-by-one-bucket coverage-guard window, and the untested alert-send path all four lived in).
-  80/80 tests pass. **Before merging:** no Flux query has run against real InfluxDB and no chart has been
-  drawn by real matplotlib — run `docker compose run --rm daily-report python daily_report.py --date <past
-  Monday>` and `--anomaly-date <past date>` against the Pi (sends real test emails) before rebuilding the
-  live container. Weekly briefing Mondays 07:00 (headline, week-by-day chart, 12-week trend, usage table
-  with Unmonitored row, HVAC block); daily anomaly check at 07:00, silent unless a category's median/MAD
-  baseline is exceeded. Suppression state in `/app/state/anomaly_state.json` on the `report-state` volume.
-  Retired: the nine-section daily email, the aux-heat alarm, `pi/rates.py`'s already-flat cost model needed
-  no change. Left in place but now unreferenced by the report: the #9 raw/rollup segment router in
-  `daily_report.py` (`_run_segments` and friends), `query_total_kwh` (a standalone helper), and
-  `_delta_arrow` — candidates for a future cleanup pass if nothing else picks them up.
-- **#15 `energy_wh_counter`** — Task 1 (evaluation) done; consumer switch not started, on branch
-  `worktree-energy-counter-authoritative`. Independent cleanup, **not** a prerequisite for the
-  report (weekly stdev between the two fields is 0.25pp). Plan at
-  `docs/superpowers/plans/2026-08-21-energy-counter-authoritative.md` — read its STATUS block
-  first; #15's own stated rationale (missed polls) is wrong, the real mechanism is burst-load
-  aliasing against the 30s poll.
+- **~~Weekly energy report + anomaly email~~ — DONE, merged 2026-08-22 (PR #19).** Manually verified
+  against real InfluxDB/matplotlib on the Pi before rebuild. Weekly briefing Mondays 07:00 (headline,
+  week-by-day chart, 12-week trend, usage table with Unmonitored row, HVAC block); daily anomaly check
+  at 07:00, silent unless a category's median/MAD baseline is exceeded. Suppression state in
+  `/app/state/anomaly_state.json` on the `report-state` volume. Retired: the nine-section daily email,
+  the aux-heat alarm.
+- **~~#15 `energy_wh_counter`~~ — DONE, merged 2026-08-22 (PR #20).** Both consumers
+  (`pi/daily_report.py`, `web/lib/rollup.ts`) now sum `energy_wh_counter` for rollup-backed energy
+  totals; `energy_wh` retained as a cross-check. Real justification (confirmed by per-circuit tracing,
+  not #15's original hypothesis): the integral under-counts burst/impulse loads — chiefly the EV
+  charger — that pulse faster than the 30s poll; missed-poll correlation tested at r=0.11, essentially
+  none. Day-level bucketing of the counter must stay Pacific-aligned (UTC midnight = 17:00 Pacific =
+  mid-EV-charging) or it manufactures spurious day-over-day swings; this mostly cancels at week/month
+  scale (0.25pp / 0.14pp stdev). **Not yet done:** post-merge dashboard check — load
+  https://span.pianohouseproject.org, 30d preset, confirm non-zero kWh across every category. **Dead
+  code note:** Task 2's edit landed in `_circuit_kwh_flux()`/`_run_segments()` — the #9 segment router —
+  which PR #19 (merged first) already made unreferenced by the shipped report. Folds into the cleanup
+  candidate below rather than being a live risk.
+- **#9 segment-router cleanup candidate** — `daily_report.py`'s `_run_segments` and friends,
+  `query_total_kwh`, `_delta_arrow` are unreferenced by the shipped report (superseded by the weekly
+  report's own query layer). Candidate for a future cleanup pass if nothing else picks them up first.
+- **#16 Pi observability** (collector reliability + backup/service health) — next per
+  `docs/roadmap.md` Phase 1. No plan written yet; needs a brainstorming/planning pass before
+  subagent-driven execution.
 - **Make bath + charge events explorable over time** — requested 2026-08-21. Their sections leave
   the email; the detectors keep writing. Probably belongs in `web/`, needs its own design.
 - **Dashboard access model** — decision pending (2026-08-13); candidate: signed-cookie unlock link in Next.js middleware. /api/health (observer endpoint, see prompt-lab uptime convention) must stay exempt.
