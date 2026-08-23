@@ -19,6 +19,7 @@ import httpx
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.ticker
 from influxdb_client import InfluxDBClient
 
 from rates import ENERGY_RATE, BASE_CHARGE_DAILY
@@ -703,6 +704,19 @@ def display_bucket(name: str) -> str:
     return default
 
 
+def _add_cost_axis(ax, label: str) -> None:
+    """Add a secondary $ y-axis mirroring `ax`'s primary kWh axis, using the
+    flat SCL rate (energy-only, no base charge). Call after the primary
+    axis's data/margins are final so the twin's limits line up. Only calls
+    methods on `ax` — matplotlib-agnostic, so a plain mock works in tests."""
+    lo, hi = ax.get_ylim()
+    ax2 = ax.twinx()
+    ax2.set_ylim(lo * ENERGY_RATE, hi * ENERGY_RATE)
+    ax2.set_ylabel(label)
+    ax2.yaxis.set_major_formatter(matplotlib.ticker.StrMethodFormatter("${x:,.2f}"))
+    ax2.grid(False)
+
+
 def _fig_to_b64(fig) -> str:
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches="tight")
@@ -812,6 +826,7 @@ def render_week_by_day_chart(ctx: WeeklyContext) -> str:
     ax.set_ylabel("kWh")
     ax.grid(True, alpha=0.3, axis="y")
     ax.legend(loc="upper left", fontsize=8, ncol=3)
+    _add_cost_axis(ax, "$")
     fig.autofmt_xdate()
     fig.tight_layout()
     b64 = _fig_to_b64(fig)
@@ -836,6 +851,7 @@ def render_12wk_trend_chart(ctx: WeeklyContext) -> str:
     ax.set_ylabel("kWh / week")
     ax.grid(True, alpha=0.3, axis="y")
     ax.legend(loc="upper left", fontsize=8, ncol=3)
+    _add_cost_axis(ax, "$ / week")
     fig.tight_layout()
     b64 = _fig_to_b64(fig)
     return f'<h3>12-week trend</h3>\n{_chart_img(b64, "12-week trend by category")}'
@@ -905,6 +921,7 @@ def render_hvac_block(ctx: WeeklyContext) -> str:
     ax.bar(labels, hvac_by_day, width=0.6, color=CATEGORY_COLORS["HVAC"])
     ax.set_ylabel("kWh")
     ax.grid(True, alpha=0.3, axis="y")
+    _add_cost_axis(ax, "$")
     fig.tight_layout()
     b64 = _fig_to_b64(fig)
 

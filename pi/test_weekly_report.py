@@ -28,7 +28,21 @@ if "matplotlib" not in sys.modules:
         attribute access returns a callable that accepts any args and does
         nothing, so chart-rendering code can run without a real matplotlib
         backend. Charts themselves are manual-verify (see the plan); these
-        tests only need the rendering code path not to crash."""
+        tests only need the rendering code path not to crash.
+
+        get_ylim/twinx are special-cased so _add_cost_axis's real logic
+        (get_ylim -> twinx -> set_ylim) runs against something tuple- and
+        attribute-shaped instead of the generic None-returning lambda."""
+        def get_ylim(self, *a, **k):
+            return (0.0, 1.0)
+
+        def twinx(self, *a, **k):
+            return _FakeMplObject()
+
+        @property
+        def yaxis(self):
+            return _FakeMplObject()
+
         def __getattr__(self, name):
             return lambda *a, **k: None
 
@@ -37,6 +51,11 @@ if "matplotlib" not in sys.modules:
     _plt.close = lambda *a, **k: None
     sys.modules["matplotlib.pyplot"] = _plt
     sys.modules["matplotlib.dates"] = types.ModuleType("matplotlib.dates")
+
+    _mpl_ticker = types.ModuleType("matplotlib.ticker")
+    _mpl_ticker.StrMethodFormatter = lambda *a, **k: None
+    _mpl.ticker = _mpl_ticker
+    sys.modules["matplotlib.ticker"] = _mpl_ticker
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
 import daily_report as dr   # noqa: E402
@@ -305,6 +324,19 @@ class HvacBlockTest(unittest.TestCase):
         )
         html = dr.render_hvac_block(ctx)
         self.assertIn("HVAC", html)
+
+
+class CostAxisTest(unittest.TestCase):
+    def test_add_cost_axis_sets_twin_ylim_and_label(self):
+        ax = mock.MagicMock()
+        ax.get_ylim.return_value = (0, 40)
+        ax2 = mock.MagicMock()
+        ax.twinx.return_value = ax2
+
+        dr._add_cost_axis(ax, "$ / week")
+
+        ax2.set_ylim.assert_called_once_with(0 * dr.ENERGY_RATE, 40 * dr.ENERGY_RATE)
+        ax2.set_ylabel.assert_called_once_with("$ / week")
 
 
 class AnomalyCheckTest(unittest.TestCase):
