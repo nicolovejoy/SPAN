@@ -10,6 +10,8 @@ import httpx
 from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.write_api import SYNCHRONOUS
 
+from collector_health import classify_error
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
@@ -29,8 +31,8 @@ INFLUXDB_BUCKET = os.getenv("INFLUXDB_BUCKET", "span")
 SPAN_BASE_URL = f"http://{SPAN_PANEL_IP}/api/v1"
 
 
-def fetch_panel_data(client: httpx.Client) -> dict | None:
-    """Fetch panel-level data."""
+def fetch_panel_data(client: httpx.Client) -> dict:
+    """Fetch panel-level data. Raises on failure."""
     try:
         headers = {"Authorization": f"Bearer {SPAN_TOKEN}"}
         response = client.get(f"{SPAN_BASE_URL}/panel", headers=headers)
@@ -38,11 +40,11 @@ def fetch_panel_data(client: httpx.Client) -> dict | None:
         return response.json()
     except Exception as e:
         logger.error(f"Failed to fetch panel data: {e}")
-        return None
+        raise
 
 
-def fetch_circuits(client: httpx.Client) -> dict | None:
-    """Fetch circuit data."""
+def fetch_circuits(client: httpx.Client) -> dict:
+    """Fetch circuit data. Raises on failure."""
     try:
         headers = {"Authorization": f"Bearer {SPAN_TOKEN}"}
         response = client.get(f"{SPAN_BASE_URL}/circuits", headers=headers)
@@ -50,7 +52,7 @@ def fetch_circuits(client: httpx.Client) -> dict | None:
         return response.json()
     except Exception as e:
         logger.error(f"Failed to fetch circuits: {e}")
-        return None
+        raise
 
 
 def collect_and_write(http_client: httpx.Client, write_api) -> None:
@@ -59,8 +61,10 @@ def collect_and_write(http_client: httpx.Client, write_api) -> None:
     points = []
 
     # Fetch panel data
-    panel_data = fetch_panel_data(http_client)
-    if panel_data:
+    t0 = time.monotonic()
+    panel_err = None
+    try:
+        panel_data = fetch_panel_data(http_client)
         points.append(
             Point("panel")
             .field("grid_power_w", panel_data.get("instantGridPowerW", 0))
@@ -69,10 +73,16 @@ def collect_and_write(http_client: httpx.Client, write_api) -> None:
             .field("produced_energy_wh", panel_data.get("mainMeterEnergy", {}).get("producedEnergyWh", 0))
             .time(now)
         )
+    except Exception as e:
+        panel_err = classify_error(e)
+        logger.error(f"Panel processing failed (classified as {panel_err}): {e}")
+    panel_ms = int((time.monotonic() - t0) * 1000)
 
     # Fetch circuit data
-    circuits_data = fetch_circuits(http_client)
-    if circuits_data:
+    t0 = time.monotonic()
+    circuits_err = None
+    try:
+        circuits_data = fetch_circuits(http_client)
         circuits = circuits_data.get("circuits", {})
         for circuit_id, circuit in circuits.items():
             name = circuit.get("name", "Unknown")
@@ -86,14 +96,49 @@ def collect_and_write(http_client: httpx.Client, write_api) -> None:
                 .field("relay_state", 1 if circuit.get("relayState") == "CLOSED" else 0)
                 .time(now)
             )
+    except Exception as e:
+        circuits_err = classify_error(e)
+        logger.error(f"Circuits processing failed (classified as {circuits_err}): {e}")
+    circuits_ms = int((time.monotonic() - t0) * 1000)
 
     # Write to InfluxDB
+    write_failed = False
     if points:
         try:
             write_api.write(bucket=INFLUXDB_BUCKET, org=INFLUXDB_ORG, record=points)
             logger.info(f"Wrote {len(points)} points to InfluxDB")
         except Exception as e:
             logger.error(f"Failed to write to InfluxDB: {e}")
+            write_failed = True
+
+    # Emit a collector_poll point summarizing this iteration. Best-effort:
+    # never let a failure here take down the poll loop.
+    try:
+        if write_failed:
+            result = "write_fail"
+        elif panel_err and circuits_err:
+            result = "both_fail"
+        elif panel_err:
+            result = "panel_fail"
+        elif circuits_err:
+            result = "circuits_fail"
+        else:
+            result = "ok"
+        error = circuits_err or panel_err or "none"
+
+        poll_point = (
+            Point("collector_poll")
+            .tag("host", "phrpi")
+            .tag("result", result)
+            .tag("error", error)
+            .field("panel_ms", panel_ms)
+            .field("circuits_ms", circuits_ms)
+            .field("points", len(points))
+            .time(now)
+        )
+        write_api.write(bucket=INFLUXDB_BUCKET, org=INFLUXDB_ORG, record=poll_point)
+    except Exception as e:
+        logger.error(f"Failed to write collector_poll point: {e}")
 
 
 def main():

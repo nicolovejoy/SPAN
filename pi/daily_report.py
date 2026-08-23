@@ -23,6 +23,7 @@ from influxdb_client import InfluxDBClient
 
 from rates import ENERGY_RATE, BASE_CHARGE_DAILY
 import report_baseline as rb
+import collector_health as ch
 
 logging.basicConfig(
     level=logging.INFO,
@@ -745,7 +746,12 @@ table.summary th:first-child, table.summary td:first-child { text-align: left; }
 
 
 def send_email(html: str, subject: str):
-    """Send report email via Resend API."""
+    """Send report email via Resend API. DRY_RUN=1 logs instead of sending —
+    used for read-only dry-runs against real data (#16 gap check) and is
+    useful permanently for any manual on-demand run."""
+    if os.getenv("DRY_RUN", "0").lower() not in ("0", "false", "no"):
+        logger.info(f"DRY_RUN: would send '{subject}' ({len(html)} chars html)")
+        return
     resp = httpx.post(
         "https://api.resend.com/emails",
         headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
@@ -942,7 +948,18 @@ def _day_coverage_flux(target_date: date) -> str:
     """circuit_1h is stop-stamped — a bucket at time T covers [T-1h, T) — so the
     query range must be shifted forward by one bucket period (same shift
     _counter_kwh_flux applies) for the 24 stamps counted here to actually cover
-    [local midnight, local midnight+1d) for `target_date`."""
+    [local midnight, local midnight+1d) for `target_date`.
+
+    `distinct(column: "_time") |> count()` errors in real Influx ("count:
+    unsupported aggregate column type time") -- map each distinct time to a
+    plain int 1 and sum those instead (#16 Task 3b). `distinct(column:
+    "_time")` also drops the `_time` column itself (the distinct values land
+    in `_value`, time-typed), so the map must restore `_time` explicitly
+    (`_time: r._value`) -- verified against real data: `{r with _value: 1}`
+    (which relies on `_time` still being present) silently produced zero
+    output rows for this measurement/field, even though the same pattern
+    happened to work for status.sh's circuit/power_w query. Restoring `_time`
+    explicitly is correct and non-empty in both cases."""
     period = ROLLUP_PERIOD[MEAS_1H]
     start, stop = local_day_utc_range(target_date)
     rng_start, rng_stop = _shift_ts(flux_ts(start), period), _shift_ts(flux_ts(stop), period)
@@ -953,7 +970,9 @@ from(bucket: "{INFLUXDB_BUCKET}")
   |> filter(fn: (r) => exists r._value)
   |> group()
   |> distinct(column: "_time")
-  |> count()
+  |> map(fn: (r) => ({{_time: r._value, _value: 1}}))
+  |> group()
+  |> sum()
 '''
 
 
@@ -1047,6 +1066,120 @@ def generate_anomaly_check(client: InfluxDBClient, target_date: date):
     send_email(html, subject)
 
 
+# ---------- Task 3: daily data-gap check (#16) ----------
+#
+# Independent of the anomaly check above: this measures the collector's own
+# polling coverage (did it poll every 30s?) rather than energy values. Reads
+# raw `circuit`/`power_w` timestamps directly -- never the rollups, which
+# smooth over exactly the gaps this is trying to catch -- plus the
+# `collector_poll` measurement (#16 Task 2) for a per-error-type breakdown.
+# `collector_poll` may have no rows at all before that deploy; every query
+# here degrades gracefully to "no data" rather than raising.
+
+
+def _poll_timestamps_flux(start: str, stop: str) -> str:
+    return f'''
+from(bucket: "{INFLUXDB_BUCKET}")
+  |> range(start: {start}, stop: {stop})
+  |> filter(fn: (r) => r._measurement == "{MEAS_RAW}" and r._field == "power_w")
+  |> group()
+  |> distinct(column: "_time")
+'''
+
+
+def query_poll_timestamps(query_api, start: str, stop: str) -> list[datetime]:
+    """One timestamp per collector iteration in [start, stop), deduped across
+    circuits -- circuit-agnostic so a single circuit's own dropout doesn't
+    read as a collector-wide gap. `distinct(column: "_time")` moves the
+    distinct timestamps into `_value` (and drops the `_time` column itself),
+    so the values -- not get_time() -- carry the timestamps here."""
+    out: list[datetime] = []
+    for table in query_api.query(_poll_timestamps_flux(start, stop), org=INFLUXDB_ORG):
+        for rec in table.records:
+            out.append(rec.get_value())
+    return out
+
+
+def _poll_failures_flux(start: str, stop: str) -> str:
+    return f'''
+from(bucket: "{INFLUXDB_BUCKET}")
+  |> range(start: {start}, stop: {stop})
+  |> filter(fn: (r) => r._measurement == "collector_poll" and r._field == "points")
+  |> filter(fn: (r) => r.result != "ok")
+  |> group(columns: ["error"])
+  |> count()
+'''
+
+
+def query_poll_failures(query_api, start: str, stop: str) -> dict[str, int]:
+    """{error_tag: count} for [start, stop). Empty when collector_poll has no
+    data yet (pre-#16 deploy) or the day had zero non-ok polls."""
+    out: dict[str, int] = {}
+    for table in query_api.query(_poll_failures_flux(start, stop), org=INFLUXDB_ORG):
+        for rec in table.records:
+            error = rec.values.get("error", "unknown")
+            out[error] = out.get(error, 0) + int(rec.get_value() or 0)
+    return out
+
+
+def _fmt_duration(seconds: int) -> str:
+    """10200 -> '2h50m', 60 -> '1m' -- used in both the alert subject and the
+    always-on log line."""
+    total_min = round(seconds / 60)
+    h, m = divmod(total_min, 60)
+    return f"{h}h{m}m" if h else f"{m}m"
+
+
+def render_gap_email(target_date: date, stats: ch.GapStats,
+                     breakdown: dict[str, int]) -> tuple[str, str]:
+    """(subject, html) for a daily poll-coverage gap alert. Subject carries
+    the whole message; the "longest gap" clause is omitted for a
+    scattered-loss day with no single gap >= 5 min (longest_gap_s < 300)."""
+    missed = stats.expected - stats.present
+    pct = (missed / stats.expected * 100.0) if stats.expected else 0.0
+    subject = f"⚠️ Collector missed {missed} polls yesterday ({pct:.1f}%)"
+
+    gap_line = ""
+    if stats.longest_gap_s >= 300 and stats.longest_gap_start is not None:
+        gap_start_local = stats.longest_gap_start.astimezone(LOCAL_TZ).strftime("%H:%M")
+        subject += f" — longest gap {_fmt_duration(stats.longest_gap_s)} from {gap_start_local}"
+        gap_line = (f'<p>Longest gap: {_fmt_duration(stats.longest_gap_s)}, '
+                   f'starting {gap_start_local} Pacific.</p>')
+
+    if breakdown:
+        breakdown_line = ", ".join(
+            f"{err}: {n}" for err, n in sorted(breakdown.items(), key=lambda kv: -kv[1]))
+    else:
+        breakdown_line = "no collector_poll data for this day (pre-#16 deploy?)"
+
+    html = f'''<!DOCTYPE html>
+<html><head><style>{CSS}</style></head>
+<body>
+<h2>Collector gap &mdash; {target_date.strftime("%A, %B %-d")}</h2>
+<p>{stats.present} of {stats.expected} expected polls present ({stats.coverage:.1%} coverage).</p>
+{gap_line}
+<p>Breakdown: {breakdown_line}</p>
+</body></html>'''
+    return subject, html
+
+
+def generate_gap_check(client: InfluxDBClient, target_date: date):
+    """Runs daily for `target_date` (the previous local day). Sends nothing
+    unless ch.gap_alert_needed() says the coverage or longest-gap threshold
+    was crossed."""
+    query_api = client.query_api()
+    start, stop = local_day_utc_range(target_date)
+    timestamps = query_poll_timestamps(query_api, flux_ts(start), flux_ts(stop))
+    stats = ch.gap_stats(timestamps, start, stop)
+    logger.info(f"{target_date}: coverage {stats.coverage:.1%}, "
+               f"longest gap {_fmt_duration(stats.longest_gap_s)}")
+    if not ch.gap_alert_needed(stats):
+        return
+    breakdown = query_poll_failures(query_api, flux_ts(start), flux_ts(stop))
+    subject, html = render_gap_email(target_date, stats, breakdown)
+    send_email(html, subject)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Weekly energy report + daily anomaly check")
     parser.add_argument("--loop", action="store_true",
@@ -1057,6 +1190,9 @@ def main():
                             "(YYYY-MM-DD) — on-demand test send")
     parser.add_argument("--anomaly-date", type=str,
                        help="Run the anomaly check for this date (YYYY-MM-DD) — on-demand test")
+    parser.add_argument("--gap-date", type=str,
+                       help="Run the collector data-gap check for this date (YYYY-MM-DD) — "
+                            "on-demand test")
     args = parser.parse_args()
 
     for var, name in [(INFLUXDB_TOKEN, "INFLUXDB_TOKEN"), (RESEND_API_KEY, "RESEND_API_KEY"),
@@ -1075,6 +1211,10 @@ def main():
         target = datetime.strptime(args.anomaly_date, "%Y-%m-%d").date()
         logger.info(f"Running anomaly check for {args.anomaly_date}")
         generate_anomaly_check(client, target)
+    elif args.gap_date:
+        target = datetime.strptime(args.gap_date, "%Y-%m-%d").date()
+        logger.info(f"Running data-gap check for {args.gap_date}")
+        generate_gap_check(client, target)
     elif args.loop:
         logger.info(f"Loop mode: anomaly check daily, weekly briefing Mondays, at {REPORT_HOUR}:00")
         while True:
@@ -1086,6 +1226,10 @@ def main():
                 generate_anomaly_check(client, yesterday)
             except Exception as e:
                 logger.error(f"Anomaly check failed: {e}")
+            try:
+                generate_gap_check(client, yesterday)
+            except Exception as e:
+                logger.error(f"Gap check failed: {e}")
             if datetime.now().weekday() == 0:   # Monday: yesterday closed last week
                 try:
                     generate_weekly_report(client, local_week_start(yesterday))

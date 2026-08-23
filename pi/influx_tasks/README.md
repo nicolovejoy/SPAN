@@ -1,3 +1,46 @@
+# Operational measurements
+
+## `collector_poll` — per-poll collector health (`span` bucket)
+
+Written by `collector.py`, one point per 30s iteration, best-effort (a write
+failure here never blocks the panel/circuit write). Same timestamp as that
+iteration's data points.
+
+| | |
+|---|---|
+| Tags | `host`; `result` ∈ `ok`, `panel_fail`, `circuits_fail`, `both_fail`, `write_fail`; `error` ∈ `none`, `timeout`, `connect`, `http_4xx`, `http_5xx`, `decode`, `other` |
+| Field `panel_ms` | int — panel API call duration |
+| Field `circuits_ms` | int — circuits API call duration |
+| Field `points` | int — number of data points written this iteration |
+
+Tags are a closed enum, never a raw error message — cardinality stays fixed
+regardless of what the panel throws. Query `result != "ok"` grouped by
+`error` for a failure breakdown; `collector_health.py` (pure, no I/O) owns
+the gap/coverage math and error classification, with thresholds
+`GAP_COVERAGE_MIN` (0.98) / `GAP_LONGEST_MIN_S` (1800s) overridable via env.
+`daily_report.py`'s 07:00 data-gap email and `status.sh`'s coverage line both
+read raw poll presence over `circuit` (not `panel`, and not this measurement
+directly). **Known limitation:** a streak of `panel_fail` iterations with
+circuits still succeeding shows as 100% coverage and raises no gap alert — it
+is only visible in this measurement's `error` breakdown.
+
+**Flux trap:** `distinct(column: "_time") |> count()` errors in real Influx
+("count: unsupported aggregate column type time") rather than counting
+distinct timestamps. The fix is `map(fn: (r) => ({_time: r._value, _value:
+1})) |> sum()` — and note the map must restore `_time` explicitly
+(`{r with _value: 1}` looks equivalent but silently returns zero rows for
+this measurement/field, verified against real data). This bit the daily
+anomaly check's `circuit_1h` coverage gate for a full day (crashing silently
+every morning since PR #19) before being caught and fixed (#16).
+
+## `telemetry` bucket — host + container metrics
+
+Separate bucket, 30d retention, written by `telegraf` (`pi/telegraf.conf`, #16
+Task 5) — host CPU/mem/disk/load/temp plus per-container CPU/mem via the
+Docker input. Kept out of the infinite-retention `span` bucket since it's
+operational data, not panel telemetry. Consumed by the `pi-health` Grafana
+dashboard (`pi/grafana/provisioning/dashboards/pi-health.json`).
+
 # Circuit rollups — `circuit_5m` / `circuit_1h`
 
 Pre-aggregated downsamples of the raw `circuit` measurement, so the power
