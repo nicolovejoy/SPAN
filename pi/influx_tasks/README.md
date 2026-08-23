@@ -19,7 +19,10 @@ regardless of what the panel throws. Query `result != "ok"` grouped by
 the gap/coverage math and error classification, with thresholds
 `GAP_COVERAGE_MIN` (0.98) / `GAP_LONGEST_MIN_S` (1800s) overridable via env.
 `daily_report.py`'s 07:00 data-gap email and `status.sh`'s coverage line both
-read raw poll presence over `circuit`/`panel`, not this measurement directly.
+read raw poll presence over `circuit` (not `panel`, and not this measurement
+directly). **Known limitation:** a streak of `panel_fail` iterations with
+circuits still succeeding shows as 100% coverage and raises no gap alert — it
+is only visible in this measurement's `error` breakdown.
 
 **Flux trap:** `distinct(column: "_time") |> count()` errors in real Influx
 ("count: unsupported aggregate column type time") rather than counting
