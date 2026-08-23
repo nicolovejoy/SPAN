@@ -11,8 +11,13 @@ from datetime import datetime, timedelta, timezone
 # import daily_report.py without the real dependency. That stub lacks the
 # real exception classes this module needs -- drop it so we get the real
 # package, which is actually installed (it's a collector dependency).
+# daily_report.py (#16) now imports collector_health itself, so a prior
+# import of it under that stub also leaves a stale collector_health module
+# in sys.modules whose own `httpx` reference is the stub -- drop that too so
+# this module gets a fresh import bound to the real package.
 if "httpx" in sys.modules and not hasattr(sys.modules["httpx"], "TimeoutException"):
     del sys.modules["httpx"]
+    sys.modules.pop("collector_health", None)
 
 import httpx
 

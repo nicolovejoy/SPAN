@@ -5,6 +5,7 @@
 Stubs runtime deps the same way test_daily_report_rollups.py does — nothing here
 touches InfluxDB.
 """
+import os
 import sys
 import types
 import unittest
@@ -39,6 +40,7 @@ if "matplotlib" not in sys.modules:
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
 import daily_report as dr   # noqa: E402
+import collector_health as ch   # noqa: E402
 
 UTC = timezone.utc
 
@@ -402,6 +404,105 @@ class AnomalyCheckTest(unittest.TestCase):
         self.assertIn("Heat pump (40.0 kWh)", html)
         self.assertNotIn("500.0", html)
         self.assertNotIn("540.0", html)
+
+
+class SendEmailDryRunTest(unittest.TestCase):
+    def test_dry_run_logs_and_skips_resend(self):
+        # httpx is a bare stub module in this test file (no `post` attribute) --
+        # if the DRY_RUN guard didn't short-circuit, this would raise
+        # AttributeError, so a clean return is itself proof the guard fired.
+        with mock.patch.dict(os.environ, {"DRY_RUN": "1"}):
+            with self.assertLogs(dr.logger, level="INFO") as cm:
+                dr.send_email("<html></html>", "a subject")
+        self.assertTrue(any("DRY_RUN" in line and "a subject" in line for line in cm.output))
+
+
+class GapEmailTest(unittest.TestCase):
+    def test_subject_includes_gap_clause_for_a_long_gap(self):
+        stats = ch.GapStats(
+            present=2540, expected=2880, coverage=2540 / 2880,
+            longest_gap_s=10200,
+            longest_gap_start=datetime(2026, 7, 30, 12, 50, tzinfo=timezone.utc),
+            gaps_over_5m=1,
+        )
+        subject, _ = dr.render_gap_email(date(2026, 7, 30), stats, {})
+        self.assertEqual(
+            subject,
+            "⚠️ Collector missed 340 polls yesterday (11.8%) — longest gap 2h50m from 05:50",
+        )
+
+    def test_subject_omits_gap_clause_for_scattered_loss(self):
+        stats = ch.GapStats(
+            present=2822, expected=2880, coverage=2822 / 2880,
+            longest_gap_s=90,
+            longest_gap_start=datetime(2026, 8, 21, 3, 0, tzinfo=timezone.utc),
+            gaps_over_5m=0,
+        )
+        subject, _ = dr.render_gap_email(date(2026, 8, 21), stats, {})
+        self.assertEqual(subject, "⚠️ Collector missed 58 polls yesterday (2.0%)")
+
+    def test_html_lists_present_expected_and_breakdown_when_present(self):
+        stats = ch.GapStats(
+            present=2540, expected=2880, coverage=2540 / 2880,
+            longest_gap_s=10200,
+            longest_gap_start=datetime(2026, 7, 30, 12, 50, tzinfo=timezone.utc),
+            gaps_over_5m=1,
+        )
+        _, html = dr.render_gap_email(date(2026, 7, 30), stats, {"timeout": 40, "connect": 12})
+        self.assertIn("2540", html)
+        self.assertIn("2880", html)
+        self.assertIn("timeout: 40", html)
+        self.assertIn("connect: 12", html)
+
+    def test_html_notes_missing_collector_poll_data_when_breakdown_empty(self):
+        stats = ch.GapStats(
+            present=2822, expected=2880, coverage=2822 / 2880,
+            longest_gap_s=90, longest_gap_start=None, gaps_over_5m=0,
+        )
+        _, html = dr.render_gap_email(date(2026, 8, 21), stats, {})
+        self.assertIn("no collector_poll data for this day (pre-#16 deploy?)", html)
+
+
+class QueryPollTimestampsTest(unittest.TestCase):
+    def test_reads_timestamps_from_value_not_time(self):
+        # distinct(column: "_time") moves the distinct timestamps into
+        # `_value` and drops the `_time` column -- get_time() KeyErrors
+        # against real Influx (caught in the Step 5 dry-run on the Pi).
+        ts = datetime(2026, 7, 30, 12, 50, tzinfo=timezone.utc)
+        tables = [FakeTable([FakeRecord(None, ts, {})])]
+        out = dr.query_poll_timestamps(
+            FakeApi(tables), "2026-07-30T00:00:00Z", "2026-07-31T00:00:00Z")
+        self.assertEqual(out, [ts])
+
+
+class GenerateGapCheckTest(unittest.TestCase):
+    NO_ALERT_STATS = ch.GapStats(
+        present=2870, expected=2880, coverage=2870 / 2880,
+        longest_gap_s=60, longest_gap_start=None, gaps_over_5m=0,
+    )
+    ALERT_STATS = ch.GapStats(
+        present=2540, expected=2880, coverage=2540 / 2880,
+        longest_gap_s=10200,
+        longest_gap_start=datetime(2026, 7, 30, 12, 50, tzinfo=timezone.utc),
+        gaps_over_5m=1,
+    )
+
+    def test_sends_nothing_when_no_alert_needed(self):
+        with mock.patch.object(dr, "query_poll_timestamps", return_value=[]), \
+             mock.patch.object(dr.ch, "gap_stats", return_value=self.NO_ALERT_STATS), \
+             mock.patch.object(dr, "query_poll_failures") as poll_failures, \
+             mock.patch.object(dr, "send_email") as sent:
+            dr.generate_gap_check(mock.Mock(), date(2026, 8, 21))
+            sent.assert_not_called()
+            poll_failures.assert_not_called()
+
+    def test_sends_once_when_alert_needed(self):
+        with mock.patch.object(dr, "query_poll_timestamps", return_value=[]), \
+             mock.patch.object(dr.ch, "gap_stats", return_value=self.ALERT_STATS), \
+             mock.patch.object(dr, "query_poll_failures", return_value={"timeout": 5}), \
+             mock.patch.object(dr, "send_email") as sent:
+            dr.generate_gap_check(mock.Mock(), date(2026, 7, 30))
+            sent.assert_called_once()
 
 
 if __name__ == "__main__":
