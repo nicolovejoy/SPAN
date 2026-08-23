@@ -129,6 +129,33 @@ else
             warn "$ev — none in 14d (info)"
         fi
     done
+
+    # Yesterday's poll coverage — Pacific calendar day, converted to UTC RFC3339
+    # for the range. distinct(column:"_time") yields a time-typed _value, which
+    # count() can't aggregate directly (Flux: "unsupported aggregate column type
+    # time"), so remap to 1 and sum instead — same distinct-timestamp count.
+    yday=$(TZ=America/Los_Angeles date -v-1d +%Y-%m-%d)
+    start_epoch=$(TZ=America/Los_Angeles date -j -f '%Y-%m-%d %H:%M:%S' "$yday 00:00:00" +%s)
+    end_epoch=$(TZ=America/Los_Angeles date -j -v+1d -f '%Y-%m-%d %H:%M:%S' "$yday 00:00:00" +%s)
+    start=$(date -u -r "$start_epoch" +%Y-%m-%dT%H:%M:%SZ)
+    end=$(date -u -r "$end_epoch" +%Y-%m-%dT%H:%M:%SZ)
+    expected=$(( (end_epoch - start_epoch) / 30 ))
+
+    flux="from(bucket:\"$BUCKET\") |> range(start:$start, stop:$end)
+        |> filter(fn:(r)=>r._measurement==\"circuit\" and r._field==\"power_w\")
+        |> group() |> distinct(column:\"_time\")
+        |> map(fn:(r)=>({r with _value: 1})) |> group() |> sum()"
+    present=$(curl -s -m 10 -X POST "http://$PI:8086/api/v2/query?org=$ORG" \
+        -H "Authorization: Token $TOKEN" \
+        -H 'Content-Type: application/vnd.flux' -H 'Accept: application/csv' \
+        -d "$flux" | grep -m1 '^,_result' | cut -d, -f4 | tr -d '\r')
+
+    if [ -n "$present" ] && [ "$expected" -gt 0 ]; then
+        pct=$(python3 -c "print(f'{100*$present/$expected:.1f}')")
+        ok "poll coverage yesterday ($yday) — $present/$expected, ${pct}%"
+    else
+        warn "poll coverage yesterday ($yday) — query failed or no data"
+    fi
 fi
 
 # --- On-Pi checks (best-effort) ----------------------------------------------
