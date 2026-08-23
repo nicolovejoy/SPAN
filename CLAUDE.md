@@ -119,7 +119,7 @@ subagent. The list below is near-term mechanics; the roadmap explains ordering a
 - **#9 segment-router cleanup candidate** — `daily_report.py`'s `_run_segments` and friends,
   `query_total_kwh`, `_delta_arrow` are unreferenced by the shipped report (superseded by the weekly
   report's own query layer). Candidate for a future cleanup pass if nothing else picks them up first.
-- **~~#16 Pi observability~~ — DONE (branch pending merge, PR TBD).** `collector.py` writes a
+- **~~#16 Pi observability~~ — DONE, merged + deployed 2026-08-22 (PR #21, hotfix #22).** `collector.py` writes a
   `collector_poll` point per iteration (result ∈ {ok, panel_fail, circuits_fail, both_fail,
   write_fail}, error ∈ {none, timeout, connect, http_4xx, http_5xx, decode, other}); `daily_report.py`
   emails a data-gap alert at 07:00 (after the anomaly check) when yesterday's raw poll coverage
@@ -133,11 +133,14 @@ subagent. The list below is near-term mechanics; the roadmap explains ordering a
   Influx ("count: unsupported aggregate column type time") — so it never could have alerted; fixed
   with `map({_time: r._value, _value: 1}) |> sum()` (the tempting `{r with _value: 1}` form
   silently returns zero rows). Deliberately not done: compose-project rename (orphans volumes,
-  manual), TimescaleDB image tag pin (separate compose project). **Post-merge checklist:** on the
-  Pi, `git pull`, `docker compose up -d --build collector daily-report`, `docker compose up -d
-  telegraf grafana cloudflared`, verify `collector_poll` points flow, the `telemetry` bucket has
-  cpu/mem/disk/system/temp/docker_* measurements, the Pi Health dashboard renders at
-  http://phrpi.local:3000 (Safari), `docker_container_mem` isn't stuck at 0, then close #16.
+  manual), TimescaleDB image tag pin (separate compose project). Post-merge verified: collector_poll
+  flowing, telemetry bucket populated, pi-health provisioned. **Open caveat:** every
+  `docker_container_mem` field reads 0 because the Pi boots with `cgroup_disable=memory`
+  (`/proc/cmdline`; `docker stats` shows `0B / 0B`) — fix is `cgroup_enable=memory cgroup_memory=1`
+  in `/boot/firmware/cmdline.txt` + reboot (Nico's call; brief full-stack outage). **Deploy
+  lessons:** the Pi checkout had been left on PR #19's branch (pull failed, old code rebuilt) — always
+  `git checkout main && git pull --ff-only` there first; and `pi/Dockerfile` COPYs files explicitly,
+  so any new `pi/*.py` module needs a COPY line (missed `collector_health.py` → ~3 min crash-loop).
 - **Make bath + charge events explorable over time** — requested 2026-08-21. Their sections leave
   the email; the detectors keep writing. Probably belongs in `web/`, needs its own design.
 - **Dashboard access model** — decision pending (2026-08-13); candidate: signed-cookie unlock link in Next.js middleware. /api/health (observer endpoint, see prompt-lab uptime convention) must stay exempt.
