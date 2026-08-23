@@ -312,6 +312,25 @@ class AnomalyCheckTest(unittest.TestCase):
         flux = dr._day_coverage_flux(date(2026, 8, 17))
         self.assertIn('r._measurement == "circuit_1h" and r._field == "energy_wh_counter"', flux)
         self.assertIn('distinct(column: "_time")', flux)
+        # distinct(column: "_time") |> count() errors in real Influx ("count:
+        # unsupported aggregate column type time") -- map each distinct time
+        # to a plain int and sum those instead (#16 Task 3b fix). distinct()
+        # also drops the "_time" column itself, so the map must restore it
+        # explicitly -- verified against real data (task-3b-report.md);
+        # {r with _value: 1} alone silently produced zero rows.
+        self.assertIn('map(fn: (r) => ({_time: r._value, _value: 1})', flux)
+        self.assertIn('sum()', flux)
+        after_distinct = flux.split('distinct(column: "_time")')[1]
+        self.assertNotIn('count()', after_distinct.split('sum()')[0])
+
+    def test_query_day_coverage_converts_summed_count_to_fraction(self):
+        tables = [FakeTable([FakeRecord(None, 24, {})])]
+        coverage = dr.query_day_coverage(FakeApi(tables), date(2026, 8, 17))
+        self.assertAlmostEqual(coverage, 1.0)
+
+    def test_query_day_coverage_is_zero_on_no_rows(self):
+        coverage = dr.query_day_coverage(FakeApi([]), date(2026, 8, 17))
+        self.assertEqual(coverage, 0.0)
 
     def test_render_anomaly_email_subject_names_category_and_direction(self):
         import report_baseline as rb

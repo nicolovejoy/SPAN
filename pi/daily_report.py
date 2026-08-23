@@ -948,7 +948,18 @@ def _day_coverage_flux(target_date: date) -> str:
     """circuit_1h is stop-stamped — a bucket at time T covers [T-1h, T) — so the
     query range must be shifted forward by one bucket period (same shift
     _counter_kwh_flux applies) for the 24 stamps counted here to actually cover
-    [local midnight, local midnight+1d) for `target_date`."""
+    [local midnight, local midnight+1d) for `target_date`.
+
+    `distinct(column: "_time") |> count()` errors in real Influx ("count:
+    unsupported aggregate column type time") -- map each distinct time to a
+    plain int 1 and sum those instead (#16 Task 3b). `distinct(column:
+    "_time")` also drops the `_time` column itself (the distinct values land
+    in `_value`, time-typed), so the map must restore `_time` explicitly
+    (`_time: r._value`) -- verified against real data: `{r with _value: 1}`
+    (which relies on `_time` still being present) silently produced zero
+    output rows for this measurement/field, even though the same pattern
+    happened to work for status.sh's circuit/power_w query. Restoring `_time`
+    explicitly is correct and non-empty in both cases."""
     period = ROLLUP_PERIOD[MEAS_1H]
     start, stop = local_day_utc_range(target_date)
     rng_start, rng_stop = _shift_ts(flux_ts(start), period), _shift_ts(flux_ts(stop), period)
@@ -959,7 +970,9 @@ from(bucket: "{INFLUXDB_BUCKET}")
   |> filter(fn: (r) => exists r._value)
   |> group()
   |> distinct(column: "_time")
-  |> count()
+  |> map(fn: (r) => ({{_time: r._value, _value: 1}}))
+  |> group()
+  |> sum()
 '''
 
 
