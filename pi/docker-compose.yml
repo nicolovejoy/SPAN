@@ -19,7 +19,10 @@ services:
       - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUXDB_TOKEN}
 
   grafana:
-    image: grafana/grafana:latest
+    # Pinned 2026-08-22 (#16) to the version running on the Pi at pin time
+    # (`docker exec grafana grafana-server -v` -> 12.3.1), so upstream
+    # :latest churn can't surprise-upgrade it. Bump deliberately.
+    image: grafana/grafana:12.3.1
     container_name: grafana
     restart: unless-stopped
     ports:
@@ -111,7 +114,10 @@ services:
       - influxdb
 
   cloudflared:
-    image: cloudflare/cloudflared:latest
+    # Pinned 2026-08-22 (#16) to the version running on the Pi at pin time
+    # (`docker exec cloudflared cloudflared --version` -> 2026.3.0), so
+    # upstream :latest churn can't surprise-upgrade it. Bump deliberately.
+    image: cloudflare/cloudflared:2026.3.0
     container_name: cloudflared
     restart: unless-stopped
     command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
@@ -119,6 +125,26 @@ services:
       - .env
     depends_on:
       - grafana
+
+  telegraf:
+    image: telegraf:1.31
+    container_name: telegraf
+    restart: unless-stopped
+    # gid 984: `getent group docker | cut -d: -f3` on the Pi, 2026-08-22.
+    # Needed so the non-root telegraf user in the image can read the
+    # docker.sock bind mount.
+    user: "telegraf:984"
+    environment:
+      - INFLUXDB_TOKEN=${INFLUXDB_TOKEN}
+      - HOST_PROC=/hostfs/proc
+      - HOST_SYS=/hostfs/sys
+      - HOST_MOUNT_PREFIX=/hostfs
+    volumes:
+      - ./telegraf.conf:/etc/telegraf/telegraf.conf:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /:/hostfs:ro
+    depends_on:
+      - influxdb
 
 volumes:
   influxdb-data:

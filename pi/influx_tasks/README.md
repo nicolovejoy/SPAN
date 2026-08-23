@@ -1,3 +1,13 @@
+# `telemetry` bucket — host + container metrics
+
+Separate bucket, 30d retention, written by `telegraf` (`pi/telegraf.conf`, #16
+Task 5) — host CPU/mem/disk/load/temp plus per-container CPU/mem via the
+Docker input. Kept out of the infinite-retention `span` bucket since it's
+operational data, not panel telemetry. Consumed by the `pi-health` Grafana
+dashboard (`pi/grafana/provisioning/dashboards/pi-health.json`). Schema (task
+IDs, container-restart tracking) for the `collector_poll` measurement in the
+`span` bucket lands in a later task.
+
 # Circuit rollups — `circuit_5m` / `circuit_1h`
 
 Pre-aggregated downsamples of the raw `circuit` measurement, so the power
