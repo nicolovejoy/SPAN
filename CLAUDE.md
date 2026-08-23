@@ -36,14 +36,21 @@ cd pi && docker compose up -d
 ## Architecture
 
 - `span_client.py` - CLI client with live terminal dashboard
-- `pi/` - Docker stack for Pi deployment (7 services)
-  - `collector.py` - Polls SPAN every 30s, writes to InfluxDB
+- `pi/` - Docker stack for Pi deployment (8 services)
+  - `collector.py` - Polls SPAN every 30s, writes to InfluxDB; also writes one `collector_poll`
+    point per iteration (result/error classification + timings) for observability (#16)
+  - `collector_health.py` - Pure gap/coverage math + httpx error classification, no I/O (#16)
   - `bath_detector.py` - Detects bath events from heat pump signature (10min loop)
   - `charge_detector.py` - Detects EV charging sessions (10min loop)
-  - `daily_report.py` - Weekly energy briefing (Mondays) + daily anomaly-check email via Resend, both at 7am
+  - `daily_report.py` - Weekly energy briefing (Mondays) + daily anomaly-check email + daily
+    data-gap alert via Resend, all at 7am
   - `rates.py` - TOU rate schedule for cost calculations
-  - `docker-compose.yml` - InfluxDB, Grafana, collector, bath-detector, charge-detector, daily-report, cloudflared
-  - `grafana/provisioning/` - Auto-configured datasource + dashboard
+  - `telegraf.conf` - Host + per-container metrics (CPU/mem/disk/load/temp/docker) into the
+    `telemetry` bucket (#16)
+  - `docker-compose.yml` - InfluxDB, Grafana, collector, bath-detector, charge-detector,
+    daily-report, telegraf, cloudflared
+  - `grafana/provisioning/` - Auto-configured datasource + dashboards, incl. `pi-health.json`
+    (uid `pi-health`) — collector poll failure rate, host + container metrics (#16)
 - `web/` - Next.js power-explorer dashboard (Vercel-hosted, see § web/)
 - `pi/backup/` - nightly restic backup to Cloudflare R2 (systemd timer, 03:30). Covers the
   only unrecoverable state: InfluxDB, TimescaleDB, the Grafana volume, and the `.env` files —
@@ -112,9 +119,25 @@ subagent. The list below is near-term mechanics; the roadmap explains ordering a
 - **#9 segment-router cleanup candidate** — `daily_report.py`'s `_run_segments` and friends,
   `query_total_kwh`, `_delta_arrow` are unreferenced by the shipped report (superseded by the weekly
   report's own query layer). Candidate for a future cleanup pass if nothing else picks them up first.
-- **#16 Pi observability** (collector reliability + backup/service health) — next per
-  `docs/roadmap.md` Phase 1. No plan written yet; needs a brainstorming/planning pass before
-  subagent-driven execution.
+- **~~#16 Pi observability~~ — DONE (branch pending merge, PR TBD).** `collector.py` writes a
+  `collector_poll` point per iteration (result ∈ {ok, panel_fail, circuits_fail, both_fail,
+  write_fail}, error ∈ {none, timeout, connect, http_4xx, http_5xx, decode, other}); `daily_report.py`
+  emails a data-gap alert at 07:00 (after the anomaly check) when yesterday's raw poll coverage
+  drops below 98% (`GAP_COVERAGE_MIN`) or the longest gap reaches 30 min (`GAP_LONGEST_MIN_S`),
+  both env-overridable, silent otherwise; `status.sh` prints yesterday's coverage. `telegraf` (new,
+  8th service) writes host + per-container metrics to a new `telemetry` bucket (30d retention);
+  Grafana's `pi-health` dashboard (uid `pi-health`) visualizes it plus collector_poll failure rate.
+  `grafana` pinned 12.3.1, `cloudflared` pinned 2026.3.0 (both match what was already running).
+  Found and fixed in passing: the anomaly check's `circuit_1h` coverage gate had been crashing
+  every morning since PR #19 (2026-08-22) — `distinct(column:"_time") |> count()` errors in real
+  Influx ("count: unsupported aggregate column type time") — so it never could have alerted; fixed
+  with `map({_time: r._value, _value: 1}) |> sum()` (the tempting `{r with _value: 1}` form
+  silently returns zero rows). Deliberately not done: compose-project rename (orphans volumes,
+  manual), TimescaleDB image tag pin (separate compose project). **Post-merge checklist:** on the
+  Pi, `git pull`, `docker compose up -d --build collector daily-report`, `docker compose up -d
+  telegraf grafana cloudflared`, verify `collector_poll` points flow, the `telemetry` bucket has
+  cpu/mem/disk/system/temp/docker_* measurements, the Pi Health dashboard renders at
+  http://phrpi.local:3000 (Safari), `docker_container_mem` isn't stuck at 0, then close #16.
 - **Make bath + charge events explorable over time** — requested 2026-08-21. Their sections leave
   the email; the detectors keep writing. Probably belongs in `web/`, needs its own design.
 - **Dashboard access model** — decision pending (2026-08-13); candidate: signed-cookie unlock link in Next.js middleware. /api/health (observer endpoint, see prompt-lab uptime convention) must stay exempt.

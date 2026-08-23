@@ -52,9 +52,14 @@ cumulative meter doesn't have this problem, and we already store it as
 
 - **#15** — make `energy_wh_counter` authoritative for energy; keep power-integration
   for the chart, where the counter is too coarse.
-- **#16** — Pi observability. ~2% of polls were missed on a sampled day and a 2h50m
-  outage on 2026-07-30 went unnoticed. Also: nothing reports a backup failure.
-  Phase 1 of that issue (a line in the 7am email) is an hour's work.
+- **~~#16~~ — DONE (branch pending merge).** Pi observability. ~2% of polls were missed on a
+  sampled day and a 2h50m outage on 2026-07-30 went unnoticed; backup health was already covered
+  by `web/lib/health.ts` + UptimeRobot, so this scoped to collector reliability. Shipped:
+  `collector_poll` points per iteration (result/error classification), a 07:00 data-gap email
+  (coverage < 98% or a gap ≥ 30 min, both env-tunable), `status.sh` coverage line, and a `telegraf`
+  + `pi-health` Grafana dashboard for host/container metrics. Finding along the way: the daily
+  anomaly check's coverage gate had been crashing every run since PR #19 on an unsupported Flux
+  aggregate (`distinct(_time) |> count()`) and never could have fired — fixed with a `map` + `sum`.
 
 Do these first because every later number inherits their accuracy, and because
 "is this finding real or is it a data gap?" has already cost time once today.
