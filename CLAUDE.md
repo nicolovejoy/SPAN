@@ -119,9 +119,12 @@ subagent. The list below is near-term mechanics; the roadmap explains ordering a
 - **~~Power explorer perf~~ (#9) — DONE, deployed 2026-07-31.** `circuit_5m`/`circuit_1h` tasks
   active, 7 months backfilled (3.77M + 314k pts), verified **-0.0032%** vs raw integral on a
   gap-free week. `web/` and `pi/daily_report.py` read them; containers rebuilt.
-  - Fields: `power_w_mean`, `energy_wh` (integral), `energy_wh_counter` (SPAN's own meter delta).
-    Both energy fields stored deliberately to A/B — see **#15**, which argues the counter should win
-    because it's immune to missed polls.
+  - Fields: `power_w_mean`, `energy_wh` (integral), `energy_wh_counter` (SPAN's own
+    meter delta). **`energy_wh_counter` is authoritative for energy since #15** — the
+    integral under-counts burst loads (EV charger) faster than our 30s poll, not
+    primarily a missed-poll issue as originally assumed. `energy_wh` is
+    retained as a cross-check. Windows ≤48h still integrate raw; charts still read
+    power. Contract: `pi/influx_tasks/README.md`.
   - Timestamps are **end-of-bucket** — a point at T covers `[T - bucket, T)`. Comparison queries
     must shift by one bucket or edges silently mismatch.
   - Tail lag: `circuit_5m` 1–6 min, `circuit_1h` 5–65 min. Consumers hybridise with raw.

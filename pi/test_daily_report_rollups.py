@@ -205,13 +205,25 @@ class FluxShapeTest(unittest.TestCase):
         self.assertNotIn("timeShift", flux)
         self.assertIn("2026-07-30T07:00:00Z", flux)       # range not shifted
 
-    def test_rollup_sums_energy_wh_instead_of_integrating(self):
+    def test_rollup_sums_energy_wh_counter_instead_of_integrating(self):
         flux = self.flux(dr.MEAS_1H, "1d")
-        self.assertIn('r._measurement == "circuit_1h" and r._field == "energy_wh"', flux)
+        self.assertIn(
+            'r._measurement == "circuit_1h" and r._field == "energy_wh_counter"',
+            flux)
         self.assertIn("aggregateWindow(every: 1d, fn: sum", flux)
         self.assertNotIn("integral", flux)
         self.assertIn("exists r._value", flux)            # null-bucket guard
         self.assertIn("if r._value < 0.0 then -r._value", flux)   # abs guard kept
+        self.assertNotIn('_field == "energy_wh"', flux)
+
+    def test_rollup_lag_probe_still_calibrates_against_integral(self):
+        """_rollup_stamp compares rollup sums to the RAW integral to measure tail
+        lag. It must keep reading energy_wh — reading the counter would show a
+        constant integral-vs-counter offset that the probe misreads as lag."""
+        import inspect
+        src = inspect.getsource(dr._rollup_stamp)
+        self.assertIn('_field == "energy_wh"', src)
+        self.assertNotIn('energy_wh_counter', src)
 
     def test_stop_stamped_buckets_are_re_centred(self):
         flux = self.flux(dr.MEAS_1H, "1d", stamp="stop")

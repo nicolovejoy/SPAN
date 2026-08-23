@@ -26,11 +26,14 @@ Two measurements, in the **same `span` bucket** as the raw data.
 already do (`web/lib/influx.ts`), since SPAN reports some circuits with inverted
 sign. It is emphatically *not* applied to the cumulative meter.
 
-**`energy_wh` and `energy_wh_counter` are two independent estimates of the same
-quantity**, stored side by side on purpose so they can be A/B'd over real
-history before either the site or the daily report commits to one. Neither
-replaces the other. See [Accuracy](#accuracy-vs-raw-integral) for how far apart
-they actually run (~0.4–0.6% on clean data).
+`energy_wh` and `energy_wh_counter` were two independent estimates of the same
+quantity, stored side by side so they could be A/B'd over real history before
+either the site or the daily report committed to one. **#15 resolved this:**
+`energy_wh_counter` is now authoritative — see [Which energy field to
+read](#which-energy-field-to-read) below. Both fields stay stored: `energy_wh`
+remains as a cross-check, not a discarded competitor. See
+[Accuracy](#accuracy-vs-raw-integral) for how far apart they actually run
+(~0.4–0.6% on clean data).
 
 Raw `circuit` is never deleted (bucket retention is infinite), so **the rollups
 are a pure speed optimisation and are fully rebuildable from scratch at any
@@ -38,6 +41,62 @@ time** — see [Backfill](#backfill). Nothing should ever exist only in a rollup
 
 Volume, at 21 circuits and 3 fields: `circuit_5m` is 18,144 pts/day (~7.5% of
 raw `circuit`), `circuit_1h` is 1,512 pts/day (~0.6%).
+
+### Which energy field to read
+
+**`energy_wh_counter` is authoritative for energy** (decided #15, 2026-08-21).
+`energy_wh` is the integral of our 30s `power_w` samples, and burst/impulse
+loads — the EV charger above all, also disposal/dishwasher/speed-oven/fireplace
+— draw real power in pulses shorter than the 30s poll, so many consecutive
+samples read ~0 even while the load draws real energy. The integral
+under-counts that energy; SPAN's own cumulative `consumedEnergyWh` meter
+counts it correctly. Empirically this is a persistent ~0.7% average
+under-count (stdev 1.7 points across 180 days of history), up to 11% on
+individual EV-charging days — confirmed via per-circuit tracing that ruled
+out counter resets as the cause. It is also immune to missed polls, since it
+keeps ticking inside the panel whether or not the collector is listening — but
+that turns out to be a secondary effect, not the dominant one: tested
+correlation between poll coverage and the integral/counter gap is r=0.11
+across 180 days, essentially none.
+
+`energy_wh` is still stored and is useful as a cross-check. Do not delete it.
+
+Two exceptions, both because the counter is too coarse at fine resolution
+(three consecutive 30s samples have been observed reading an identical value):
+
+- Windows ≤48h (`ENERGY_RAW_MAX_MS`) integrate raw `power_w` instead.
+- Charts read `power_w` / `power_w_mean`, never either energy field.
+
+The mechanism behind that observation: SPAN's own cumulative counter updates in
+**~15-minute batches**, not on every poll. Between batches, consecutive 30s
+samples read the exact same value, so a per-sample delta at fine resolution is
+frequently a real zero even while power is actively flowing — the counter has
+nothing new to report yet, not because usage stopped. That coarseness is why
+short windows must integrate raw `power_w` instead of reading the counter.
+
+Day-level bucketing of counter energy **must be Pacific-aligned, not UTC** —
+this is the project's existing "UTC at rest, Pacific on display" convention
+(see `CLAUDE.md`'s Shared Conventions section), applied to this field
+specifically because getting it wrong is expensive here. UTC midnight is 17:00
+Pacific — mid-EV-charging for this household — so bucketing the counter at UTC
+day boundaries splits real charging sessions across the day line and
+manufactures spurious day-over-day swings. Empirically confirmed: UTC-aligned
+buckets show a ±8–11% day-level artifact that is pure boundary placement, not
+usage; re-bucketing the same data Pacific-aligned collapses it down to a real
+-0.5% to -0.6% signal.
+
+**Never apply Flux `increase()` to the counter.** `nonNegative: true` treats
+SPAN's small backward corrections — observed −5.59 Wh across all 21 circuits
+simultaneously at a panel restart, twice in one sampled week — as a counter
+wrap, and returns the current value: a 14.43 Wh hour becomes 113,114 Wh. The
+rollup tasks use `difference(nonNegative: false)` → drop negatives → `sum()`.
+Consumers read the already-corrected rollup field and need no reset handling,
+but must not re-derive from the raw counter.
+
+One more trap: `_rollup_stamp()` in `pi/daily_report.py` calibrates tail lag by
+comparing rollup sums against the raw integral. It deliberately still reads
+`energy_wh` — giving it the counter would show a constant integral-vs-counter
+offset that it would misread as lag.
 
 ## Timestamp convention
 
@@ -157,8 +216,8 @@ Per-day over July, `circuit_5m` `energy_wh` tracks raw `integral()` within
 
 **The two energy estimates agree to within 0.4–0.6% over multi-day windows**,
 with the counter consistently the *higher* of the two — the expected direction,
-since the integral loses a sliver at every missed poll while SPAN's meter does
-not. Nothing here suggests either field is wrong.
+since the integral misses real energy from burst loads (like the EV charger)
+that pulse faster than our 30s poll. Nothing here suggests either field is wrong.
 
 The small negative bias of the rollups against their own raw baselines comes
 from missed collector polls: when the gap to the next sample exceeds 30s, the

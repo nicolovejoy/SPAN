@@ -322,7 +322,7 @@ async function runEnergyFlux(flux: string): Promise<EnergyRow[]> {
  * Energy (kWh) per category across the range — one number per category.
  * Drives the breakdown table.
  *
- * Wide windows sum pre-computed `energy_wh` from the rollups; the trailing
+ * Wide windows sum pre-computed `energy_wh_counter` from the rollups; the trailing
  * period the rollup task hasn't covered yet is integrated from raw, so a window
  * ending "now" reports today's energy in full rather than silently short.
  */

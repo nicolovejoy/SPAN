@@ -5,9 +5,10 @@
 //   energy_wh         — trapezoidal integral(unit: 1h) of abs(power_w), in Wh
 //   energy_wh_counter — increase of SPAN's own consumed_energy_wh meter
 //
-// energy_wh and energy_wh_counter are two independent estimates of the same
-// quantity, stored side by side deliberately so they can be A/B'd over real
-// history. Do not drop either.
+// energy_wh and energy_wh_counter were two independent estimates of the same
+// quantity, stored side by side to be A/B'd over real history. #15 resolved
+// this: energy_wh_counter is now authoritative, energy_wh kept as a cross-check.
+// Do not drop either.
 //
 // TIMESTAMP CONVENTION: end-of-bucket (`aggregateWindow`'s default
 // timeSrc: "_stop"). A point at time T covers the half-open interval

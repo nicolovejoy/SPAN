@@ -8,10 +8,10 @@
 //     fields: power_w_mean      — mean of abs(power_w) over the bucket
 //             energy_wh         — integral(unit: 1h) of abs(power_w), in Wh
 //             energy_wh_counter — increase in SPAN's own consumed_energy_wh
-//                                 meter across the bucket. Not read here yet;
-//                                 kept alongside energy_wh so the two can be
-//                                 A/B'd over real history before either is
-//                                 made authoritative.
+//                                 meter across the bucket. Authoritative for
+//                                 energy since #15 — this module sums it for
+//                                 rollup-backed windows; energy_wh is retained
+//                                 alongside it as a cross-check.
 //
 // Raw `circuit` is retained forever, so raw is always a valid fallback and the
 // rollups are a pure speed optimisation. Everything here is pure: the Flux
@@ -85,7 +85,7 @@ const ROLLUP_1H_POWER: PowerSource = {
  * the same number of raw samples. The collector polls on a fixed 30s cadence so
  * that's true except across dropouts, where a sparse bucket gets the same weight
  * as a full one. Good enough for a chart line; the breakdown *table* does not
- * rely on this — it sums `energy_wh`, which is exact regardless.
+ * rely on this — it sums `energy_wh_counter`, which is exact regardless.
  */
 export function sourceForInterval(interval: IntervalKey): PowerSource {
   switch (interval) {
@@ -103,13 +103,13 @@ export type EnergySource = {
   measurement: MeasurementId;
   /** "integral": derive Wh from raw watt samples. "sum": add stored Wh. */
   mode: "integral" | "sum";
-  field: "power_w" | "energy_wh";
+  field: "power_w" | "energy_wh" | "energy_wh_counter";
   bucketMs: number;
 };
 
 /** Windows up to this span integrate raw points (most accurate). */
 export const ENERGY_RAW_MAX_MS = 48 * HOUR_MS;
-/** Windows up to this span sum `circuit_5m.energy_wh`. */
+/** Windows up to this span sum `circuit_5m.energy_wh_counter`. */
 export const ENERGY_5M_MAX_MS = 7 * DAY_MS;
 
 export const RAW_ENERGY_SOURCE: EnergySource = {
@@ -122,12 +122,21 @@ export const RAW_ENERGY_SOURCE: EnergySource = {
 /**
  * Energy source by window span:
  *
- *   ≤ 48h → raw integral (existing pipeline, most accurate)
- *   ≤ 7d  → sum(circuit_5m.energy_wh)
- *   > 7d  → sum(circuit_1h.energy_wh)
+ *   ≤ 48h → raw integral (existing pipeline, most accurate at fine buckets)
+ *   ≤ 7d  → sum(circuit_5m.energy_wh_counter)
+ *   > 7d  → sum(circuit_1h.energy_wh_counter)
  *
  * Summing pre-computed Wh is *exact* — there is no re-integration error — which
  * is why this is the big win over `queryPower`'s mean-of-means.
+ *
+ * Since #15 the summed field is `energy_wh_counter`, the delta of SPAN's own
+ * cumulative meter, rather than `energy_wh`, the integral of our 30s samples.
+ * Burst/impulse loads — the EV charger above all — pulse faster than our 30s
+ * poll, so many samples read ~0 even while real power flows; the integral
+ * under-counts that energy, which is why the counter reads ~0.7% higher on
+ * average. The counter is also immune to missed polls, a smaller effect.
+ * `energy_wh` is still stored as a cross-check. Short windows stay on the raw
+ * integral because the counter is too coarse for fine buckets.
  *
  * The 5m→1h boundary was originally 30d, but `circuit_5m` returns ~12x more
  * points per unit time than `circuit_1h` (18,144/day vs 1,512/day), so a 30d
@@ -142,14 +151,14 @@ export function energySourceForSpan(spanMs: number): EnergySource {
     return {
       measurement: "circuit_5m",
       mode: "sum",
-      field: "energy_wh",
+      field: "energy_wh_counter",
       bucketMs: 5 * MINUTE_MS,
     };
   }
   return {
     measurement: "circuit_1h",
     mode: "sum",
-    field: "energy_wh",
+    field: "energy_wh_counter",
     bucketMs: HOUR_MS,
   };
 }
