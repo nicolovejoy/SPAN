@@ -453,17 +453,47 @@ def trailing_week_starts(target_week_start: date, n: int) -> list[date]:
     return [target_week_start - timedelta(days=7 * i) for i in range(n, 0, -1)]
 
 
+def trailing_month_starts(target_month_start: date, n: int) -> list[date]:
+    """The n calendar-month starts strictly before target_month_start, oldest first."""
+    starts = []
+    for i in range(n, 0, -1):
+        y, m = add_months(target_month_start.year, target_month_start.month, -i)
+        starts.append(date(y, m, 1))
+    return starts
+
+
+def month_totals(day_cat: dict[date, dict[str, float]], month_start: date) -> dict[str, float]:
+    """Sum category kWh over the calendar month starting at month_start."""
+    month_end = _month_end_exclusive(month_start)
+    out: dict[str, float] = {}
+    for day, cats in day_cat.items():
+        if month_start <= day < month_end:
+            for cat, kwh in cats.items():
+                out[cat] = out.get(cat, 0.0) + kwh
+    return out
+
+
+def circuit_month_totals(rows: list[tuple[str, date, float]], month_start: date) -> dict[str, float]:
+    """Per-circuit (not per-category) kWh over the calendar month starting at month_start."""
+    month_end = _month_end_exclusive(month_start)
+    out: dict[str, float] = {}
+    for name, day, kwh in rows:
+        if month_start <= day < month_end:
+            out[name] = out.get(name, 0.0) + kwh
+    return out
+
+
 def _sum_days(daily: dict[date, float], lo: date, hi_exclusive: date) -> float:
     return sum(v for d, v in daily.items() if lo <= d < hi_exclusive)
 
 
-def unmonitored_week_kwh(panel_week_kwh: float, circuit_totals: dict[str, float]) -> float:
+def unmonitored_kwh(panel_kwh: float, circuit_totals: dict[str, float]) -> float:
     """Panel total minus every known circuit — the energy the panel meters but no
     circuit sensor does (no washer/dryer/water-heater circuit; see #17). Floored
     at zero: circuit-level counter noise can occasionally exceed a noisy panel
     integral over a short window, and a negative "unmonitored" number is never
-    meaningful."""
-    return max(0.0, panel_week_kwh - sum(circuit_totals.values()))
+    meaningful. Period-agnostic — used for both week and month totals."""
+    return max(0.0, panel_kwh - sum(circuit_totals.values()))
 
 
 def _all_categories() -> list[str]:
@@ -481,6 +511,7 @@ def _pct_delta(current: float, baseline: float) -> float | None:
 
 
 def headline_stats(week_kwh: float, last_week_kwh: float, trailing12_avg_kwh: float,
+                   trailing12mo_avg_kwh: float,
                    week_cat: dict[str, float], last_week_cat: dict[str, float]) -> dict:
     """Block 1's numbers. Largest mover excludes "Unmonitored" — it's a metering
     accounting row, not a category a reader can act on."""
@@ -494,6 +525,7 @@ def headline_stats(week_kwh: float, last_week_kwh: float, trailing12_avg_kwh: fl
         "cost": cost_n_days(week_kwh, 7),
         "delta_vs_last_week_pct": _pct_delta(week_kwh, last_week_kwh),
         "delta_vs_12wk_pct": _pct_delta(week_kwh, trailing12_avg_kwh),
+        "delta_vs_12mo_pct": _pct_delta(week_kwh, trailing12mo_avg_kwh),
         "top_mover": top_mover,
         "top_mover_delta_kwh": movers.get(top_mover, 0.0) if top_mover else 0.0,
     }
@@ -505,9 +537,10 @@ def headline_stats(week_kwh: float, last_week_kwh: float, trailing12_avg_kwh: fl
 @dataclass
 class WeeklyContext:
     """Everything the weekly-briefing renders need. `week_start` is the target
-    week's Monday; `rows`/`panel_daily` span the full 98-day fetch window so
-    the 12-week trend and HVAC's month-over-month (Task 7) can be derived
-    without a second Influx round trip."""
+    week's Monday; `rows`/`panel_daily` span the full fetch window (98 days, or
+    12 months back from the target week's month if that's earlier) so the
+    12-week trend, 12-month trend, and HVAC's month-over-month (Task 7) can all
+    be derived without a second Influx round trip."""
     week_start: date
     rows: list[tuple[str, date, float]]
     panel_daily: dict[date, float]
@@ -517,6 +550,7 @@ class WeeklyContext:
     usage_rows: list[dict]
     week_by_day: list[tuple[date, dict[str, float]]]
     trend: list[tuple[date, dict[str, float]]]
+    month_trend: list[tuple[date, dict[str, float]]]
 
     @property
     def date_str(self) -> str:
@@ -526,12 +560,20 @@ class WeeklyContext:
 
 def build_weekly_context(query_api, week_start: date) -> WeeklyContext:
     """Window conventions:
-      TARGET WEEK = [week_start, week_start+7)               Monday-Sunday
-      FETCH       = [week_start-98, week_start+7)             14 weeks back,
-                    covering the 12-week trend (block 3) and a full 2-month
-                    look-back for HVAC month-over-month (Task 7)
+      TARGET WEEK  = [week_start, week_start+7)              Monday-Sunday
+      TARGET MONTH = the calendar month containing the target week's Sunday
+                    (matches mom_comparison's anchor in the HVAC block)
+      FETCH        = [min(week_start-98, target_month_start-12mo), week_start+7)
+                    14 weeks back covers the 12-week trend (block 3) and the
+                    2-month look-back for HVAC month-over-month (Task 7); 12
+                    months back covers the 12-month trend (block 3b) — whichever
+                    reaches further is the actual fetch start
     """
-    fetch_start_date = week_start - timedelta(days=98)
+    week_end = week_start + timedelta(days=6)
+    target_month_start = date(week_end.year, week_end.month, 1)
+    trailing12_month_starts = trailing_month_starts(target_month_start, 12)
+
+    fetch_start_date = min(week_start - timedelta(days=98), trailing12_month_starts[0])
     fetch_start = flux_ts(local_day_utc_range(fetch_start_date)[0])
     fetch_stop = flux_ts(local_day_utc_range(week_start + timedelta(days=7))[0])
 
@@ -551,8 +593,12 @@ def build_weekly_context(query_api, week_start: date) -> WeeklyContext:
                         for ws in trailing12_starts]
     trailing12_avg_panel = sum(trailing12_panel) / len(trailing12_panel) if trailing12_panel else 0.0
 
+    trailing12mo_panel = [_sum_days(panel_daily, ms, _month_end_exclusive(ms))
+                          for ms in trailing12_month_starts]
+    trailing12mo_avg_panel = sum(trailing12mo_panel) / len(trailing12mo_panel) if trailing12mo_panel else 0.0
+
     headline = headline_stats(week_panel_kwh, last_week_panel_kwh, trailing12_avg_panel,
-                              this_week_cat, last_week_cat)
+                              trailing12mo_avg_panel, this_week_cat, last_week_cat)
 
     circuit_totals = circuit_week_totals(rows, week_start)
     usage_rows = []
@@ -560,27 +606,35 @@ def build_weekly_context(query_api, week_start: date) -> WeeklyContext:
         kwh = this_week_cat.get(cat, 0.0)
         wk12 = [week_totals(day_cat, ws).get(cat, 0.0) for ws in trailing12_starts]
         avg12 = sum(wk12) / len(wk12) if wk12 else 0.0
+        mo12 = [month_totals(day_cat, ms).get(cat, 0.0) for ms in trailing12_month_starts]
+        avg12mo = sum(mo12) / len(mo12) if mo12 else 0.0
         usage_rows.append({
             "category": cat,
             "kwh": kwh,
             "cost": round(kwh * ENERGY_RATE, 2),
             "delta_week_pct": _pct_delta(kwh, last_week_cat.get(cat, 0.0)),
             "delta_12wk_pct": _pct_delta(kwh, avg12),
+            "delta_12mo_pct": _pct_delta(kwh, avg12mo),
             "top_circuits": category_top_circuits(rows, week_start, cat),
         })
 
-    unmon = unmonitored_week_kwh(week_panel_kwh, circuit_totals)
-    last_unmon = unmonitored_week_kwh(last_week_panel_kwh, circuit_week_totals(rows, last_week_start))
-    unmon_wk12 = [unmonitored_week_kwh(_sum_days(panel_daily, ws, ws + timedelta(days=7)),
-                                       circuit_week_totals(rows, ws))
+    unmon = unmonitored_kwh(week_panel_kwh, circuit_totals)
+    last_unmon = unmonitored_kwh(last_week_panel_kwh, circuit_week_totals(rows, last_week_start))
+    unmon_wk12 = [unmonitored_kwh(_sum_days(panel_daily, ws, ws + timedelta(days=7)),
+                                  circuit_week_totals(rows, ws))
                  for ws in trailing12_starts]
     unmon_avg12 = sum(unmon_wk12) / len(unmon_wk12) if unmon_wk12 else 0.0
+    unmon_mo12 = [unmonitored_kwh(_sum_days(panel_daily, ms, _month_end_exclusive(ms)),
+                                  circuit_month_totals(rows, ms))
+                 for ms in trailing12_month_starts]
+    unmon_avg12mo = sum(unmon_mo12) / len(unmon_mo12) if unmon_mo12 else 0.0
     usage_rows.append({
         "category": "Unmonitored",
         "kwh": unmon,
         "cost": round(unmon * ENERGY_RATE, 2),
         "delta_week_pct": _pct_delta(unmon, last_unmon),
         "delta_12wk_pct": _pct_delta(unmon, unmon_avg12),
+        "delta_12mo_pct": _pct_delta(unmon, unmon_avg12mo),
         "top_circuits": [],
     })
 
@@ -590,11 +644,13 @@ def build_weekly_context(query_api, week_start: date) -> WeeklyContext:
         for i in range(7)
     ]
     trend = [(ws, week_totals(day_cat, ws)) for ws in trailing12_starts + [week_start]]
+    month_trend = [(ms, month_totals(day_cat, ms))
+                   for ms in trailing12_month_starts + [target_month_start]]
 
     return WeeklyContext(
         week_start=week_start, rows=rows, panel_daily=panel_daily, day_cat=day_cat,
         categories=categories, headline=headline, usage_rows=usage_rows,
-        week_by_day=week_by_day, trend=trend,
+        week_by_day=week_by_day, trend=trend, month_trend=month_trend,
     )
 
 
@@ -687,6 +743,12 @@ def add_months(year: int, month: int, delta: int) -> tuple[int, int]:
     """Add `delta` calendar months to (year, month). Handles negative deltas."""
     total = year * 12 + (month - 1) + delta
     return total // 12, total % 12 + 1
+
+
+def _month_end_exclusive(month_start: date) -> date:
+    """First day of the month after month_start."""
+    y, m = add_months(month_start.year, month_start.month, 1)
+    return date(y, m, 1)
 
 
 # ---------- retained utilities from the old daily report (used by the
@@ -798,12 +860,13 @@ def render_headline(ctx: WeeklyContext) -> str:
     h = ctx.headline
     week_delta = _delta_arrow_pct(h["delta_vs_last_week_pct"], " vs last week")
     avg_delta = _delta_arrow_pct(h["delta_vs_12wk_pct"], " vs 12-wk avg")
+    mo_delta = _delta_arrow_pct(h["delta_vs_12mo_pct"], " vs 12-mo avg")
     mover = (f' The biggest mover was <strong>{h["top_mover"]}</strong> '
             f'({h["top_mover_delta_kwh"]:+.1f} kWh vs last week).'
             if h["top_mover"] else "")
     return f'''<h2>Weekly Energy Report &mdash; {ctx.date_str}</h2>
 <p style="font-size:15px;">
-<strong>{h["kwh"]:.1f} kWh</strong> (${h["cost"]:.2f}){week_delta}{avg_delta}.{mover}
+<strong>{h["kwh"]:.1f} kWh</strong> (${h["cost"]:.2f}){week_delta}{avg_delta}{mo_delta}.{mover}
 </p>'''
 
 
@@ -861,6 +924,39 @@ def render_12wk_trend_chart(ctx: WeeklyContext) -> str:
     return f'<h3>12-week trend</h3>\n{_chart_img(b64, "12-week trend by category")}'
 
 
+def render_12mo_trend_chart(ctx: WeeklyContext) -> str:
+    """Block 3b — stacked histogram of monthly totals by category, 13 months
+    (12 trailing + the calendar month containing the target week) so long-run
+    direction and composition read in one image. Early months read as
+    near-zero/zero until a full year of collector history accrues (collection
+    started 2025-12-26). The rightmost bar is labeled "(MTD)" when the target
+    week doesn't reach the end of its calendar month, so a partial month never
+    reads as a real dip."""
+    if not ctx.month_trend:
+        return ""
+    target_month_start, _ = ctx.month_trend[-1]
+    target_month_end = _month_end_exclusive(target_month_start) - timedelta(days=1)
+    is_partial = (ctx.week_start + timedelta(days=6)) < target_month_end
+    labels = [ms.strftime("%b '%y") for ms, _ in ctx.month_trend]
+    if is_partial:
+        labels[-1] += " (MTD)"
+    fig, ax = plt.subplots(figsize=(7, 3.2), dpi=120)
+    bottom = [0.0] * len(labels)
+    for cat in ctx.categories:
+        vals = [totals.get(cat, 0.0) for _, totals in ctx.month_trend]
+        ax.bar(labels, vals, bottom=bottom, width=0.7,
+              color=CATEGORY_COLORS.get(cat, "#888"), label=cat)
+        bottom = [b + v for b, v in zip(bottom, vals)]
+    ax.set_xticklabels(labels, fontsize=8, rotation=45, ha="right")
+    ax.set_ylabel("kWh / month")
+    ax.grid(True, alpha=0.3, axis="y")
+    ax.legend(loc="upper left", fontsize=8, ncol=3)
+    _add_cost_axis(ax, "$ / month")
+    fig.tight_layout()
+    b64 = _fig_to_b64(fig)
+    return f'<h3>12-month trend</h3>\n{_chart_img(b64, "12-month trend by category")}'
+
+
 def render_usage_table(ctx: WeeklyContext) -> str:
     """Block 4 — one table replacing the old cost-breakdown + top-circuits
     sections. Per-category cost is energy-only (kWh * ENERGY_RATE); the base
@@ -876,17 +972,18 @@ def render_usage_table(ctx: WeeklyContext) -> str:
     for r in ctx.usage_rows:
         rows_html.append(
             f'<tr><td>{r["category"]}</td><td>{r["kwh"]:.1f}</td><td>${r["cost"]:.2f}</td>'
-            f'<td>{pct_cell(r["delta_week_pct"])}</td><td>{pct_cell(r["delta_12wk_pct"])}</td></tr>'
+            f'<td>{pct_cell(r["delta_week_pct"])}</td><td>{pct_cell(r["delta_12wk_pct"])}</td>'
+            f'<td>{pct_cell(r["delta_12mo_pct"])}</td></tr>'
         )
         if r["top_circuits"]:
             nested = ", ".join(f'{name} ({kwh:.1f} kWh)' for name, kwh in r["top_circuits"])
             rows_html.append(
-                f'<tr><td colspan="5" style="font-size:11px;color:#888;padding-left:24px;">'
+                f'<tr><td colspan="6" style="font-size:11px;color:#888;padding-left:24px;">'
                 f'{nested}</td></tr>'
             )
     return f'''<h3>Usage by category</h3>
 <table>
-<tr><th>Category</th><th>kWh</th><th>Cost</th><th>vs last wk</th><th>vs 12-wk avg</th></tr>
+<tr><th>Category</th><th>kWh</th><th>Cost</th><th>vs last wk</th><th>vs 12-wk avg</th><th>vs 12-mo avg</th></tr>
 {"".join(rows_html)}
 </table>'''
 
@@ -944,7 +1041,7 @@ def render_hvac_block(ctx: WeeklyContext) -> str:
 
 
 WEEKLY_SECTIONS = [render_headline, render_week_by_day_chart, render_12wk_trend_chart,
-                  render_usage_table, render_hvac_block]
+                  render_12mo_trend_chart, render_usage_table, render_hvac_block]
 
 
 def build_weekly_html(ctx: WeeklyContext) -> str:
