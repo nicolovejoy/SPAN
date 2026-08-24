@@ -91,3 +91,90 @@ def fetch_forecast(http_client: httpx.Client, past_days: int, forecast_days: int
     })
     resp.raise_for_status()
     return _parse_hourly_response(resp.json())
+
+
+def _today() -> date:
+    """Thin wrapper so tests can freeze "today" via mock.patch.object."""
+    return datetime.now(timezone.utc).date()
+
+
+def write_weather_points(write_api, points: list[dict]) -> int:
+    """Write each point to the `weather` measurement. Same (measurement, time)
+    overwrites in Influx, so this is safe to call repeatedly over an
+    overlapping range -- no existence-check needed, unlike bath/charge events."""
+    if not points:
+        return 0
+    for pt in points:
+        point = Point("weather").field("temp_f", pt["temp_f"]).time(pt["time"])
+        if pt["humidity"] is not None:
+            point = point.field("humidity", pt["humidity"])
+        if pt["cloud_cover"] is not None:
+            point = point.field("cloud_cover", pt["cloud_cover"])
+        write_api.write(bucket=INFLUXDB_BUCKET, org=INFLUXDB_ORG, record=point)
+    return len(points)
+
+
+def backfill(client: InfluxDBClient, start_date: date) -> None:
+    """Historical weather from start_date through today: archive API up to
+    the reanalysis lag boundary, forecast API's past_days for the recent
+    tail (the two ranges overlap by a couple of days on purpose -- harmless,
+    since writes overwrite by timestamp)."""
+    today = _today()
+    archive_end = today - timedelta(days=ARCHIVE_LAG_DAYS)
+    write_api = client.write_api(write_options=SYNCHRONOUS)
+
+    with httpx.Client(timeout=30.0) as http_client:
+        if start_date <= archive_end:
+            archive_points = fetch_archive(http_client, start_date, archive_end)
+            n = write_weather_points(write_api, archive_points)
+            logger.info(f"Archive: wrote {n} hourly points ({start_date} to {archive_end})")
+
+        forecast_points = fetch_forecast(http_client, past_days=ARCHIVE_LAG_DAYS + 2, forecast_days=0)
+        n = write_weather_points(write_api, forecast_points)
+        logger.info(f"Forecast (recent tail): wrote {n} hourly points")
+
+
+def normal_run(client: InfluxDBClient) -> None:
+    """Check the last 2 days (covers any missed loop iteration) and write."""
+    write_api = client.write_api(write_options=SYNCHRONOUS)
+    with httpx.Client(timeout=30.0) as http_client:
+        points = fetch_forecast(http_client, past_days=2, forecast_days=0)
+    n = write_weather_points(write_api, points)
+    logger.info(f"Wrote {n} hourly weather points")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Hourly outdoor weather into InfluxDB")
+    parser.add_argument("--backfill", action="store_true", help="Backfill historical weather (no loop)")
+    parser.add_argument("--start-date", type=str, default="2026-01-04",
+                       help="Backfill start date YYYY-MM-DD (default: when circuit data starts)")
+    parser.add_argument("--loop", action="store_true", help="Run continuously, hourly")
+    parser.add_argument("--interval", type=int, default=3600, help="Seconds between polls in loop mode")
+    args = parser.parse_args()
+
+    if not INFLUXDB_TOKEN:
+        logger.error("INFLUXDB_TOKEN not set")
+        return
+
+    client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
+
+    if args.backfill:
+        start = datetime.strptime(args.start_date, "%Y-%m-%d").date()
+        logger.info(f"Backfilling weather from {start}")
+        backfill(client, start)
+    elif args.loop:
+        logger.info(f"Loop mode: polling every {args.interval}s")
+        while True:
+            try:
+                normal_run(client)
+            except Exception as e:
+                logger.error(f"Weather poll failed: {e}")
+            time.sleep(args.interval)
+    else:
+        normal_run(client)
+
+    client.close()
+
+
+if __name__ == "__main__":
+    main()

@@ -7,7 +7,7 @@ Nothing here touches the network or a real InfluxDB.
 import sys
 import types
 import unittest
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 from unittest import mock
 
 if "influxdb_client" not in sys.modules:
@@ -102,6 +102,68 @@ class FetchForecastTest(unittest.TestCase):
         self.assertEqual(params["past_days"], 2)
         self.assertEqual(params["forecast_days"], 0)
         self.assertEqual(params["temperature_unit"], "fahrenheit")
+
+
+class WriteWeatherPointsTest(unittest.TestCase):
+    def test_writes_one_point_per_hour_with_all_fields(self):
+        write_api = mock.MagicMock()
+        points = [{"time": utc(2026, 8, 20, 0), "temp_f": 58.1, "humidity": 82.0, "cloud_cover": 40.0}]
+
+        count = wp.write_weather_points(write_api, points)
+
+        self.assertEqual(count, 1)
+        write_api.write.assert_called_once()
+        _, kwargs = write_api.write.call_args
+        self.assertEqual(kwargs["bucket"], wp.INFLUXDB_BUCKET)
+
+    def test_omits_none_fields_but_still_writes(self):
+        write_api = mock.MagicMock()
+        points = [{"time": utc(2026, 8, 20, 0), "temp_f": 58.1, "humidity": None, "cloud_cover": None}]
+        count = wp.write_weather_points(write_api, points)
+        self.assertEqual(count, 1)
+
+    def test_empty_points_writes_nothing(self):
+        write_api = mock.MagicMock()
+        self.assertEqual(wp.write_weather_points(write_api, []), 0)
+        write_api.write.assert_not_called()
+
+
+class BackfillTest(unittest.TestCase):
+    def test_splits_between_archive_and_forecast_at_the_lag_boundary(self):
+        # "today" is controlled via freezing wp._today for determinism
+        with mock.patch.object(wp, "_today", return_value=date(2026, 8, 24)), \
+             mock.patch.object(wp, "fetch_archive", return_value=[]) as archive, \
+             mock.patch.object(wp, "fetch_forecast", return_value=[]) as forecast, \
+             mock.patch.object(wp, "write_weather_points", return_value=0):
+            client = mock.MagicMock()
+            wp.backfill(client, date(2026, 1, 4))
+
+        archive_end = date(2026, 8, 24) - timedelta(days=wp.ARCHIVE_LAG_DAYS)
+        archive.assert_called_once_with(mock.ANY, date(2026, 1, 4), archive_end)
+        forecast.assert_called_once_with(mock.ANY, past_days=wp.ARCHIVE_LAG_DAYS + 2, forecast_days=0)
+
+    def test_writes_both_archive_and_forecast_points(self):
+        with mock.patch.object(wp, "_today", return_value=date(2026, 8, 24)), \
+             mock.patch.object(wp, "fetch_archive", return_value=[{"time": utc(2026, 1, 4, 0), "temp_f": 40.0, "humidity": None, "cloud_cover": None}]), \
+             mock.patch.object(wp, "fetch_forecast", return_value=[{"time": utc(2026, 8, 23, 0), "temp_f": 60.0, "humidity": None, "cloud_cover": None}]), \
+             mock.patch.object(wp, "write_weather_points") as write:
+            client = mock.MagicMock()
+            wp.backfill(client, date(2026, 1, 4))
+
+        all_written = [pt for call in write.call_args_list for pt in call[0][1]]
+        self.assertEqual(len(all_written), 2)
+
+
+class NormalRunTest(unittest.TestCase):
+    def test_polls_a_small_past_days_window_and_writes(self):
+        with mock.patch.object(wp, "fetch_forecast", return_value=[
+                {"time": utc(2026, 8, 24, 6), "temp_f": 65.0, "humidity": 70.0, "cloud_cover": 20.0}]) as forecast, \
+             mock.patch.object(wp, "write_weather_points", return_value=1) as write:
+            client = mock.MagicMock()
+            wp.normal_run(client)
+
+        forecast.assert_called_once_with(mock.ANY, past_days=2, forecast_days=0)
+        write.assert_called_once()
 
 
 if __name__ == "__main__":
