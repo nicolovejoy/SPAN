@@ -8,6 +8,7 @@ COPY collector.py .
 COPY collector_health.py .
 COPY bath_detector.py .
 COPY charge_detector.py .
+COPY weather_poller.py .
 COPY daily_report.py .
 COPY report_baseline.py .
 COPY rates.py .

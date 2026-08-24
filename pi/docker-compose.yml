@@ -93,6 +93,21 @@ services:
     depends_on:
       - influxdb
 
+  weather:
+    build: .
+    container_name: weather
+    restart: unless-stopped
+    command: ["python", "-u", "weather_poller.py", "--loop"]
+    env_file:
+      - .env
+    environment:
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=${INFLUXDB_TOKEN}
+      - INFLUXDB_ORG=home
+      - INFLUXDB_BUCKET=span
+    depends_on:
+      - influxdb
+
   daily-report:
     build: .
     container_name: daily-report

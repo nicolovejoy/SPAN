@@ -42,6 +42,9 @@ cd pi && docker compose up -d
   - `collector_health.py` - Pure gap/coverage math + httpx error classification, no I/O (#16)
   - `bath_detector.py` - Detects bath events from heat pump signature (10min loop)
   - `charge_detector.py` - Detects EV charging sessions (10min loop)
+  - `weather_poller.py` - Hourly outdoor temp/humidity/cloud-cover from Open-Meteo into a
+    `weather` measurement (#14 Phase 1). Unblocks the heat/cool split and cold-weather
+    aux-heat suppression (#3) — neither built yet.
   - `daily_report.py` - Weekly energy briefing (Mondays) + daily anomaly-check email + daily
     data-gap alert via Resend, all at 7am
   - `rates.py` - TOU rate schedule for cost calculations
@@ -97,12 +100,10 @@ GitHub pushes via the Vercel Git integration. Pi-hosted as a Docker service
 **Start at `docs/roadmap.md`** — phased, dependency-ordered, each phase scoped to hand to a
 subagent. The list below is near-term mechanics; the roadmap explains ordering and why.
 
-- **#14 Phase 1 — outdoor temperature ingest** — plan written and committed
-  (`docs/superpowers/plans/2026-08-24-outdoor-temperature-ingest.md`), not yet executed. Sub-project
-  1 of 2 toward splitting the Stiebel Eltron heat pump's heat/cool/hot-water draw (requested
-  2026-08-24): weather ingest first (unblocks the split — power signature alone can't tell heating
-  from cooling per #14), then a separate not-yet-designed sub-project 2 (heat/cool split +
-  generalizing `bath_detector.py` into the Phase 4 attribution engine for showers/laundry hot water).
+- **#14 Phase 1 done (2026-08-24)** — outdoor temp now flowing hourly into the `weather`
+  measurement, backfilled to 2026-01-04. Heat/cool split + generalizing `bath_detector.py`
+  into the Phase 4 attribution engine (showers, laundry hot water) is a separate
+  not-yet-started sub-project — see `docs/roadmap.md` Phase 4.
 - **#17 part 2 — dryer (then washer) detection**, off `panel.feedthrough_power_w`. Part 1
   ("Unmonitored" breakdown row) shipped 2026-08-23 (commit d3bb6a0) and reconciles live at ~11%
   share; part 2 is the next Phase 2 item and *does* need the sign/`abs()` handling part 1 deliberately
