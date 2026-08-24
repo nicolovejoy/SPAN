@@ -94,13 +94,13 @@ class FetchForecastTest(unittest.TestCase):
         fake_client.get.return_value = mock.MagicMock(
             json=lambda: SAMPLE_RESPONSE, raise_for_status=lambda: None)
 
-        wp.fetch_forecast(fake_client, past_days=2, forecast_days=0)
+        wp.fetch_forecast(fake_client, past_days=2, forecast_days=1)
 
         call_args, kwargs = fake_client.get.call_args
         self.assertEqual(call_args[0], "https://api.open-meteo.com/v1/forecast")
         params = kwargs["params"]
         self.assertEqual(params["past_days"], 2)
-        self.assertEqual(params["forecast_days"], 0)
+        self.assertEqual(params["forecast_days"], 1)
         self.assertEqual(params["temperature_unit"], "fahrenheit")
 
 
@@ -140,7 +140,7 @@ class BackfillTest(unittest.TestCase):
 
         archive_end = date(2026, 8, 24) - timedelta(days=wp.ARCHIVE_LAG_DAYS)
         archive.assert_called_once_with(mock.ANY, date(2026, 1, 4), archive_end)
-        forecast.assert_called_once_with(mock.ANY, past_days=wp.ARCHIVE_LAG_DAYS + 2, forecast_days=0)
+        forecast.assert_called_once_with(mock.ANY, past_days=wp.ARCHIVE_LAG_DAYS + 2, forecast_days=1)
 
     def test_writes_both_archive_and_forecast_points(self):
         with mock.patch.object(wp, "_today", return_value=date(2026, 8, 24)), \
@@ -156,14 +156,29 @@ class BackfillTest(unittest.TestCase):
 
 class NormalRunTest(unittest.TestCase):
     def test_polls_a_small_past_days_window_and_writes(self):
-        with mock.patch.object(wp, "fetch_forecast", return_value=[
+        with mock.patch.object(wp, "_now", return_value=utc(2026, 8, 24, 12)), \
+             mock.patch.object(wp, "fetch_forecast", return_value=[
                 {"time": utc(2026, 8, 24, 6), "temp_f": 65.0, "humidity": 70.0, "cloud_cover": 20.0}]) as forecast, \
              mock.patch.object(wp, "write_weather_points", return_value=1) as write:
             client = mock.MagicMock()
             wp.normal_run(client)
 
-        forecast.assert_called_once_with(mock.ANY, past_days=2, forecast_days=0)
+        forecast.assert_called_once_with(mock.ANY, past_days=2, forecast_days=1)
         write.assert_called_once()
+
+
+class DropFutureTest(unittest.TestCase):
+    def test_keeps_past_and_present_drops_future(self):
+        with mock.patch.object(wp, "_now", return_value=utc(2026, 8, 24, 12)):
+            points = [
+                {"time": utc(2026, 8, 24, 11), "temp_f": 60.0, "humidity": None, "cloud_cover": None},
+                {"time": utc(2026, 8, 24, 12), "temp_f": 61.0, "humidity": None, "cloud_cover": None},
+                {"time": utc(2026, 8, 24, 13), "temp_f": 62.0, "humidity": None, "cloud_cover": None},
+            ]
+            kept = wp._drop_future(points)
+
+        self.assertEqual([p["time"] for p in kept],
+                          [utc(2026, 8, 24, 11), utc(2026, 8, 24, 12)])
 
 
 if __name__ == "__main__":

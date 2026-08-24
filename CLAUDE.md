@@ -36,7 +36,7 @@ cd pi && docker compose up -d
 ## Architecture
 
 - `span_client.py` - CLI client with live terminal dashboard
-- `pi/` - Docker stack for Pi deployment (8 services)
+- `pi/` - Docker stack for Pi deployment (9 services)
   - `collector.py` - Polls SPAN every 30s, writes to InfluxDB; also writes one `collector_poll`
     point per iteration (result/error classification + timings) for observability (#16)
   - `collector_health.py` - Pure gap/coverage math + httpx error classification, no I/O (#16)
@@ -51,7 +51,7 @@ cd pi && docker compose up -d
   - `telegraf.conf` - Host + per-container metrics (CPU/mem/disk/load/temp/docker) into the
     `telemetry` bucket (#16)
   - `docker-compose.yml` - InfluxDB, Grafana, collector, bath-detector, charge-detector,
-    daily-report, telegraf, cloudflared
+    weather, daily-report, telegraf, cloudflared
   - `grafana/provisioning/` - Auto-configured datasource + dashboards, incl. `pi-health.json`
     (uid `pi-health`) — collector poll failure rate, host + container metrics (#16)
 - `web/` - Next.js power-explorer dashboard (Vercel-hosted, see § web/)
@@ -116,6 +116,11 @@ subagent. The list below is near-term mechanics; the roadmap explains ordering a
 - **Dashboard access model** — decision pending (2026-08-13); candidate: signed-cookie unlock link in Next.js middleware. /api/health (observer endpoint, see prompt-lab uptime convention) must stay exempt.
 - **EV monthly + annual cost rollup** in daily report (request #3 from 2026-05-23 batch — last unaddressed item). Weekly section already excludes EV (per-2h-bucket subtract); EV accounting is pinned to the exact `CHARGE_CIRCUIT` name shared with `charge_detector`, not the Car regex.
 - **Power explorer chart E2E** (#13) — Playwright harness via a `MOCK_INFLUX` fixture mode. Plan in the issue.
+- **`weather_poller.py` has no dead-service detection.** `normal_run`'s `past_days=2` self-heals a
+  single missed poll, but an outage longer than ~2 days leaves a permanent hole only a manual
+  `--backfill` re-run repairs. Unlike `collector.py`, it writes no health point, isn't in
+  `pi/grafana/provisioning`'s `pi-health.json`, and isn't checked by `web/`'s `/api/health`. No fix
+  designed yet.
 - **Dashboard UX backlog** — open: polling cadence (#5), 1m smoothing (#7), custom PWA icon,
   zoom-in-loads-detail (#12 follow-up, low priority), in-email settings link (#8, needs persistent
   store + report-loop rework).

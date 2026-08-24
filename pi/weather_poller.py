@@ -44,6 +44,14 @@ HOURLY_FIELDS = "temperature_2m,relative_humidity_2m,cloud_cover"
 ARCHIVE_LAG_DAYS = 6
 
 
+def _as_float(v):
+    """Open-Meteo returns humidity/cloud_cover as JSON ints; InfluxDB fixes a
+    field's type at first write, so these must go in as floats to match the
+    declared `float | None` interface -- otherwise a later caller that adds
+    its own float() coercion gets a silent 422 field-type conflict."""
+    return None if v is None else float(v)
+
+
 def _parse_hourly_response(data: dict) -> list[dict]:
     """Open-Meteo's {"hourly": {"time": [...], "temperature_2m": [...], ...}}
     -> one dict per hour. Hours with no temperature reading are dropped --
@@ -62,8 +70,8 @@ def _parse_hourly_response(data: dict) -> list[dict]:
         points.append({
             "time": datetime.strptime(t, "%Y-%m-%dT%H:%M").replace(tzinfo=timezone.utc),
             "temp_f": temp,
-            "humidity": humidity[i] if i < len(humidity) else None,
-            "cloud_cover": cloud[i] if i < len(cloud) else None,
+            "humidity": _as_float(humidity[i] if i < len(humidity) else None),
+            "cloud_cover": _as_float(cloud[i] if i < len(cloud) else None),
         })
     return points
 
@@ -80,10 +88,13 @@ def fetch_archive(http_client: httpx.Client, start_date: date, end_date: date) -
     return _parse_hourly_response(resp.json())
 
 
-def fetch_forecast(http_client: httpx.Client, past_days: int, forecast_days: int = 0) -> list[dict]:
+def fetch_forecast(http_client: httpx.Client, past_days: int, forecast_days: int = 1) -> list[dict]:
     """Near-real-time hourly weather covering the last `past_days` days plus
-    `forecast_days` ahead (0 for the ongoing poll -- we only want what already
-    happened)."""
+    `forecast_days` ahead. Open-Meteo's `forecast_days` counts from today, so
+    0 would drop today entirely, not just the future -- callers that only
+    want what already happened should request `forecast_days=1` and then
+    filter the result through `_drop_future`, rather than trying to get
+    Open-Meteo to stop at "now" itself."""
     resp = http_client.get(FORECAST_URL, params={
         "latitude": LATITUDE, "longitude": LONGITUDE,
         "hourly": HOURLY_FIELDS, "temperature_unit": "fahrenheit", "timezone": "UTC",
@@ -98,10 +109,31 @@ def _today() -> date:
     return datetime.now(timezone.utc).date()
 
 
+def _now() -> datetime:
+    """Thin wrapper so tests can freeze "now" via mock.patch.object."""
+    return datetime.now(timezone.utc)
+
+
+def _drop_future(points: list[dict]) -> list[dict]:
+    """Filter out any point whose time is after now -- Open-Meteo's
+    `forecast_days` is requested as 1 (never 0, which drops today too) so
+    that genuine forecast values don't get stored as if they were
+    observations."""
+    now = _now()
+    return [p for p in points if p["time"] <= now]
+
+
 def write_weather_points(write_api, points: list[dict]) -> int:
-    """Write each point to the `weather` measurement. Same (measurement, time)
-    overwrites in Influx, so this is safe to call repeatedly over an
-    overlapping range -- no existence-check needed, unlike bath/charge events."""
+    """Write each point to the `weather` measurement. In InfluxDB 2.x, series
+    identity is (measurement, tag set, field keys) -- these points carry NO
+    tags, which is what makes a write at an existing (measurement, time)
+    overwrite rather than duplicate. That's what makes it safe to call this
+    repeatedly over an overlapping range (e.g. the archive/forecast overlap
+    in `backfill`) with no existence-check needed, unlike bath/charge events.
+    Adding any tag here (e.g. source= or location=) would split the overlap
+    into distinct series that no longer overwrite each other, silently
+    doubling every hour in the overlap seam -- don't add one without
+    re-checking this."""
     if not points:
         return 0
     for pt in points:
@@ -129,7 +161,8 @@ def backfill(client: InfluxDBClient, start_date: date) -> None:
             n = write_weather_points(write_api, archive_points)
             logger.info(f"Archive: wrote {n} hourly points ({start_date} to {archive_end})")
 
-        forecast_points = fetch_forecast(http_client, past_days=ARCHIVE_LAG_DAYS + 2, forecast_days=0)
+        forecast_points = fetch_forecast(http_client, past_days=ARCHIVE_LAG_DAYS + 2, forecast_days=1)
+        forecast_points = _drop_future(forecast_points)
         n = write_weather_points(write_api, forecast_points)
         logger.info(f"Forecast (recent tail): wrote {n} hourly points")
 
@@ -138,7 +171,8 @@ def normal_run(client: InfluxDBClient) -> None:
     """Check the last 2 days (covers any missed loop iteration) and write."""
     write_api = client.write_api(write_options=SYNCHRONOUS)
     with httpx.Client(timeout=30.0) as http_client:
-        points = fetch_forecast(http_client, past_days=2, forecast_days=0)
+        points = fetch_forecast(http_client, past_days=2, forecast_days=1)
+    points = _drop_future(points)
     n = write_weather_points(write_api, points)
     logger.info(f"Wrote {n} hourly weather points")
 
