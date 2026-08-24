@@ -100,10 +100,12 @@ GitHub pushes via the Vercel Git integration. Pi-hosted as a Docker service
 **Start at `docs/roadmap.md`** — phased, dependency-ordered, each phase scoped to hand to a
 subagent. The list below is near-term mechanics; the roadmap explains ordering and why.
 
-- **#14 Phase 1 done (2026-08-24)** — outdoor temp now flowing hourly into the `weather`
-  measurement, backfilled to 2026-01-04. Heat/cool split + generalizing `bath_detector.py`
-  into the Phase 4 attribution engine (showers, laundry hot water) is a separate
-  not-yet-started sub-project — see `docs/roadmap.md` Phase 4.
+- **#14 sub-project 2 — heat/cool/hot-water split** (next up, not yet designed). Phase 1 (outdoor
+  temp ingest) shipped and was live-verified 2026-08-24: hourly Open-Meteo data flows into the
+  `weather` measurement, backfilled to 2026-01-04 (5585 points, zero gaps). That was the blocker —
+  power signature alone can't tell heating from cooling. Sub-project 2 is the split itself plus
+  generalizing `bath_detector.py` into the Phase 4 attribution engine (showers, laundry hot water).
+  Needs its own design pass. See `docs/roadmap.md` Phase 4.
 - **#17 part 2 — dryer (then washer) detection**, off `panel.feedthrough_power_w`. Part 1
   ("Unmonitored" breakdown row) shipped 2026-08-23 (commit d3bb6a0) and reconciles live at ~11%
   share; part 2 is the next Phase 2 item and *does* need the sign/`abs()` handling part 1 deliberately
