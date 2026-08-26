@@ -59,12 +59,26 @@ Costs use `rates.cost_for_kwh`, as the detectors do today.
 
 ### `hvac_mode` measurement — storage
 
-Bucket `span`, measurement `hvac_mode`, tag `mode`, fields `energy_kwh`,
-`mean_power_w`, `cost_dollars`, timestamped at interval start (UTC). Properties:
+Bucket `span`, measurement `hvac_mode`, **no tags**, one point per 5-minute
+interval timestamped at interval start (UTC). Fields:
 
-- **Idempotent by construction:** Influx overwrites on identical
-  measurement+tag+timestamp, so re-classification (backfill re-runs, threshold
-  revisions, self-heal) is plain re-writing. No dedup logic.
+- `energy_heat_kwh`, `energy_cool_kwh`, `energy_hot_water_kwh`,
+  `energy_idle_kwh`, `energy_ambiguous_kwh` — the interval's energy lands in
+  exactly one of these; the rest are 0.0. (Amended 2026-08-26: the original
+  draft used a `mode` tag, but tags split series identity, so a re-classified
+  interval would leave its stale point behind and double-count — the exact trap
+  `write_weather_points`' docstring documents. Fields overwrite; tags don't.)
+- `mode` (string) — the label, for Grafana/debug legibility.
+- `hp_mean_w`, `hp_max_w`, `aux_mean_w`, `aux_max_w` — per-circuit stats, so the
+  re-based bath detector can emit schema-compatible `bath_event`s from the
+  timeline alone.
+- `cost_dollars`.
+
+Properties:
+
+- **Idempotent by construction:** with no tags, series identity is fixed, so
+  Influx overwrites on identical timestamp — re-classification (backfill
+  re-runs, threshold revisions, self-heal) is plain re-writing. No dedup logic.
 - Interval width 5 min, aligned to the wall clock, matching `circuit_5m`.
 - Sizing: ~105k intervals/yr → negligible against ~460 MB/yr raw and 90 GB free.
 - Covered by the existing nightly restic backup (whole InfluxDB volume).
@@ -102,8 +116,8 @@ comfortably covers.
 
 ### `web/` — breakdown sub-rows (changed)
 
-- New query in `web/lib/influx.ts`: sum `hvac_mode` `energy_kwh` by `mode` tag over
-  the window. Cheap (pre-aggregated 5-min points), cached like the breakdown —
+- New query in `web/lib/influx.ts`: sum the three `energy_*_kwh` mode fields of
+  `hvac_mode` over the window (group by `_field`). Cheap (pre-aggregated 5-min points), cached like the breakdown —
   server `queryCache` + client `TtlLru`, keyed by window only.
 - `/api/energy` category view returns Heating / Cooling / Hot Water rows carrying
   `parent: "HVAC"`, reusing the existing parent-nesting mechanism.
