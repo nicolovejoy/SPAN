@@ -123,6 +123,7 @@ services:
       - RESEND_API_KEY=${RESEND_API_KEY}
       - REPORT_EMAIL=${REPORT_EMAIL}
       - TZ=America/Los_Angeles
+      - GAP_COVERAGE_MIN=0.95
     volumes:
       - report-state:/app/state
     depends_on:
