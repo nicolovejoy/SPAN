@@ -43,8 +43,8 @@
 
 1. Clone the repo:
    ```bash
-   git clone https://github.com/nicolovejoy/SPAN.git
-   cd SPAN/pi
+   git clone https://github.com/nicolovejoy/span.git
+   cd span/pi
    ```
 
 2. Create `.env` file with your SPAN token:
