@@ -87,6 +87,30 @@ class BathEventsTest(unittest.TestCase):
         ivs = series(utc(2026, 1, 10, 3, 0), 6, "hot_water", aux_mean=0.0)
         self.assertFalse(at.bath_events(ivs)[0]["aux_active"])
 
+    def test_shower_shaped_run_clears_duration_and_power_but_not_energy(self):
+        # 5 intervals = 25 min (meets BATH_MIN_MINUTES exactly). hp_mean=2448 W
+        # clears BATH_MEAN_POWER_MIN_W (2400). Total energy = 5 * 2448 * 5/60/1000
+        # = 1.02 kWh, under BATH_MIN_KWH (1.5). This is a "shower" per the Phase 0
+        # findings: duration and power alone can't separate it from a real bath,
+        # only the energy floor does.
+        ivs = series(utc(2026, 1, 10, 3, 0), 5, "hot_water", hp_mean=2448.0)
+        self.assertEqual(len(ivs) * 5, at.BATH_MIN_MINUTES)
+        self.assertGreaterEqual(2448.0, at.BATH_MEAN_POWER_MIN_W)
+        total_kwh = sum(i["energy_kwh"] for i in ivs)
+        self.assertAlmostEqual(total_kwh, 1.02, places=6)
+        self.assertLess(total_kwh, at.BATH_MIN_KWH)
+        self.assertEqual(at.bath_events(ivs), [])
+
+    def test_run_just_above_the_energy_floor_is_a_bath(self):
+        # Same 25-min duration, but hp_mean=3700 W pushes total energy to
+        # ~1.54 kWh, just above BATH_MIN_KWH -- confirms the floor doesn't
+        # simply reject every run.
+        ivs = series(utc(2026, 1, 10, 3, 0), 5, "hot_water", hp_mean=3700.0)
+        total_kwh = sum(i["energy_kwh"] for i in ivs)
+        self.assertGreater(total_kwh, at.BATH_MIN_KWH)
+        events = at.bath_events(ivs)
+        self.assertEqual(len(events), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

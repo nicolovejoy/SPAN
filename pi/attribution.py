@@ -8,8 +8,17 @@ from datetime import timedelta
 from hvac_modes import INTERVAL_MINUTES
 from rates import cost_for_kwh
 
-BATH_MIN_MINUTES = 25          # bath_detector required >= 3 overlapping 15-min windows
-BATH_MEAN_POWER_MIN_W = 2500.0
+BATH_MIN_MINUTES = 25          # Phase 0 backtest-calibrated; see
+                                # docs/superpowers/notes/2026-08-26-hvac-phase0-findings.md
+BATH_MEAN_POWER_MIN_W = 2400.0  # Phase 0 backtest: see
+                                 # docs/superpowers/notes/2026-08-26-hvac-phase0-findings.md
+# Baths and showers overlap in duration (both start ~25 min) and in power, so
+# duration/power alone can't separate them. A shower run carries about half a
+# bath's energy (median 1.15 vs 2.15 kWh) -- an energy floor cuts diagonally
+# across duration x power where a bound on either alone cannot, dropping
+# false positives from 59 to 15 over the Phase 0 backtest period. See
+# docs/superpowers/notes/2026-08-26-hvac-phase0-findings.md.
+BATH_MIN_KWH = 1.5
 
 
 def runs(intervals: list[dict], mode: str) -> list[list[dict]]:
@@ -41,12 +50,13 @@ def bath_events(intervals: list[dict]) -> list[dict]:
     for run in runs(intervals, "hot_water"):
         duration_min = len(run) * INTERVAL_MINUTES
         hp_mean = sum(i["hp_mean_w"] for i in run) / len(run)
-        if duration_min < BATH_MIN_MINUTES or hp_mean < BATH_MEAN_POWER_MIN_W:
+        energy_kwh = sum(i["energy_kwh"] for i in run)
+        if (duration_min < BATH_MIN_MINUTES or hp_mean < BATH_MEAN_POWER_MIN_W
+                or energy_kwh < BATH_MIN_KWH):
             continue
         start = run[0]["start"]
         end = run[-1]["start"] + timedelta(minutes=INTERVAL_MINUTES)
         aux_mean = sum(i["aux_mean_w"] for i in run) / len(run)
-        energy_kwh = sum(i["energy_kwh"] for i in run)
         events.append({
             "start": start,
             "end": end,

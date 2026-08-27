@@ -3,17 +3,22 @@
 
 Turns raw 30s HP + aux power samples plus hourly outdoor temperature into a
 labeled 5-minute timeline: heat / cool / hot_water / idle / ambiguous.
-Thresholds below are Phase 0 SEEDS; see the findings note referenced next to
-each constant once Task 5 has tuned them against January-to-now data.
+Thresholds below are Phase 0-calibrated against 2026-01-04 -> 2026-08-26
+production data; see docs/superpowers/notes/2026-08-26-hvac-phase0-findings.md
+for the backtest that set each tuned constant.
 """
 from datetime import datetime, timedelta, timezone
 
 INTERVAL_MINUTES = 5
 IDLE_POWER_W = 50.0            # on/off boundary, same as bath_detector's POWER_THRESHOLD
 
-# --- DHW (hot water) signature seeds — season-invariant, Phase 0-tunable ---
-DHW_MEAN_POWER_MIN_W = 2500.0  # seeded from bath_detector.MEAN_POWER_MIN
-DHW_DUTY_MIN = 0.85            # seeded from bath_detector.DUTY_CYCLE_MIN
+# --- DHW (hot water) signature, season-invariant ---
+DHW_MEAN_POWER_MIN_W = 2100.0  # Phase 0 backtest: seed 2500 clipped the reheat ramp's
+                                # early minutes (2020->3606 W over 45 min); see
+                                # docs/superpowers/notes/2026-08-26-hvac-phase0-findings.md
+DHW_DUTY_MIN = 0.65            # Phase 0 backtest: seed 0.85 dropped ramp-tail intervals
+                                # closing a draw at ~0.70 duty; see
+                                # docs/superpowers/notes/2026-08-26-hvac-phase0-findings.md
 DHW_MAX_TRANSITIONS = 2        # seeded from bath_detector.MAX_TRANSITIONS
 DHW_RUN_MIN_MINUTES = 10       # shorter high-power runs -> not a reheat
 DHW_RUN_MAX_MINUTES = 120      # longer -> sustained space conditioning
