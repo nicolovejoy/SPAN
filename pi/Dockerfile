@@ -7,6 +7,9 @@ RUN pip install --no-cache-dir httpx influxdb-client tzdata matplotlib
 COPY collector.py .
 COPY collector_health.py .
 COPY bath_detector.py .
+COPY hvac_modes.py .
+COPY attribution.py .
+COPY hvac_classifier.py .
 COPY charge_detector.py .
 COPY weather_poller.py .
 COPY daily_report.py .
