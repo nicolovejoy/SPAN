@@ -69,3 +69,76 @@ def bucket_intervals(hp_samples: list[dict], aux_samples: list[dict],
             })
         b += width
     return out
+
+
+def temp_at(weather_points: list[dict], dt: datetime) -> float | None:
+    """Nearest hourly reading within WEATHER_MAX_STALENESS_MIN, else None."""
+    best, best_gap = None, None
+    for w in weather_points:
+        gap = abs((w["time"] - dt).total_seconds())
+        if best_gap is None or gap < best_gap:
+            best, best_gap = w, gap
+    if best is None or best_gap > WEATHER_MAX_STALENESS_MIN * 60:
+        return None
+    return best["temp_f"]
+
+
+def _is_dhw_shaped(interval: dict) -> bool:
+    return (interval["hp_mean_w"] >= DHW_MEAN_POWER_MIN_W
+            and interval["hp_duty"] >= DHW_DUTY_MIN
+            and interval["hp_transitions"] <= DHW_MAX_TRANSITIONS)
+
+
+def _mark_hot_water(intervals: list[dict]) -> set[datetime]:
+    """Group consecutive DHW-shaped intervals; runs whose duration lands in
+    [DHW_RUN_MIN_MINUTES, DHW_RUN_MAX_MINUTES] are hot water. 'Consecutive'
+    means exactly INTERVAL_MINUTES apart — a timeline gap breaks the run.
+    Over-long runs fall through to temperature classification (sustained
+    space conditioning)."""
+    starts: set[datetime] = set()
+    run: list[dict] = []
+
+    def flush():
+        if run:
+            minutes = len(run) * INTERVAL_MINUTES
+            if DHW_RUN_MIN_MINUTES <= minutes <= DHW_RUN_MAX_MINUTES:
+                starts.update(i["start"] for i in run)
+        run.clear()
+
+    prev = None
+    for i in intervals:
+        contiguous = prev is not None and (i["start"] - prev) == timedelta(minutes=INTERVAL_MINUTES)
+        if _is_dhw_shaped(i):
+            if not contiguous:
+                flush()
+            run.append(i)
+        else:
+            flush()
+        prev = i["start"]
+    flush()
+    return starts
+
+
+def classify(intervals: list[dict], weather_points: list[dict]) -> list[dict]:
+    """Label each interval with its mode. Stage 1: season-invariant DHW shape.
+    Stage 2: remaining active intervals split by outdoor temperature."""
+    hot_water = _mark_hot_water(intervals)
+    out = []
+    for i in intervals:
+        total = i["hp_mean_w"] + i["aux_mean_w"]
+        if total < IDLE_POWER_W:
+            mode = "idle"
+        elif i["start"] in hot_water:
+            mode = "hot_water"
+        else:
+            t = temp_at(weather_points, i["start"])
+            if t is None:
+                mode = "ambiguous"
+            elif t <= HEAT_MAX_TEMP_F:
+                mode = "heat"
+            elif t >= COOL_MIN_TEMP_F:
+                mode = "cool"
+            else:
+                mode = "ambiguous"
+        out.append({**i, "mode": mode})
+    return out

@@ -83,5 +83,91 @@ class BucketIntervalsTest(unittest.TestCase):
         self.assertEqual(out[0]["start"], utc(2026, 8, 20, 10, 0))
 
 
+def iv(start, hp_mean, duty=1.0, transitions=0, aux_mean=0.0):
+    """Interval dict factory with sane defaults for classification tests."""
+    return {"start": start, "hp_mean_w": hp_mean, "hp_max_w": hp_mean,
+            "hp_duty": duty, "hp_transitions": transitions,
+            "aux_mean_w": aux_mean, "aux_max_w": aux_mean,
+            "energy_kwh": (hp_mean + aux_mean) * 5 / 60 / 1000, "n_samples": 10}
+
+def series(start, n, **kw):
+    return [iv(start + timedelta(minutes=5 * i), **kw) for i in range(n)]
+
+COLD = [{"time": utc(2026, 1, 10, h), "temp_f": 35.0} for h in range(24)]
+HOT = [{"time": utc(2026, 7, 10, h), "temp_f": 85.0} for h in range(24)]
+MILD = [{"time": utc(2026, 4, 10, h), "temp_f": 62.0} for h in range(24)]
+
+class TempAtTest(unittest.TestCase):
+    def test_nearest_reading_within_staleness_window(self):
+        self.assertEqual(hm.temp_at(COLD, utc(2026, 1, 10, 3, 20)), 35.0)
+
+    def test_none_when_no_reading_close_enough(self):
+        self.assertIsNone(hm.temp_at(COLD, utc(2026, 1, 12, 3)))
+
+    def test_none_on_empty(self):
+        self.assertIsNone(hm.temp_at([], utc(2026, 1, 10, 3)))
+
+class ClassifyTest(unittest.TestCase):
+    def test_low_power_is_idle_regardless_of_weather(self):
+        out = hm.classify(series(utc(2026, 1, 10, 3), 3, hp_mean=10.0), COLD)
+        self.assertEqual([i["mode"] for i in out], ["idle"] * 3)
+
+    def test_sustained_high_power_on_cold_day_is_heat(self):
+        # 3 hours of steady 3kW: too long for a DHW reheat -> space heating
+        out = hm.classify(series(utc(2026, 1, 10, 3), 36, hp_mean=3000.0), COLD)
+        self.assertEqual({i["mode"] for i in out}, {"heat"})
+
+    def test_sustained_high_power_on_hot_day_is_cool(self):
+        out = hm.classify(series(utc(2026, 7, 10, 3), 36, hp_mean=3000.0), HOT)
+        self.assertEqual({i["mode"] for i in out}, {"cool"})
+
+    def test_bounded_high_power_run_is_hot_water_in_any_season(self):
+        for weather, month in ((COLD, 1), (HOT, 7)):
+            # 30 min of DHW-shaped draw framed by idle
+            run = (series(utc(2026, month, 10, 3, 0), 2, hp_mean=10.0)
+                   + series(utc(2026, month, 10, 3, 10), 6, hp_mean=3200.0)
+                   + series(utc(2026, month, 10, 3, 40), 2, hp_mean=10.0))
+            out = hm.classify(run, weather)
+            self.assertEqual([i["mode"] for i in out],
+                             ["idle"] * 2 + ["hot_water"] * 6 + ["idle"] * 2,
+                             f"month={month}")
+
+    def test_short_high_power_blip_is_not_hot_water(self):
+        # one 5-min interval < DHW_RUN_MIN_MINUTES -> falls through to temp
+        run = (series(utc(2026, 1, 10, 3, 0), 1, hp_mean=10.0)
+               + series(utc(2026, 1, 10, 3, 5), 1, hp_mean=3200.0)
+               + series(utc(2026, 1, 10, 3, 10), 1, hp_mean=10.0))
+        out = hm.classify(run, COLD)
+        self.assertEqual(out[1]["mode"], "heat")
+
+    def test_choppy_high_power_is_not_hot_water(self):
+        # duty/transition profile fails the DHW gate -> temp decides
+        out = hm.classify(series(utc(2026, 1, 10, 3), 6, hp_mean=3000.0,
+                                 duty=0.5, transitions=6), COLD)
+        self.assertEqual({i["mode"] for i in out}, {"heat"})
+
+    def test_midband_temp_is_ambiguous(self):
+        out = hm.classify(series(utc(2026, 4, 10, 3), 36, hp_mean=3000.0), MILD)
+        self.assertEqual({i["mode"] for i in out}, {"ambiguous"})
+
+    def test_missing_weather_is_ambiguous_but_dhw_still_labels(self):
+        run = (series(utc(2026, 1, 10, 3, 0), 36, hp_mean=3000.0)      # would-be heat
+               + series(utc(2026, 1, 10, 6, 0), 1, hp_mean=10.0)
+               + series(utc(2026, 1, 10, 6, 5), 6, hp_mean=3200.0)     # DHW shape
+               + series(utc(2026, 1, 10, 6, 35), 1, hp_mean=10.0))
+        out = hm.classify(run, [])
+        self.assertEqual({i["mode"] for i in out[:36]}, {"ambiguous"})
+        self.assertEqual([i["mode"] for i in out[37:43]], ["hot_water"] * 6)
+
+    def test_timeline_gap_splits_a_dhw_run(self):
+        # 6 DHW-shaped intervals but a 20-min hole in the middle: the two
+        # halves are separate runs, each under DHW_RUN_MIN_MINUTES's 2-interval
+        # floor only if shorter — here each half is 15 min, still >= 10 -> both hot_water
+        run = (series(utc(2026, 1, 10, 3, 0), 3, hp_mean=3200.0)
+               + series(utc(2026, 1, 10, 3, 35), 3, hp_mean=3200.0))
+        out = hm.classify(run, COLD)
+        self.assertEqual({i["mode"] for i in out}, {"hot_water"})
+
+
 if __name__ == "__main__":
     unittest.main()
