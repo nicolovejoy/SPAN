@@ -108,6 +108,25 @@ services:
     depends_on:
       - influxdb
 
+  hvac-classifier:
+    build: .
+    container_name: hvac-classifier
+    restart: unless-stopped
+    command: ["python", "-u", "hvac_classifier.py", "--loop"]
+    env_file:
+      - .env
+    environment:
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=${INFLUXDB_TOKEN}
+      - INFLUXDB_ORG=home
+      - INFLUXDB_BUCKET=span
+      # Drives the nightly self-heal sweep's day boundary (02:00 local) --
+      # see hvac_classifier.py's SWEEP_HOUR comment. Same mechanism
+      # daily-report already relies on below.
+      - TZ=America/Los_Angeles
+    depends_on:
+      - influxdb
+
   daily-report:
     build: .
     container_name: daily-report

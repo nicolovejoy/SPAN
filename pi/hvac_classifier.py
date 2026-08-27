@@ -32,6 +32,23 @@ AUX_CIRCUIT = "Auxiliary / Heat pump (HP)"
 TRAILING_WINDOW_HOURS = 3
 MODES = ("heat", "cool", "hot_water", "idle", "ambiguous")
 
+# Nightly self-heal sweep (#14 sub-project 2 addendum): --loop's trailing 3h
+# window can't reach an outage longer than 3h, which leaves a permanent hole
+# only a manual --backfill repairs -- the same dead-service blind spot
+# CLAUDE.md already records against weather_poller.py. Re-run the last two
+# completed LOCAL days through the existing --backfill path once nightly.
+#
+# 02:00 local, not right after midnight: a DHW run straddling the day
+# boundary needs to be over before its length is measurable (that's what
+# distinguishes a reheat from space conditioning), and DHW_RUN_MAX_MINUTES is
+# 120 -- a 2h lag covers the worst case with margin. "Local" here means the
+# container's TZ (America/Los_Angeles, set in docker-compose.yml), the same
+# mechanism daily_report.py's seconds_until_hour relies on -- datetime.now()
+# without a tz reads the OS/libc local clock, which follows the TZ env var
+# once tzdata is installed (it is, in the Dockerfile).
+SWEEP_HOUR = 2
+SWEEP_LOOKBACK_DAYS = 2
+
 # Classification is NOT interval-local: hvac_modes._mark_hot_water measures the
 # length of a contiguous DHW-shaped run, so an interval sitting at a window's
 # leading edge has its run truncated to whatever the window happens to contain.
@@ -73,6 +90,12 @@ def _rfc3339(dt: datetime) -> str:
 def _now() -> datetime:
     """Thin wrapper so tests can freeze "now" via mock.patch.object."""
     return datetime.now(timezone.utc)
+
+
+def _local_now() -> datetime:
+    """Thin wrapper so tests can freeze local "now" via mock.patch.object.
+    Naive on purpose -- see the SWEEP_HOUR comment above."""
+    return datetime.now()
 
 
 def query_circuit_power(query_api, circuit_name: str, start: str, stop: str = "now()") -> list[dict]:
@@ -336,6 +359,37 @@ def backfill(client: InfluxDBClient, start_date: datetime) -> None:
     logger.info(f"Backfill complete: {total} hvac_mode intervals written")
 
 
+def sweep_due(now_local: datetime, last_sweep_date) -> "datetime.date | None":
+    """Pure scheduling decision for the nightly self-heal sweep: the local
+    calendar date to sweep for, or None if it isn't time yet.
+
+    Fires at most once per local calendar day, only once the clock has passed
+    SWEEP_HOUR local -- see the module-level comment for why. `last_sweep_date`
+    is the date (or None) the caller last actually ran a sweep for; comparing
+    against it (rather than e.g. hour == SWEEP_HOUR) makes this safe to call
+    every --interval-seconds tick without double-firing or depending on the
+    loop landing on an exact minute."""
+    if now_local.hour < SWEEP_HOUR:
+        return None
+    today = now_local.date()
+    if last_sweep_date == today:
+        return None
+    return today
+
+
+def run_sweep(client: InfluxDBClient, sweep_date) -> None:
+    """Re-backfill the SWEEP_LOOKBACK_DAYS local days completed before
+    `sweep_date` (both already-elapsed local days as of the sweep firing).
+    Goes through the same `backfill()` day-batch path --backfill uses, so
+    this is a pure re-run: idempotent overwrites, no new classification
+    logic."""
+    start = datetime(sweep_date.year, sweep_date.month, sweep_date.day, tzinfo=timezone.utc) \
+        - timedelta(days=SWEEP_LOOKBACK_DAYS)
+    logger.info(f"Nightly self-heal sweep: re-backfilling from {start:%Y-%m-%d} "
+                f"({SWEEP_LOOKBACK_DAYS} completed local days)")
+    backfill(client, start)
+
+
 def backtest(client: InfluxDBClient, days: int, compare_baths: bool = False) -> None:
     """Classify the last `days` days and PRINT the result -- never write. This
     is the Phase 0 gate: the numbers get eyeballed before anything deploys."""
@@ -402,12 +456,25 @@ def main():
             logger.info(f"Backfilling hvac_mode from {start:%Y-%m-%d}")
             backfill(client, start)
         elif args.loop:
-            logger.info(f"Loop mode: classifying every {args.interval}s")
+            logger.info(f"Loop mode: classifying every {args.interval}s, "
+                        f"nightly self-heal sweep at {SWEEP_HOUR:02d}:00 local")
+            last_sweep_date = None
             while True:
                 try:
                     normal_run(client)
                 except Exception as e:
                     logger.error(f"Classification pass failed: {e}")
+                # Same process, same thread as normal_run above: the sweep
+                # can never run concurrently with a --loop pass, only ever
+                # between them -- no locking needed to avoid the wasted
+                # duplicate work a truly concurrent backfill would do.
+                due = sweep_due(_local_now(), last_sweep_date)
+                if due is not None:
+                    try:
+                        run_sweep(client, due)
+                        last_sweep_date = due
+                    except Exception as e:
+                        logger.error(f"Nightly sweep failed: {e}")
                 time.sleep(args.interval)
         else:
             normal_run(client)

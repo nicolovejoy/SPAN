@@ -456,5 +456,64 @@ class DayBoundaryContextTest(unittest.TestCase):
                              [utc(2026, 1, 10), utc(2026, 1, 11)])
 
 
+class SweepDueTest(unittest.TestCase):
+    """Pure scheduling decision for the nightly self-heal sweep (addendum)."""
+
+    def test_not_due_before_sweep_hour(self):
+        now = datetime(2026, 3, 5, hc.SWEEP_HOUR - 1, 59)
+        self.assertIsNone(hc.sweep_due(now, None))
+
+    def test_due_at_sweep_hour_if_not_already_run_today(self):
+        now = datetime(2026, 3, 5, hc.SWEEP_HOUR, 0)
+        self.assertEqual(hc.sweep_due(now, None), now.date())
+
+    def test_due_any_time_after_sweep_hour(self):
+        now = datetime(2026, 3, 5, 23, 0)
+        self.assertEqual(hc.sweep_due(now, None), now.date())
+
+    def test_not_due_again_same_day_once_already_run(self):
+        now = datetime(2026, 3, 5, 23, 0)
+        self.assertIsNone(hc.sweep_due(now, now.date()))
+
+    def test_due_again_the_next_day(self):
+        now = datetime(2026, 3, 6, hc.SWEEP_HOUR, 5)
+        last = datetime(2026, 3, 5).date()
+        self.assertEqual(hc.sweep_due(now, last), now.date())
+
+
+class RunSweepTest(unittest.TestCase):
+    """run_sweep is pure wiring onto backfill() -- no new classification
+    logic, just the date arithmetic the addendum specifies."""
+
+    def test_backfills_from_two_days_before_the_sweep_date(self):
+        client = mock.MagicMock()
+        with mock.patch.object(hc, "backfill") as bf:
+            hc.run_sweep(client, datetime(2026, 3, 10).date())
+            bf.assert_called_once_with(client, utc(2026, 3, 8))
+
+    def test_start_date_is_utc_tagged(self):
+        client = mock.MagicMock()
+        with mock.patch.object(hc, "backfill") as bf:
+            hc.run_sweep(client, datetime(2026, 1, 1).date())
+            called_start = bf.call_args[0][1]
+            self.assertEqual(called_start.tzinfo, UTC)
+
+
+class LoopSweepWiringTest(unittest.TestCase):
+    """The --loop branch must call normal_run and a due sweep in the same
+    thread/pass, never concurrently -- see main()'s comment on why that's
+    enough to avoid a wasted duplicate backfill racing --loop."""
+
+    def test_loop_runs_sweep_once_when_due_then_stops_repeating_same_day(self):
+        # Exercise the scheduling primitives directly rather than main()'s
+        # infinite loop: two ticks on the same local day should sweep once.
+        last_sweep_date = None
+        due1 = hc.sweep_due(datetime(2026, 3, 5, 2, 0), last_sweep_date)
+        self.assertIsNotNone(due1)
+        last_sweep_date = due1
+        due2 = hc.sweep_due(datetime(2026, 3, 5, 2, 10), last_sweep_date)
+        self.assertIsNone(due2)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
