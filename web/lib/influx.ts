@@ -2,7 +2,7 @@ import { InfluxDB } from "@influxdata/influxdb-client";
 import type { IntervalKey } from "./interval";
 import { fluxEvery } from "./interval";
 import { categoryFromNameFlux, nameMatchesCategoriesFlux } from "./categories";
-import { unmonitoredKwh } from "./energyWindow";
+import { hvacModeRowsFromFieldSums, spliceChildRows, unmonitoredKwh } from "./energyWindow";
 import {
   RAW_ENERGY_SOURCE,
   energySourceForSpan,
@@ -327,6 +327,31 @@ from(bucket: "${BUCKET}")
   return (rows[0]?._value ?? 0) / 1000.0;
 }
 
+/**
+ * HVAC mode split (kWh per mode) over [fromMs, toMs), from the hvac_mode
+ * timeline the Pi classifier writes (#14 sub-project 2). Returns nested
+ * EnergyRows (parent: "HVAC"); empty for windows before the series starts
+ * (2026-01-04) or if the classifier is down — the breakdown then simply
+ * shows the plain HVAC row, nothing invented.
+ */
+async function queryHvacModeRows(fromMs: number, toMs: number): Promise<EnergyRow[]> {
+  const flux = `
+from(bucket: "${BUCKET}")
+  |> range(start: ${fluxDate(fromMs)}, stop: ${fluxDate(toMs)})
+  |> filter(fn: (r) => r._measurement == "hvac_mode")
+  |> filter(fn: (r) => r._field == "energy_heat_kwh" or r._field == "energy_cool_kwh" or r._field == "energy_hot_water_kwh")
+  |> group(columns: ["_field"])
+  |> sum()
+`;
+  const sums: Record<string, number> = {};
+  const queryApi = makeClient().getQueryApi(ORG);
+  for await (const row of queryApi.iterateRows(flux)) {
+    const o = row.tableMeta.toObject(row.values) as Record<string, unknown>;
+    sums[String(o._field)] = Number(o._value) || 0;
+  }
+  return hvacModeRowsFromFieldSums(sums);
+}
+
 async function runEnergyFlux(flux: string): Promise<EnergyRow[]> {
   const queryApi = makeClient().getQueryApi(ORG);
   const out: EnergyRow[] = [];
@@ -373,7 +398,7 @@ export async function queryEnergyByCategory(opts: {
     bucketMs: src.mode === "sum" ? src.bucketMs : RAW_ENERGY_SOURCE.bucketMs,
   });
 
-  const [parts, panelKwh] = await Promise.all([
+  const [parts, panelKwh, modeRows] = await Promise.all([
     Promise.all(
       segments.map(async (seg) => {
         if (seg.kind === "raw") return runEnergyFlux(rawEnergyFlux(seg, g));
@@ -383,6 +408,7 @@ export async function queryEnergyByCategory(opts: {
       }),
     ),
     g.kind === "circuit" ? Promise.resolve(0) : queryPanelKwh(fromMs, toMs),
+    g.kind === "circuit" ? Promise.resolve([]) : queryHvacModeRows(fromMs, toMs),
   ]);
 
   const merged = mergeEnergyRows(parts.flat());
@@ -392,7 +418,10 @@ export async function queryEnergyByCategory(opts: {
     return merged.map((r) => ({ ...r, parent: g.category }));
   }
   const circuitKwh = merged.reduce((sum, r) => sum + r.kwh, 0);
-  return [...merged, { category: "Unmonitored", kwh: unmonitoredKwh(panelKwh, circuitKwh) }];
+  return spliceChildRows(
+    [...merged, { category: "Unmonitored", kwh: unmonitoredKwh(panelKwh, circuitKwh) }, ...modeRows],
+    "HVAC",
+  );
 }
 
 /** Segments partition the window, so per-series totals add. */

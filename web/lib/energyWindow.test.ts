@@ -2,8 +2,10 @@ import { describe, it, expect } from "vitest";
 import {
   buildEnergyRows,
   computeDelta,
+  hvacModeRowsFromFieldSums,
   mergeDrillRows,
   previousWindowRange,
+  spliceChildRows,
   unmonitoredKwh,
 } from "./energyWindow";
 
@@ -111,5 +113,50 @@ describe("mergeDrillRows", () => {
     expect(parentRow?.kwh).toBe(10);
     // Children sum to the parent — the table must not add both into the total.
     expect(out.filter((r) => r.parent).reduce((a, r) => a + r.kwh, 0)).toBe(10);
+  });
+});
+
+describe("spliceChildRows", () => {
+  const rows = [
+    { category: "HVAC", kwh: 10 },
+    { category: "Lights", kwh: 5 },
+    { category: "Unmonitored", kwh: 2 },
+    { category: "Heating", kwh: 6, parent: "HVAC" },
+    { category: "Hot Water", kwh: 2, parent: "HVAC" },
+  ];
+
+  it("moves parent-tagged rows directly after their parent", () => {
+    const out = spliceChildRows(rows, "HVAC");
+    expect(out.map((r) => r.category)).toEqual([
+      "HVAC", "Heating", "Hot Water", "Lights", "Unmonitored",
+    ]);
+  });
+
+  it("drops children whose parent row is absent", () => {
+    const out = spliceChildRows(rows.filter((r) => r.category !== "HVAC"), "HVAC");
+    expect(out.every((r) => !r.parent)).toBe(true);
+  });
+
+  it("is a no-op when there are no children", () => {
+    const plain = rows.filter((r) => !r.parent);
+    expect(spliceChildRows(plain, "HVAC")).toEqual(plain);
+  });
+});
+
+describe("hvacModeRowsFromFieldSums", () => {
+  it("maps mode energy fields to nested display rows, dropping ~zero modes", () => {
+    const out = hvacModeRowsFromFieldSums({
+      energy_heat_kwh: 41.2,
+      energy_cool_kwh: 0.001,
+      energy_hot_water_kwh: 3.1,
+    });
+    expect(out).toEqual([
+      { category: "Heating", kwh: 41.2, parent: "HVAC" },
+      { category: "Hot Water", kwh: 3.1, parent: "HVAC" },
+    ]);
+  });
+
+  it("returns [] for an empty window (pre-2026 or no data)", () => {
+    expect(hvacModeRowsFromFieldSums({})).toEqual([]);
   });
 });

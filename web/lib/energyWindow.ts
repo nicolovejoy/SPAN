@@ -68,6 +68,43 @@ export function mergeDrillRows(
   );
 }
 
+/** Display labels for the hvac_mode energy fields shown as HVAC sub-rows.
+ *  idle/ambiguous are deliberately absent: they stay inside the HVAC parent's
+ *  remainder rather than rendering as noise rows. */
+const HVAC_MODE_LABELS: Record<string, string> = {
+  energy_heat_kwh: "Heating",
+  energy_cool_kwh: "Cooling",
+  energy_hot_water_kwh: "Hot Water",
+};
+
+/** Threshold below which a mode row is noise, not information. */
+const HVAC_MODE_MIN_KWH = 0.05;
+
+/** Per-field kWh sums from the hvac_mode measurement → nested EnergyRows.
+ *  Order is fixed (heat, cool, hot water) so the table is stable across
+ *  windows regardless of magnitude. */
+export function hvacModeRowsFromFieldSums(
+  sums: Record<string, number>,
+): EnergyRow[] {
+  return Object.entries(HVAC_MODE_LABELS).flatMap(([field, label]) => {
+    const kwh = sums[field] ?? 0;
+    return kwh > HVAC_MODE_MIN_KWH ? [{ category: label, kwh, parent: "HVAC" }] : [];
+  });
+}
+
+/** Move rows tagged `parent` to directly after their parent row, preserving
+ *  their relative order. Children with no parent row present are dropped —
+ *  same safety stance as mergeDrillRows. */
+export function spliceChildRows(rows: EnergyRow[], parent: string): EnergyRow[] {
+  const children = rows.filter((r) => r.parent === parent);
+  const rest = rows.filter((r) => r.parent !== parent);
+  if (children.length === 0) return rows;
+  if (!rest.some((r) => r.category === parent && !r.parent)) return rest;
+  return rest.flatMap((r) =>
+    r.category === parent && !r.parent ? [r, ...children] : [r],
+  );
+}
+
 export type Delta =
   | { kind: "percent"; value: number }
   | { kind: "kwh"; value: number }

@@ -113,7 +113,11 @@ export function ExplorerClient({
   const filtered =
     view.show.length === 0
       ? rows
-      : rows.filter((r) => view.show.includes(r.category));
+      : rows.filter(
+          (r) =>
+            view.show.includes(r.category) ||
+            (r.parent !== undefined && view.show.includes(r.parent)),
+        );
   const tableRows = mergeDrillRows(filtered, circuitRows, view.drill);
 
   return (
