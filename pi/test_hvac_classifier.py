@@ -78,6 +78,16 @@ class WriteIntervalsTest(unittest.TestCase):
         self.assertEqual(n, 1)
         self.assertEqual(write_api.write.call_count, 1)
 
+    def test_all_intervals_go_out_in_one_batched_write(self):
+        # One HTTP round-trip per point would be ~66k of them for the 230-day
+        # backfill; the whole batch must go as a single record= list.
+        write_api = mock.MagicMock()
+        ivs = [interval(utc(2026, 1, 10, 3, 5 * k), "heat") for k in range(12)]
+        n = hc.write_intervals(write_api, ivs)
+        self.assertEqual(n, 12)
+        self.assertEqual(write_api.write.call_count, 1)
+        self.assertEqual(len(write_api.write.call_args.kwargs["record"]), 12)
+
     def test_energy_lands_in_exactly_one_mode_field(self):
         # capture the Point chain: heat interval -> energy_heat_kwh=0.25, others 0.0
         fields = {}
@@ -290,6 +300,160 @@ class ClassifyRangeTest(unittest.TestCase):
                               utc(2026, 1, 10, 3, 0), utc(2026, 1, 10, 6, 0))
         self.assertEqual(q.call_args[0][2], "2026-01-10T03:00:00Z")
         self.assertEqual(q.call_args[0][3], "2026-01-10T06:00:00Z")
+
+
+class _FakePanel:
+    """A synthetic panel: 30s HP samples across a span, high-power inside the
+    given DHW windows and off elsewhere, served back filtered by whatever
+    RFC3339 range the module asks for. Outdoor temp is a flat 40F, which is
+    below hvac_modes.HEAT_MAX_TEMP_F -- so anything that FAILS the hot-water
+    test falls through to `heat`, making a misclassification unmistakable."""
+
+    def __init__(self, base, hours, dhw_windows, temp_f=40.0):
+        self.samples = []
+        t, end = base, base + timedelta(hours=hours)
+        while t < end:
+            hot = any(lo <= t < hi for lo, hi in dhw_windows)
+            self.samples.append({"time": t, "power": 3200.0 if hot else 0.0})
+            t += timedelta(seconds=30)
+        self.weather_points = [
+            {"time": base - timedelta(hours=2) + timedelta(hours=k), "temp_f": temp_f}
+            for k in range(hours + 5)]
+
+    def circuit(self, query_api, name, start, stop):
+        if name != hc.HP_CIRCUIT:
+            return []
+        lo = datetime.strptime(start, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+        hi = datetime.strptime(stop, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+        return [s for s in self.samples if lo <= s["time"] < hi]
+
+    def weather(self, query_api, start, stop):
+        return self.weather_points
+
+    def patches(self):
+        return (mock.patch.object(hc, "query_circuit_power", side_effect=self.circuit),
+                mock.patch.object(hc, "query_weather", side_effect=self.weather))
+
+
+class RollingWindowContextTest(unittest.TestCase):
+    """The rolling --loop window rewrites every interval on each pass, so the
+    LAST pass to touch an interval decides its stored label. Without a lead-in
+    buffer that last pass is the one with the interval at the window's leading
+    edge and therefore the LEAST context -- which truncates the run
+    hvac_modes._mark_hot_water measures, and silently relabels the tail of
+    every hot-water run. The Phase 0 backtest cannot catch this: backtest
+    works in whole-day windows, never the rolling one."""
+
+    # A 30-min hot-water run, 02:30 -> 03:00. Tail interval starts 02:55.
+    BASE = utc(2026, 1, 10, 0, 0)
+    RUN = (utc(2026, 1, 10, 2, 30), utc(2026, 1, 10, 3, 0))
+    TAIL = utc(2026, 1, 10, 2, 55)
+
+    def _writes_at(self, panel, now):
+        """Run one --loop pass with the clock frozen at `now`; return the
+        interval dicts that pass handed to write_intervals."""
+        written = []
+
+        def record(write_api, intervals):
+            written.extend(intervals)
+            return len(intervals)
+
+        cp, wp = panel.patches()
+        with cp, wp, \
+             mock.patch.object(hc, "_now", return_value=now), \
+             mock.patch.object(hc, "write_intervals", side_effect=record):
+            hc.normal_run(mock.MagicMock())
+        return written
+
+    def test_run_tail_is_never_written_with_a_truncated_classification(self):
+        panel = _FakePanel(self.BASE, 8, [self.RUN])
+        # Every pass from just after the run through 3h later -- i.e. every
+        # pass whose window can contain the tail interval at all.
+        seen = []
+        t = utc(2026, 1, 10, 3, 0)
+        while t <= utc(2026, 1, 10, 6, 30):
+            for iv in self._writes_at(panel, t):
+                if iv["start"] == self.TAIL:
+                    seen.append((t, iv["mode"]))
+            t += timedelta(minutes=5)
+
+        self.assertTrue(seen, "the tail interval was never written by any pass")
+        wrong = [(t, m) for t, m in seen if m != "hot_water"]
+        self.assertEqual(
+            wrong, [],
+            f"tail interval written as something other than hot_water: {wrong}")
+
+    def test_leading_edge_pass_writes_nothing_it_cannot_classify_correctly(self):
+        # T = 05:55 puts the tail interval exactly at the window's leading
+        # edge (window = [02:55, 05:55]). With the lead-in buffer that pass
+        # must not write it at all; without one it writes it as `heat`.
+        panel = _FakePanel(self.BASE, 8, [self.RUN])
+        starts = [iv["start"] for iv in self._writes_at(panel, utc(2026, 1, 10, 5, 55))]
+        self.assertNotIn(self.TAIL, starts)
+        # ...and the pass is not simply writing nothing.
+        self.assertTrue(starts)
+        self.assertEqual(min(starts), utc(2026, 1, 10, 3, 55))
+
+    def test_the_last_pass_to_write_the_tail_saw_the_whole_run(self):
+        panel = _FakePanel(self.BASE, 8, [self.RUN])
+        written = self._writes_at(panel, utc(2026, 1, 10, 4, 55))
+        tail = [iv for iv in written if iv["start"] == self.TAIL]
+        self.assertEqual(len(tail), 1)
+        self.assertEqual(tail[0]["mode"], "hot_water")
+
+
+class DayBoundaryContextTest(unittest.TestCase):
+    """backfill/backtest work a UTC day at a time. Midnight UTC is 16:00/17:00
+    Pacific -- a plausible bath hour -- so a DHW run can straddle the batch
+    boundary. Classified per bare day, each half is a fragment too short to
+    pass DHW_RUN_MIN_MINUTES and both get relabelled."""
+
+    # 10 minutes exactly (= DHW_RUN_MIN_MINUTES) split 5/5 across midnight, so
+    # BOTH halves fall below the minimum when the run is cut in two.
+    RUN = (utc(2026, 1, 10, 23, 55), utc(2026, 1, 11, 0, 5))
+    BEFORE = utc(2026, 1, 10, 23, 55)
+    AFTER = utc(2026, 1, 11, 0, 0)
+
+    def _day(self, panel, day_start):
+        cp, wp = panel.patches()
+        with cp, wp:
+            return hc.classify_day(mock.MagicMock(), day_start)
+
+    def _panel(self):
+        return _FakePanel(utc(2026, 1, 10, 22, 0), 4, [self.RUN])
+
+    def test_run_straddling_midnight_is_hot_water_on_both_sides(self):
+        panel = self._panel()
+        day10 = {i["start"]: i["mode"] for i in self._day(panel, utc(2026, 1, 10))}
+        day11 = {i["start"]: i["mode"] for i in self._day(panel, utc(2026, 1, 11))}
+        self.assertEqual(day10[self.BEFORE], "hot_water")
+        self.assertEqual(day11[self.AFTER], "hot_water")
+
+    def test_padding_context_is_not_reported_as_part_of_the_day(self):
+        # The classified range is wider than the day; the returned intervals
+        # must not be. Otherwise consecutive days overlap and backfill writes
+        # -- and backtest totals -- double-count the seam.
+        panel = self._panel()
+        day11 = [i["start"] for i in self._day(panel, utc(2026, 1, 11))]
+        self.assertTrue(day11)
+        self.assertGreaterEqual(min(day11), utc(2026, 1, 11))
+        self.assertLess(max(day11), utc(2026, 1, 12))
+        day10 = [i["start"] for i in self._day(panel, utc(2026, 1, 10))]
+        self.assertEqual(set(day10) & set(day11), set())
+
+    def test_backfill_and_backtest_both_route_through_classify_day(self):
+        # The Phase 0 gate only means anything if backtest reports exactly what
+        # backfill would write -- same windowing, same trimming, one function.
+        client = mock.MagicMock()
+        with mock.patch.object(hc, "classify_day", return_value=[]) as cd, \
+             mock.patch.object(hc, "_now", return_value=utc(2026, 1, 12, 6, 0)):
+            hc.backfill(client, utc(2026, 1, 10))
+            self.assertEqual([c[0][1] for c in cd.call_args_list],
+                             [utc(2026, 1, 10), utc(2026, 1, 11)])
+            cd.reset_mock()
+            hc.backtest(client, 2)
+            self.assertEqual([c[0][1] for c in cd.call_args_list],
+                             [utc(2026, 1, 10), utc(2026, 1, 11)])
 
 
 if __name__ == "__main__":

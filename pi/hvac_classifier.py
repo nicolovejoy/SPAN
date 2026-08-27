@@ -32,6 +32,28 @@ AUX_CIRCUIT = "Auxiliary / Heat pump (HP)"
 TRAILING_WINDOW_HOURS = 3
 MODES = ("heat", "cool", "hot_water", "idle", "ambiguous")
 
+# Classification is NOT interval-local: hvac_modes._mark_hot_water measures the
+# length of a contiguous DHW-shaped run, so an interval sitting at a window's
+# leading edge has its run truncated to whatever the window happens to contain.
+# A truncated run shorter than DHW_RUN_MIN_MINUTES fails the DHW test and falls
+# through to temperature, so the TAIL of every hot-water run would be relabelled
+# heat/cool by the one pass that sees it with the least context -- and since
+# that is also the LAST pass to touch it, the wrong label sticks forever.
+#
+# Fix on both code paths: classify a padded range, write only the unpadded core.
+#   - rolling pass: classify [T-3h, T], write only start >= T-3h+WRITE_LEAD_IN.
+#     Interval X is then written by passes T in (X, X+2h]; its final write (at
+#     T = X+2h) sees the window [X-1h, X+2h] -- 1h of lead-in, 2h of lead-out.
+#   - day batch: classify [day-1h, day+1d+1h], write only intervals in the day.
+#     Both sides matter: a run straddling midnight UTC (= 16:00/17:00 Pacific, a
+#     plausible bath hour) needs the NEXT day's intervals to measure its true
+#     length, not just the previous day's.
+# Neither buffer is free of edge cases -- a run longer than DHW_RUN_MAX_MINUTES
+# truncated down into the accepted band can still slip through -- but it moves
+# the context available at the deciding write from zero to an hour.
+WRITE_LEAD_IN_HOURS = 1
+BATCH_PAD_HOURS = 1
+
 # hvac_modes.temp_at picks the nearest hourly reading; without padding, an
 # interval at the very edge of the range has neighbours on one side only and
 # can fall off the staleness cliff into "ambiguous" for no real reason.
@@ -115,9 +137,14 @@ def write_intervals(write_api, intervals: list[dict]) -> int:
     energy into its own mode's field and 0.0 into the other four, so field
     types and per-field coverage stay uniform across the measurement (a
     consumer summing energy_cool_kwh over a winter month gets 0.0, not a
-    missing column)."""
+    missing column).
+
+    Points go out as one batched write per call, not one HTTP round-trip per
+    point -- callers batch a whole day at a time (288 intervals), and the
+    230-day backfill would otherwise be ~66k synchronous round-trips."""
     if not intervals:
         return 0
+    points = []
     for iv in intervals:
         mode = iv["mode"]
         energy = iv["energy_kwh"]
@@ -131,7 +158,8 @@ def write_intervals(write_api, intervals: list[dict]) -> int:
                  .field("aux_max_w", iv["aux_max_w"])
                  .field("cost_dollars", cost_for_kwh(energy, iv["start"]))
                  .time(iv["start"]))
-        write_api.write(bucket=INFLUXDB_BUCKET, org=INFLUXDB_ORG, record=point)
+        points.append(point)
+    write_api.write(bucket=INFLUXDB_BUCKET, org=INFLUXDB_ORG, record=points)
     return len(intervals)
 
 
@@ -231,19 +259,35 @@ def _floor_5min(dt: datetime) -> datetime:
     return dt.replace(second=0, microsecond=0, minute=dt.minute - dt.minute % 5)
 
 
+def _trim(intervals: list[dict], lo: datetime, hi: datetime | None = None) -> list[dict]:
+    """Keep only the intervals inside [lo, hi) -- the unpadded core of a range
+    that was deliberately classified wider than it is written. See the
+    WRITE_LEAD_IN_HOURS / BATCH_PAD_HOURS note at the top of the module."""
+    return [i for i in intervals
+            if i["start"] >= lo and (hi is None or i["start"] < hi)]
+
+
 def normal_run(client: InfluxDBClient) -> None:
     """Re-classify the trailing TRAILING_WINDOW_HOURS and write. Re-doing an
     overlapping window every pass is the self-heal for a missed pass or for
-    samples that landed late; untagged points make the overlap a no-op."""
+    samples that landed late; untagged points make the overlap a no-op.
+
+    Only the intervals past WRITE_LEAD_IN_HOURS into the window are written:
+    the first hour is lead-in context for hvac_modes' run-length logic, not
+    output. Skipping it here costs nothing -- those intervals were already
+    written (better informed) by earlier passes."""
     query_api = client.query_api()
     write_api = client.write_api(write_options=SYNCHRONOUS)
     stop = _floor_5min(_now())
     start = stop - timedelta(hours=TRAILING_WINDOW_HOURS)
 
     intervals = classify_range(query_api, start, stop)
-    n = write_intervals(write_api, intervals)
-    counts = _mode_counts(intervals)
-    logger.info(f"Wrote {n} hvac_mode intervals ({start:%H:%M}-{stop:%H:%M} UTC): "
+    writable = _trim(intervals, start + timedelta(hours=WRITE_LEAD_IN_HOURS))
+    n = write_intervals(write_api, writable)
+    counts = _mode_counts(writable)
+    logger.info(f"Wrote {n} hvac_mode intervals "
+                f"({(start + timedelta(hours=WRITE_LEAD_IN_HOURS)):%H:%M}-{stop:%H:%M} UTC, "
+                f"{len(intervals) - n} lead-in intervals skipped): "
                 + " ".join(f"{m} {counts[m]}" for m in MODES))
 
 
@@ -260,6 +304,20 @@ def _day_line(day_start: datetime, intervals: list[dict]) -> str:
             f"(n={len(intervals)})")
 
 
+def classify_day(query_api, day_start: datetime) -> list[dict]:
+    """One UTC day's classified intervals, classified with BATCH_PAD_HOURS of
+    context on BOTH sides and then trimmed back to the day itself. The padding
+    is what keeps a DHW run straddling midnight UTC from being split into two
+    fragments too short to pass DHW_RUN_MIN_MINUTES.
+
+    backfill and backtest both go through here, so the Phase 0 gate reports
+    exactly the intervals the backfill it gates would write."""
+    pad = timedelta(hours=BATCH_PAD_HOURS)
+    day_stop = day_start + timedelta(days=1)
+    intervals = classify_range(query_api, day_start - pad, day_stop + pad)
+    return _trim(intervals, day_start, day_stop)
+
+
 def backfill(client: InfluxDBClient, start_date: datetime) -> None:
     """Classify and write day by day, from start_date through yesterday (UTC).
     Whole days, so a re-run is a clean overwrite of the same intervals."""
@@ -270,8 +328,8 @@ def backfill(client: InfluxDBClient, start_date: datetime) -> None:
 
     total = 0
     while day <= yesterday:
-        day_start, day_stop = _day_bounds(day)
-        intervals = classify_range(query_api, day_start, day_stop)
+        day_start, _ = _day_bounds(day)
+        intervals = classify_day(query_api, day_start)
         total += write_intervals(write_api, intervals)
         logger.info(_day_line(day_start, intervals))
         day += timedelta(days=1)
@@ -289,8 +347,7 @@ def backtest(client: InfluxDBClient, days: int, compare_baths: bool = False) -> 
 
     for d in range(days, 0, -1):
         day_start = stop - timedelta(days=d)
-        day_stop = day_start + timedelta(days=1)
-        intervals = classify_range(query_api, day_start, day_stop)
+        intervals = classify_day(query_api, day_start)
         all_intervals.extend(intervals)
         print(_day_line(day_start, intervals))
 
@@ -333,25 +390,29 @@ def main():
 
     client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
 
-    if args.backtest:
-        logger.info(f"Backtest mode: last {args.days} days (no writes)")
-        backtest(client, args.days, compare_baths=args.compare_baths)
-    elif args.backfill:
-        start = datetime.strptime(args.start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        logger.info(f"Backfilling hvac_mode from {start:%Y-%m-%d}")
-        backfill(client, start)
-    elif args.loop:
-        logger.info(f"Loop mode: classifying every {args.interval}s")
-        while True:
-            try:
-                normal_run(client)
-            except Exception as e:
-                logger.error(f"Classification pass failed: {e}")
-            time.sleep(args.interval)
-    else:
-        normal_run(client)
-
-    client.close()
+    # try/finally, not a trailing close(): --loop never falls out of its while,
+    # so a close() after the branches is dead code there. This way the socket is
+    # released on Ctrl-C and on an unhandled error too.
+    try:
+        if args.backtest:
+            logger.info(f"Backtest mode: last {args.days} days (no writes)")
+            backtest(client, args.days, compare_baths=args.compare_baths)
+        elif args.backfill:
+            start = datetime.strptime(args.start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            logger.info(f"Backfilling hvac_mode from {start:%Y-%m-%d}")
+            backfill(client, start)
+        elif args.loop:
+            logger.info(f"Loop mode: classifying every {args.interval}s")
+            while True:
+                try:
+                    normal_run(client)
+                except Exception as e:
+                    logger.error(f"Classification pass failed: {e}")
+                time.sleep(args.interval)
+        else:
+            normal_run(client)
+    finally:
+        client.close()
 
 
 if __name__ == "__main__":
