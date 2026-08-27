@@ -62,7 +62,7 @@ cd pi && docker compose up -d
   - `telegraf.conf` - Host + per-container metrics (CPU/mem/disk/load/temp/docker) into the
     `telemetry` bucket (#16)
   - `docker-compose.yml` - InfluxDB, Grafana, collector, bath-detector, charge-detector,
-    weather, daily-report, telegraf, cloudflared
+    weather, hvac-classifier, daily-report, telegraf, cloudflared
   - `grafana/provisioning/` - Auto-configured datasource + dashboards, incl. `pi-health.json`
     (uid `pi-health`) — collector poll failure rate, host + container metrics (#16)
 - `web/` - Next.js power-explorer dashboard (Vercel-hosted, see § web/)
