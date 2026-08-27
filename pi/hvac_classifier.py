@@ -46,6 +46,34 @@ MODES = ("heat", "cool", "hot_water", "idle", "ambiguous")
 # mechanism daily_report.py's seconds_until_hour relies on -- datetime.now()
 # without a tz reads the OS/libc local clock, which follows the TZ env var
 # once tzdata is installed (it is, in the Dockerfile).
+#
+# Getting FULL coverage of the last two completed Pacific days needs two
+# pieces, not just a start-date offset:
+#   - LOWER bound: `run_sweep` builds `start` from sweep_date's y/m/d
+#     relabelled as a UTC date, minus SWEEP_LOOKBACK_DAYS. Pacific day D-2
+#     always begins a few hours AFTER UTC midnight on the same date digits
+#     (00:00 Pacific D-2 = 07:00 UTC D-2 in PDT, 08:00 UTC D-2 in PST), so
+#     starting the UTC-day loop at date D-2 already covers it -- 2 is
+#     correct here and does not need to become 3.
+#   - UPPER bound: `backfill()` on its own always stops at UTC-yesterday
+#     relative to whenever it runs, i.e. it never touches the day's own UTC
+#     calendar date. At 02:00 Pacific the current UTC date is the SAME as
+#     the Pacific one (2am Pacific + 7/8h offset is still well before UTC
+#     midnight rolls the date again), so "UTC yesterday" ends at UTC
+#     midnight -- which is only 16:00/17:00 Pacific on Pacific day D-1, i.e.
+#     the bath-hour evening of the day that JUST completed is still short by
+#     up to 8h. Bumping SWEEP_LOOKBACK_DAYS cannot fix this: it only pushes
+#     the START further into the past, it can't move an END that isn't
+#     derived from it at all. `run_sweep` therefore passes `end_date=_now()`
+#     into `backfill()`, which extends the day-loop through today's (still
+#     in progress) UTC date, capped at `now` so it never writes placeholder
+#     data for hours that have not happened yet.
+#
+# Net effect verified both ways:
+#   PST (UTC-8): 02:00 Pacific D = 10:00 UTC D. Need UTC[D-2+8h, D+8h).
+#     Coverage = UTC[D-2 00:00 (start), D 10:00 (now, capped)) -- superset.
+#   PDT (UTC-7): 02:00 Pacific D = 09:00 UTC D. Need UTC[D-2+7h, D+7h).
+#     Coverage = UTC[D-2 00:00 (start), D 09:00 (now, capped)) -- superset.
 SWEEP_HOUR = 2
 SWEEP_LOOKBACK_DAYS = 2
 
@@ -341,22 +369,48 @@ def classify_day(query_api, day_start: datetime) -> list[dict]:
     return _trim(intervals, day_start, day_stop)
 
 
-def backfill(client: InfluxDBClient, start_date: datetime) -> None:
-    """Classify and write day by day, from start_date through yesterday (UTC).
-    Whole days, so a re-run is a clean overwrite of the same intervals."""
+def backfill(client: InfluxDBClient, start_date: datetime, end_date: datetime | None = None) -> None:
+    """Classify and write day by day, from start_date through end_date (UTC),
+    defaulting to yesterday when end_date is omitted -- the historical
+    230-day backfill and the --backfill CLI both rely on that default to
+    never touch the still-accumulating current day. Whole days, so a re-run
+    is a clean overwrite of the same intervals -- EXCEPT the day matching
+    today's UTC date when an explicit end_date reaches it (only run_sweep
+    does this): that day is capped at `now`, not written out to its full
+    24h, so a partial day never gets placeholder zero-power "idle" intervals
+    for hours that have not happened yet. The next call (loop pass, tomorrow
+    night's sweep) fills the rest in once it has actually occurred.
+
+    One day's classify/write failing (a transient Influx error, say, at day
+    180 of 230) is logged and skipped rather than aborting the whole run --
+    the operator would otherwise have no record of where to resume beyond
+    the last `_day_line` and would have to infer it. `failed` in the summary
+    line makes a clean run vs. a partial one visible at a glance."""
     query_api = client.query_api()
     write_api = client.write_api(write_options=SYNCHRONOUS)
-    yesterday, _ = _day_bounds(_now() - timedelta(days=1))
+    now = _now()
+    today, _ = _day_bounds(now)
+    last_day, _ = _day_bounds(end_date) if end_date is not None else _day_bounds(now - timedelta(days=1))
     day, _ = _day_bounds(start_date)
 
     total = 0
-    while day <= yesterday:
+    failed = 0
+    while day <= last_day:
         day_start, _ = _day_bounds(day)
-        intervals = classify_day(query_api, day_start)
-        total += write_intervals(write_api, intervals)
-        logger.info(_day_line(day_start, intervals))
+        try:
+            intervals = classify_day(query_api, day_start)
+            if day_start == today:
+                intervals = [iv for iv in intervals if iv["start"] < now]
+            total += write_intervals(write_api, intervals)
+            logger.info(_day_line(day_start, intervals))
+        except Exception as e:
+            failed += 1
+            logger.error(f"Backfill failed for {day_start:%Y-%m-%d}, skipping: {e}")
         day += timedelta(days=1)
-    logger.info(f"Backfill complete: {total} hvac_mode intervals written")
+    summary = f"Backfill complete: {total} hvac_mode intervals written"
+    if failed:
+        summary += f", {failed} day(s) failed (see errors above for dates)"
+    logger.info(summary)
 
 
 def sweep_due(now_local: datetime, last_sweep_date) -> "datetime.date | None":
@@ -377,17 +431,39 @@ def sweep_due(now_local: datetime, last_sweep_date) -> "datetime.date | None":
     return today
 
 
+def _initial_last_sweep_date(now_local: datetime):
+    """What `last_sweep_date` should start as when --loop boots, so a fresh
+    start doesn't treat the sweep as immediately due.
+
+    `last_sweep_date` lives only in memory, so every restart forgets whether
+    today's sweep already ran. Naively initialising it to None makes a
+    restart after SWEEP_HOUR fire an (idempotent but wasteful) sweep right
+    away -- and under a crash-restart loop, repeats it indefinitely. If
+    we've already passed SWEEP_HOUR local for today, assume today's sweep
+    is spoken for and defer to tomorrow's; if we haven't reached SWEEP_HOUR
+    yet, leave it None so a sweep that is genuinely still pending today
+    fires normally once the clock reaches SWEEP_HOUR (see sweep_due)."""
+    return now_local.date() if now_local.hour >= SWEEP_HOUR else None
+
+
 def run_sweep(client: InfluxDBClient, sweep_date) -> None:
-    """Re-backfill the SWEEP_LOOKBACK_DAYS local days completed before
-    `sweep_date` (both already-elapsed local days as of the sweep firing).
-    Goes through the same `backfill()` day-batch path --backfill uses, so
-    this is a pure re-run: idempotent overwrites, no new classification
-    logic."""
+    """Re-backfill through `now`, from SWEEP_LOOKBACK_DAYS before `sweep_date`
+    -- covers the two completed Pacific days D-1 and D-2 as of the sweep
+    firing, not just two UTC calendar days sharing their date digits with D.
+
+    Passing end_date=now() (rather than relying on backfill()'s "yesterday"
+    default) is the part that actually reaches the just-completed Pacific
+    day's evening: backfill() alone always stops at UTC-yesterday, which is
+    still up to ~8h short of Pacific midnight. See the SWEEP_LOOKBACK_DAYS
+    module comment for the full PST/PDT arithmetic. Goes through the same
+    `backfill()` day-batch path --backfill uses, so this is a pure re-run:
+    idempotent overwrites, no new classification logic."""
+    now = _now()
     start = datetime(sweep_date.year, sweep_date.month, sweep_date.day, tzinfo=timezone.utc) \
         - timedelta(days=SWEEP_LOOKBACK_DAYS)
     logger.info(f"Nightly self-heal sweep: re-backfilling from {start:%Y-%m-%d} "
-                f"({SWEEP_LOOKBACK_DAYS} completed local days)")
-    backfill(client, start)
+                f"through now ({SWEEP_LOOKBACK_DAYS} completed Pacific days plus today so far)")
+    backfill(client, start, end_date=now)
 
 
 def backtest(client: InfluxDBClient, days: int, compare_baths: bool = False) -> None:
@@ -458,7 +534,7 @@ def main():
         elif args.loop:
             logger.info(f"Loop mode: classifying every {args.interval}s, "
                         f"nightly self-heal sweep at {SWEEP_HOUR:02d}:00 local")
-            last_sweep_date = None
+            last_sweep_date = _initial_last_sweep_date(_local_now())
             while True:
                 try:
                     normal_run(client)

@@ -487,16 +487,170 @@ class RunSweepTest(unittest.TestCase):
 
     def test_backfills_from_two_days_before_the_sweep_date(self):
         client = mock.MagicMock()
-        with mock.patch.object(hc, "backfill") as bf:
+        now = utc(2026, 3, 10, 10, 0)
+        with mock.patch.object(hc, "backfill") as bf, \
+             mock.patch.object(hc, "_now", return_value=now):
             hc.run_sweep(client, datetime(2026, 3, 10).date())
-            bf.assert_called_once_with(client, utc(2026, 3, 8))
+            bf.assert_called_once_with(client, utc(2026, 3, 8), end_date=now)
 
     def test_start_date_is_utc_tagged(self):
         client = mock.MagicMock()
-        with mock.patch.object(hc, "backfill") as bf:
+        with mock.patch.object(hc, "backfill") as bf, \
+             mock.patch.object(hc, "_now", return_value=utc(2026, 1, 1, 10, 0)):
             hc.run_sweep(client, datetime(2026, 1, 1).date())
             called_start = bf.call_args[0][1]
             self.assertEqual(called_start.tzinfo, UTC)
+
+    def test_end_date_passed_is_now_not_yesterday(self):
+        # Discriminates against a fix that only bumped SWEEP_LOOKBACK_DAYS
+        # without also extending the upper bound -- that leaves the just-
+        # completed Pacific evening uncovered until the following night.
+        client = mock.MagicMock()
+        now = utc(2026, 6, 15, 9, 0)  # 02:00 PDT
+        with mock.patch.object(hc, "backfill") as bf, \
+             mock.patch.object(hc, "_now", return_value=now):
+            hc.run_sweep(client, datetime(2026, 6, 15).date())
+            self.assertEqual(bf.call_args.kwargs["end_date"], now)
+
+
+class SweepPacificCoverageTest(unittest.TestCase):
+    """End-to-end (through backfill, with classify_day/write_intervals
+    stubbed) check that a 02:00 sweep's actual write range fully covers the
+    two completed Pacific days, in both PST and PDT -- the concrete claim
+    finding 1 makes, not just an isolated arg-passing check."""
+
+    def _covered_days(self, now, sweep_date):
+        client = mock.MagicMock()
+        seen_days = []
+
+        def fake_classify_day(query_api, day_start):
+            seen_days.append(day_start)
+            return []
+
+        with mock.patch.object(hc, "classify_day", side_effect=fake_classify_day), \
+             mock.patch.object(hc, "_now", return_value=now):
+            hc.run_sweep(client, sweep_date)
+        return seen_days
+
+    def test_pst_sweep_reaches_todays_utc_day(self):
+        # 02:00 PST (UTC-8) on 2026-01-15 = 10:00 UTC 2026-01-15.
+        now = utc(2026, 1, 15, 10, 0)
+        days = self._covered_days(now, datetime(2026, 1, 15).date())
+        # Needs UTC[Jan13 00:00, Jan15 10:00) to fully contain Pacific
+        # Jan-13 and Jan-14 (which end at 08:00 UTC on Jan-14/15 in PST).
+        self.assertEqual(days, [utc(2026, 1, 13), utc(2026, 1, 14), utc(2026, 1, 15)])
+
+    def test_pdt_sweep_reaches_todays_utc_day(self):
+        # 02:00 PDT (UTC-7) on 2026-06-15 = 09:00 UTC 2026-06-15.
+        now = utc(2026, 6, 15, 9, 0)
+        days = self._covered_days(now, datetime(2026, 6, 15).date())
+        self.assertEqual(days, [utc(2026, 6, 13), utc(2026, 6, 14), utc(2026, 6, 15)])
+
+
+class BackfillEndDateTest(unittest.TestCase):
+    """backfill()'s end_date param and today-capping (finding 1's other
+    half: the day-loop must reach today, but must never write placeholder
+    data for hours that have not happened yet)."""
+
+    def test_default_end_date_still_stops_at_yesterday(self):
+        # Regression: run_sweep is the only caller that passes end_date; the
+        # plain --backfill CLI path (and the historical 230-day backfill)
+        # must keep never touching the still-accumulating current day.
+        client = mock.MagicMock()
+        with mock.patch.object(hc, "classify_day", return_value=[]) as cd, \
+             mock.patch.object(hc, "_now", return_value=utc(2026, 1, 12, 6, 0)):
+            hc.backfill(client, utc(2026, 1, 10))
+        self.assertEqual([c[0][1] for c in cd.call_args_list],
+                         [utc(2026, 1, 10), utc(2026, 1, 11)])
+
+    def test_explicit_end_date_extends_the_loop_through_that_day(self):
+        client = mock.MagicMock()
+        with mock.patch.object(hc, "classify_day", return_value=[]) as cd, \
+             mock.patch.object(hc, "_now", return_value=utc(2026, 1, 12, 6, 0)):
+            hc.backfill(client, utc(2026, 1, 10), end_date=utc(2026, 1, 12, 6, 0))
+        self.assertEqual([c[0][1] for c in cd.call_args_list],
+                         [utc(2026, 1, 10), utc(2026, 1, 11), utc(2026, 1, 12)])
+
+    def test_todays_partial_day_is_capped_at_now_not_written_in_full(self):
+        # Discriminates against an implementation that only moves the loop's
+        # upper bound and writes classify_day's result unchanged -- that
+        # would write placeholder zero-power "idle" intervals for hours of
+        # today that have not happened yet.
+        client = mock.MagicMock()
+        now = utc(2026, 1, 12, 6, 0)
+        today_intervals = [
+            interval(utc(2026, 1, 12, 3, 0), "heat"),   # past -- keep
+            interval(utc(2026, 1, 12, 5, 55), "heat"),  # past -- keep
+            interval(utc(2026, 1, 12, 6, 5), "idle", 0.0),   # future -- drop
+            interval(utc(2026, 1, 12, 12, 0), "idle", 0.0),  # future -- drop
+        ]
+
+        def fake_classify_day(query_api, day_start):
+            return today_intervals if day_start == utc(2026, 1, 12) else []
+
+        written = []
+        with mock.patch.object(hc, "classify_day", side_effect=fake_classify_day), \
+             mock.patch.object(hc, "write_intervals",
+                               side_effect=lambda wa, ivs: written.extend(ivs) or len(ivs)), \
+             mock.patch.object(hc, "_now", return_value=now):
+            hc.backfill(client, utc(2026, 1, 10), end_date=now)
+
+        written_today = [iv for iv in written if iv["start"].date() == now.date()]
+        self.assertEqual([iv["start"] for iv in written_today],
+                         [utc(2026, 1, 12, 3, 0), utc(2026, 1, 12, 5, 55)])
+
+    def test_a_failing_day_is_logged_and_does_not_abort_the_run(self):
+        client = mock.MagicMock()
+
+        def fake_classify_day(query_api, day_start):
+            if day_start == utc(2026, 1, 11):
+                raise RuntimeError("transient influx error")
+            return [interval(day_start + timedelta(hours=1), "heat")]
+
+        with mock.patch.object(hc, "classify_day", side_effect=fake_classify_day), \
+             mock.patch.object(hc, "_now", return_value=utc(2026, 1, 14, 6, 0)), \
+             self.assertLogs(hc.logger, level="INFO") as logs:
+            hc.backfill(client, utc(2026, 1, 10))
+
+        # Days 10, 11, 12, 13 are attempted; only 11 fails; the other three
+        # still get written -- a naive implementation that lets the
+        # exception propagate would process only day 10 and never reach 13.
+        joined = "\n".join(logs.output)
+        self.assertIn("2026-01-10", joined)
+        self.assertIn("2026-01-13", joined)
+        self.assertRegex(joined, r"(?i)error.*2026-01-11")
+        self.assertRegex(joined, r"1 day\(s\) failed")
+
+
+class InitialLastSweepDateTest(unittest.TestCase):
+    """Finding 3: a fresh --loop start shouldn't treat the sweep as
+    immediately due just because in-memory state was lost."""
+
+    def test_restart_before_sweep_hour_leaves_todays_sweep_pending(self):
+        now = datetime(2026, 3, 5, hc.SWEEP_HOUR - 1, 0)
+        initial = hc._initial_last_sweep_date(now)
+        self.assertIsNone(initial)
+        # ... and it still fires normally once SWEEP_HOUR arrives today.
+        due = hc.sweep_due(datetime(2026, 3, 5, hc.SWEEP_HOUR, 0), initial)
+        self.assertEqual(due, datetime(2026, 3, 5).date())
+
+    def test_restart_after_sweep_hour_does_not_fire_immediately(self):
+        # Discriminates against always returning None, which would make
+        # every restart after 2am (e.g. a crash-restart loop) immediately
+        # re-trigger the sweep, indefinitely.
+        now = datetime(2026, 3, 5, 14, 30)
+        initial = hc._initial_last_sweep_date(now)
+        self.assertEqual(initial, now.date())
+        self.assertIsNone(hc.sweep_due(now, initial))
+
+    def test_restart_after_sweep_hour_still_sweeps_the_next_night(self):
+        # Discriminates against always returning today's date regardless of
+        # hour, which would also (wrongly) suppress a genuinely-due sweep
+        # on a restart that happens to land right at SWEEP_HOUR tomorrow.
+        now = datetime(2026, 3, 5, 14, 30)
+        initial = hc._initial_last_sweep_date(now)
+        tomorrow = datetime(2026, 3, 6, hc.SWEEP_HOUR, 0)
+        self.assertEqual(hc.sweep_due(tomorrow, initial), tomorrow.date())
 
 
 class LoopSweepWiringTest(unittest.TestCase):
