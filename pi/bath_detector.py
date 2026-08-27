@@ -10,7 +10,8 @@ from datetime import datetime, timezone, timedelta
 from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.write_api import SYNCHRONOUS
 
-from rates import cost_for_kwh
+import attribution
+from hvac_classifier import query_timeline
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,138 +24,7 @@ INFLUXDB_TOKEN = os.getenv("INFLUXDB_TOKEN")
 INFLUXDB_ORG = os.getenv("INFLUXDB_ORG", "home")
 INFLUXDB_BUCKET = os.getenv("INFLUXDB_BUCKET", "span")
 
-HP_CIRCUIT = "Heat pump (HP)"
-AUX_CIRCUIT = "Auxiliary / Heat pump (HP)"
-
-WINDOW_MINUTES = 15
-STEP_MINUTES = 5
 LOOKBACK_MINUTES = 90
-
-# Detection thresholds
-POWER_THRESHOLD = 50      # watts — on/off boundary
-DUTY_CYCLE_MIN = 0.85     # fraction of samples above threshold
-MAX_TRANSITIONS = 2       # on/off crossings in a window
-MEAN_POWER_MIN = 2500     # watts
-
-
-def query_circuit_power(query_api, circuit_name: str, start: str, stop: str = "now()") -> list[dict]:
-    """Query power_w samples for a circuit in the given time range."""
-    flux = f'''
-from(bucket: "{INFLUXDB_BUCKET}")
-  |> range(start: {start}, stop: {stop})
-  |> filter(fn: (r) => r._measurement == "circuit")
-  |> filter(fn: (r) => r.name == "{circuit_name}")
-  |> filter(fn: (r) => r._field == "power_w")
-  |> sort(columns: ["_time"])
-'''
-    tables = query_api.query(flux, org=INFLUXDB_ORG)
-    results = []
-    for table in tables:
-        for record in table.records:
-            results.append({"time": record.get_time(), "power": record.get_value()})
-    return results
-
-
-def analyze_window(samples: list[dict]) -> dict | None:
-    """Compute duty cycle, transitions, and mean power for a list of samples."""
-    if len(samples) < 3:
-        return None
-
-    powers = [abs(s["power"]) for s in samples]
-    above = [p > POWER_THRESHOLD for p in powers]
-
-    duty_cycle = sum(above) / len(above)
-    transitions = sum(1 for i in range(1, len(above)) if above[i] != above[i - 1])
-    mean_power = sum(powers) / len(powers)
-
-    return {
-        "duty_cycle": duty_cycle,
-        "transitions": transitions,
-        "mean_power": mean_power,
-        "max_power": max(powers),
-    }
-
-
-def is_bath_like(stats: dict) -> bool:
-    return (
-        stats["duty_cycle"] >= DUTY_CYCLE_MIN
-        and stats["transitions"] <= MAX_TRANSITIONS
-        and stats["mean_power"] >= MEAN_POWER_MIN
-    )
-
-
-def find_bath_events(hp_samples: list[dict], aux_samples: list[dict]) -> list[dict]:
-    """Scan overlapping windows and group consecutive bath-like windows into events."""
-    if not hp_samples:
-        return []
-
-    t_start = hp_samples[0]["time"]
-    t_end = hp_samples[-1]["time"]
-    window = timedelta(minutes=WINDOW_MINUTES)
-    step = timedelta(minutes=STEP_MINUTES)
-
-    # Build windows
-    windows = []
-    w_start = t_start
-    while w_start + window <= t_end:
-        w_end = w_start + window
-        w_samples = [s for s in hp_samples if w_start <= s["time"] < w_end]
-        stats = analyze_window(w_samples)
-        if stats:
-            stats["window_start"] = w_start
-            stats["window_end"] = w_end
-            stats["bath_like"] = is_bath_like(stats)
-            windows.append(stats)
-        w_start += step
-
-    # Group consecutive bath-like windows into events
-    events = []
-    current_run = []
-    for w in windows:
-        if w["bath_like"]:
-            current_run.append(w)
-        else:
-            if len(current_run) >= 3:
-                events.append(current_run)
-            current_run = []
-    if len(current_run) >= 3:
-        events.append(current_run)
-
-    # Build event records
-    result = []
-    for run in events:
-        event_start = run[0]["window_start"]
-        event_end = run[-1]["window_end"]
-        duration_min = (event_end - event_start).total_seconds() / 60
-
-        hp_mean = sum(w["mean_power"] for w in run) / len(run)
-        hp_max = max(w["max_power"] for w in run)
-
-        # Check aux heater activity in the same time range
-        aux_in_range = [s for s in aux_samples if event_start <= s["time"] <= event_end]
-        aux_powers = [abs(s["power"]) for s in aux_in_range]
-        aux_active = any(p > POWER_THRESHOLD for p in aux_powers) if aux_powers else False
-        aux_mean = sum(aux_powers) / len(aux_powers) if aux_powers else 0.0
-        aux_max = max(aux_powers) if aux_powers else 0.0
-
-        # Energy and cost
-        total_mean_w = hp_mean + aux_mean
-        energy_kwh = total_mean_w * duration_min / 60 / 1000
-
-        result.append({
-            "start": event_start,
-            "end": event_end,
-            "duration_min": duration_min,
-            "hp_mean_power_w": round(hp_mean, 1),
-            "hp_max_power_w": round(hp_max, 1),
-            "aux_active": aux_active,
-            "aux_mean_power_w": round(aux_mean, 1),
-            "aux_max_power_w": round(aux_max, 1),
-            "energy_kwh": round(energy_kwh, 3),
-            "cost_dollars": round(cost_for_kwh(energy_kwh, event_start), 2),
-        })
-
-    return result
 
 
 def event_already_exists(query_api, event_start: datetime) -> bool:
@@ -195,11 +65,10 @@ def write_bath_event(write_api, event: dict, status: str = "completed"):
 
 
 def run_detection(query_api, start: str, stop: str = "now()") -> list[dict]:
-    """Query data and detect bath events in the given range."""
-    hp_samples = query_circuit_power(query_api, HP_CIRCUIT, start, stop)
-    aux_samples = query_circuit_power(query_api, AUX_CIRCUIT, start, stop)
-    logger.info(f"Queried {len(hp_samples)} HP samples, {len(aux_samples)} aux samples")
-    return find_bath_events(hp_samples, aux_samples)
+    """Detect baths from the hvac_mode timeline (written by hvac_classifier)."""
+    intervals = query_timeline(query_api, start, stop)
+    logger.info(f"Queried {len(intervals)} timeline intervals")
+    return attribution.bath_events(intervals)
 
 
 def backtest(client: InfluxDBClient, days: int, write: bool = False):
