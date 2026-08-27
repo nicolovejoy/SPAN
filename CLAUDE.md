@@ -40,11 +40,22 @@ cd pi && docker compose up -d
   - `collector.py` - Polls SPAN every 30s, writes to InfluxDB; also writes one `collector_poll`
     point per iteration (result/error classification + timings) for observability (#16)
   - `collector_health.py` - Pure gap/coverage math + httpx error classification, no I/O (#16)
-  - `bath_detector.py` - Detects bath events from heat pump signature (10min loop)
+  - `hvac_modes.py` - Pure 5-min interval bucketing + two-stage heat/cool/hot-water/idle/ambiguous
+    classification, no I/O (#14 sub-project 2)
+  - `attribution.py` - Pure run-grouping + bath predicate over the `hvac_mode` timeline, no I/O
+    (#14 sub-project 2); shower/laundry predicates are natural follow-on additions here
+  - `bath_detector.py` - Detects bath events from the `hvac_mode` timeline (re-based off raw
+    circuit reads, #14 sub-project 2)
   - `charge_detector.py` - Detects EV charging sessions (10min loop)
   - `weather_poller.py` - Hourly outdoor temp/humidity/cloud-cover from Open-Meteo into a
     `weather` measurement (#14 Phase 1). Unblocks the heat/cool split and cold-weather
     aux-heat suppression (#3) — neither built yet.
+  - `hvac_classifier.py` - Classifies heat-pump operation into 5-min `hvac_mode` intervals
+    (heat/cool/hot_water/idle/ambiguous) via `hvac_modes.py`, writing to Influx; `--loop` /
+    `--backfill` / `--backtest` modes plus a nightly 02:00 Pacific self-heal sweep re-backfilling
+    the last 2 completed days (#14 sub-project 2). Depends on `weather_poller.py`'s output — no
+    weather data degrades intervals to `ambiguous`. Writes no health point; not in `pi-health.json`
+    or `/api/health` (see Next Steps).
   - `daily_report.py` - Weekly energy briefing (Mondays) + daily anomaly-check email + daily
     data-gap alert via Resend, all at 7am
   - `rates.py` - TOU rate schedule for cost calculations
@@ -100,13 +111,26 @@ GitHub pushes via the Vercel Git integration. Pi-hosted as a Docker service
 **Start at `docs/roadmap.md`** — phased, dependency-ordered, each phase scoped to hand to a
 subagent. The list below is near-term mechanics; the roadmap explains ordering and why.
 
-- **#14 sub-project 2 — heat/cool/hot-water split** (designed 2026-08-26, ready to execute).
-  Spec: `docs/superpowers/specs/2026-08-26-hvac-mode-split-design.md`; plan:
-  `docs/superpowers/plans/2026-08-26-hvac-mode-split.md` (9 TDD tasks — execute via
-  superpowers:subagent-driven-development). Timeline-first: a `hvac_mode` 5-min classified series
-  (fields not tags — overwrite idempotency), Phase 0 backtest gate before any deploy,
-  `bath_detector.py` re-based onto a generic attribution module, web HVAC row splits into nested
-  sub-rows. Phase 1 (weather ingest) shipped 2026-08-24, backfilled to 2026-01-04.
+- **#14 sub-project 2 — heat/cool/hot-water split — code complete on branch `hvac-mode-split`,
+  reviewed, NOT yet deployed.** Adds a `hvac_mode` 5-min classified timeline (`hvac_modes.py`
+  bucketing/classification, `hvac_classifier.py` service, nightly 02:00 Pacific self-heal sweep),
+  re-bases `bath_detector.py` onto that timeline via a generic `attribution.py` predicate module,
+  and splits the web breakdown's HVAC row into nested Heating/Cooling/Hot Water sub-rows. Spec:
+  `docs/superpowers/specs/2026-08-26-hvac-mode-split-design.md`; plan:
+  `docs/superpowers/plans/2026-08-26-hvac-mode-split.md`. Phase 0 backtest gates: seasonal sanity
+  and energy conservation both pass comfortably; **the plan's ≥95% bath-detection parity gate was
+  waived** — best reachable was 83.3% (120 matched / 24 missed / 15 extra over 240 days) at tuned
+  thresholds, and the shortfall is structural, not a tuning miss: `bath_detector.py`'s own 2500 W
+  threshold clipped the same hot-water reheat ramp the new classifier had to solve for, so the
+  historical `bath_event` baseline being compared against has its own errors, and the classifier's
+  extra detections read as showers (median 25 min / 1.15 kWh) rather than baths (median 40 min /
+  2.15 kWh). Full analysis: `docs/superpowers/notes/2026-08-26-hvac-phase0-findings.md`. Remaining
+  before this ships: Pi deploy + historical backfill to 2026-01-04, pushing `web/` (triggers a
+  Vercel production deploy), and a live smoke test. Follow-ups now unblocked (pointers, not new
+  scope): shower/laundry predicates as small additions to `attribution.py` (the shower population
+  is now measured, per the findings note); #3 cold-weather aux suppression; a recirc-pump
+  retro-analysis (unplugged 2026-04-09) readable from overnight `hot_water` energy once the
+  timeline is backfilled. Phase 1 (weather ingest) shipped 2026-08-24, backfilled to 2026-01-04.
 - **#17 part 2 — dryer (then washer) detection**, off `panel.feedthrough_power_w`. Part 1
   ("Unmonitored" breakdown row) shipped 2026-08-23 (commit d3bb6a0) and reconciles live at ~11%
   share; part 2 is the next Phase 2 item and *does* need the sign/`abs()` handling part 1 deliberately
@@ -123,7 +147,13 @@ subagent. The list below is near-term mechanics; the roadmap explains ordering a
   single missed poll, but an outage longer than ~2 days leaves a permanent hole only a manual
   `--backfill` re-run repairs. Unlike `collector.py`, it writes no health point, isn't in
   `pi/grafana/provisioning`'s `pi-health.json`, and isn't checked by `web/`'s `/api/health`. No fix
-  designed yet.
+  designed yet. The same blind spot exists for `hvac_classifier.py` (#14 sub-project 2): its
+  nightly 02:00 Pacific sweep re-backfills the last 2 completed days, so an outage under ~2 days
+  self-heals, but a longer one still needs a manual `--backfill`, and it likewise writes no health
+  point and isn't in `pi-health.json` or `/api/health`. Neither gap is fixed by that sub-project —
+  and because the classifier depends on `weather_poller.py`'s output (no weather data degrades
+  intervals to `ambiguous`), an unfixed weather outage silently degrades the HVAC split too, even
+  after `hvac_classifier` deploys.
 - **Dashboard UX backlog** — open: polling cadence (#5), 1m smoothing (#7), custom PWA icon,
   zoom-in-loads-detail (#12 follow-up, low priority), in-email settings link (#8, needs persistent
   store + report-loop rework).
