@@ -160,13 +160,28 @@ class ClassifyTest(unittest.TestCase):
         self.assertEqual([i["mode"] for i in out[37:43]], ["hot_water"] * 6)
 
     def test_timeline_gap_splits_a_dhw_run(self):
-        # 6 DHW-shaped intervals but a 20-min hole in the middle: the two
-        # halves are separate runs, each under DHW_RUN_MIN_MINUTES's 2-interval
-        # floor only if shorter — here each half is 15 min, still >= 10 -> both hot_water
+        # 6 DHW-shaped intervals but a 20-min hole in the middle. Both halves
+        # (15 min each) independently satisfy DHW_RUN_MIN/MAX_MINUTES on their
+        # own, so this does not by itself prove the gap splits the run — a
+        # merged 30-min run would also land in [10, 120] and pass. See
+        # test_gap_split_drops_runs_below_the_dhw_floor for the discriminating case.
         run = (series(utc(2026, 1, 10, 3, 0), 3, hp_mean=3200.0)
                + series(utc(2026, 1, 10, 3, 35), 3, hp_mean=3200.0))
         out = hm.classify(run, COLD)
         self.assertEqual({i["mode"] for i in out}, {"hot_water"})
+
+    def test_gap_split_drops_runs_below_the_dhw_floor(self):
+        # Two single-interval (5 min) DHW-shaped runs separated by a gap, on a
+        # cold day. Correctly split: each run is 5 min, below
+        # DHW_RUN_MIN_MINUTES (10), so neither is hot_water and both fall
+        # through to the cold temperature band -> heat. If contiguity were
+        # ignored and the two intervals merged into one 10-min run, that run
+        # would satisfy the DHW bounds and both intervals would be hot_water
+        # instead.
+        run = (series(utc(2026, 1, 10, 3, 0), 1, hp_mean=3200.0)
+               + series(utc(2026, 1, 10, 3, 20), 1, hp_mean=3200.0))
+        out = hm.classify(run, COLD)
+        self.assertEqual({i["mode"] for i in out}, {"heat"})
 
 
 if __name__ == "__main__":
