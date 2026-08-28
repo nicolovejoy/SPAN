@@ -160,7 +160,12 @@ describe("formatDuration", () => {
 
   it("rounds the sub-unit to the nearest whole", () => {
     expect(formatDuration(44.6 * 60 * 1000)).toBe("45m");
-    expect(formatDuration(2 * HOUR + 29 * 60 * 1000)).toBe("2h 29m");
+    expect(formatDuration(2 * HOUR + 29.6 * 60 * 1000)).toBe("2h 30m");
+  });
+
+  it("escalates to the next unit when rounding crosses a threshold", () => {
+    expect(formatDuration(59.6 * 60 * 1000)).toBe("1h");
+    expect(formatDuration(47 * HOUR + 59.6 * 60 * 1000)).toBe("2d");
   });
 });
 

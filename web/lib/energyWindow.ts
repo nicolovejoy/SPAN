@@ -137,17 +137,18 @@ export function unmonitoredKwh(panelKwh: number, circuitKwh: number): number {
  *  sub-unit, sub-unit dropped when it rounds to zero. No seconds, no
  *  decimals: `45m`, `6h`, `1h 30m`, `36h`, `10d`, `3d 10h`. */
 export function formatDuration(ms: number): string {
+  // Round once, at the finest granularity (minutes), then derive hours/days
+  // from that integer by division alone — re-rounding a already-rounded
+  // value would let a value like 59.6m round to "60m" instead of promoting
+  // to the next unit ("1h").
   const totalMinutes = Math.round(ms / 60_000);
-  if (ms < 60 * 60 * 1000) return `${totalMinutes}m`;
-  if (ms < 48 * 60 * 60 * 1000) {
-    const h = Math.floor(totalMinutes / 60);
-    const m = totalMinutes % 60;
-    return m === 0 ? `${h}h` : `${h}h ${m}m`;
-  }
-  const totalHours = Math.round(ms / (60 * 60 * 1000));
-  const d = Math.floor(totalHours / 24);
-  const h = totalHours % 24;
-  return h === 0 ? `${d}d` : `${d}d ${h}h`;
+  if (totalMinutes < 60) return `${totalMinutes}m`;
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+  if (h < 48) return m === 0 ? `${h}h` : `${h}h ${m}m`;
+  const d = Math.floor(h / 24);
+  const hh = h % 24;
+  return hh === 0 ? `${d}d` : `${d}d ${hh}h`;
 }
 
 /**
