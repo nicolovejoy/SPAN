@@ -31,7 +31,15 @@ cd pi && docker compose up -d
   declarative config; candidate second backup target). Revisit only if #18
   (TimescaleDB) lands, which would make it the storage box.
 - **Laptop** — dev only. `status.sh` and `span_client.py` work from here; nothing
-  runs in steady state.
+  runs in steady state. Checkout is `~/src/span`.
+
+**Repo renamed `SPAN` → `span` on 2026-08-27** (GitHub `nicolovejoy/span`; the old URL still
+redirects). The **Pi's checkout stays `/home/nico/SPAN`, capital-S, deliberately** —
+`/etc/systemd/system/span-backup.service` hardcodes
+`ExecStart=/home/nico/SPAN/pi/backup/backup.sh`, and backup guards the only unrecoverable state.
+Its git remote was updated in place. Compose is unaffected either way: the project name derives
+from the `pi/` directory, so volumes are `pi_influxdb-data`, never `SPAN_*`. Renaming that
+directory later means editing the unit and `systemctl daemon-reload` first.
 
 ## Architecture
 
@@ -125,8 +133,9 @@ subagent. The list below is near-term mechanics; the roadmap explains ordering a
   historical `bath_event` baseline being compared against has its own errors, and the classifier's
   extra detections read as showers (median 25 min / 1.15 kWh) rather than baths (median 40 min /
   2.15 kWh). Full analysis: `docs/superpowers/notes/2026-08-26-hvac-phase0-findings.md`. Remaining
-  before this ships: Pi deploy + historical backfill to 2026-01-04, pushing `web/` (triggers a
-  Vercel production deploy), and a live smoke test. Follow-ups now unblocked (pointers, not new
+  before this ships: Pi deploy + historical backfill to 2026-01-04, merging to `main` (that is what
+  triggers the Vercel *production* deploy — the branch push on 2026-08-27 only built a preview), and
+  a live smoke test. The branch is on origin now, no longer laptop-only. Follow-ups now unblocked (pointers, not new
   scope): shower/laundry predicates as small additions to `attribution.py` (the shower population
   is now measured, per the findings note); #3 cold-weather aux suppression; a recirc-pump
   retro-analysis (unplugged 2026-04-09) readable from overnight `hot_water` energy once the
