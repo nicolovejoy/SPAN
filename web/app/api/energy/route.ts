@@ -34,7 +34,13 @@ export async function GET(request: Request) {
     cachedQueryEnergyByCategory({ ...pace.current, drill }),
     cachedQueryEnergyByCategory({ ...pace.previous, drill }),
   ]);
-  const data = buildEnergyRows(current, period, prevPeriod, toMs - fromMs);
+  const data = buildEnergyRows(
+    current,
+    period,
+    prevPeriod,
+    toMs - fromMs,
+    pace.current.toMs - pace.current.fromMs,
+  );
 
   // Trailing window changes as time passes; historical is immutable.
   const isTrailing = Date.now() - toMs < 2 * 60_000;

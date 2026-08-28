@@ -26,6 +26,7 @@ export default async function Home({ searchParams }: { searchParams: SP }) {
     period,
     prevPeriod,
     initial.toMs - initial.fromMs,
+    pace.current.toMs - pace.current.fromMs,
   );
 
   return (

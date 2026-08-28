@@ -133,6 +133,23 @@ export function unmonitoredKwh(panelKwh: number, circuitKwh: number): number {
   return Math.max(0, panelKwh - circuitKwh);
 }
 
+/** Human-readable span for a table header — largest unit plus at most one
+ *  sub-unit, sub-unit dropped when it rounds to zero. No seconds, no
+ *  decimals: `45m`, `6h`, `1h 30m`, `36h`, `10d`, `3d 10h`. */
+export function formatDuration(ms: number): string {
+  const totalMinutes = Math.round(ms / 60_000);
+  if (ms < 60 * 60 * 1000) return `${totalMinutes}m`;
+  if (ms < 48 * 60 * 60 * 1000) {
+    const h = Math.floor(totalMinutes / 60);
+    const m = totalMinutes % 60;
+    return m === 0 ? `${h}h` : `${h}h ${m}m`;
+  }
+  const totalHours = Math.round(ms / (60 * 60 * 1000));
+  const d = Math.floor(totalHours / 24);
+  const h = totalHours % 24;
+  return h === 0 ? `${d}d` : `${d}d ${h}h`;
+}
+
 /**
  * Combine viewed-window rows with the calendar-pace comparison values (current
  * period-to-date and the prior period's matching span — see paceRanges) and
@@ -146,6 +163,7 @@ export function buildEnergyRows(
   period: EnergyRow[],
   prevPeriod: EnergyRow[],
   windowMs: number,
+  periodMs?: number,
 ): EnergyRow[] {
   const periodByCategory = new Map(period.map((r) => [r.category, r.kwh]));
   const prevByCategory = new Map(prevPeriod.map((r) => [r.category, r.kwh]));
@@ -154,6 +172,7 @@ export function buildEnergyRows(
     periodKwh: periodByCategory.get(r.category) ?? 0,
     prevPeriodKwh: prevByCategory.get(r.category) ?? 0,
     windowMs,
+    periodMs,
   }));
 }
 

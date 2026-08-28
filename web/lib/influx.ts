@@ -250,6 +250,10 @@ export type EnergyRow = {
   /** Window length in ms — carried on each row so the table can prorate the
    *  base charge without a separate prop (see web/lib/energyWindow.ts). */
   windowMs?: number;
+  /** Elapsed span of the pace comparison's current side, in ms — carried on
+   *  each row so the table can label the Δ column's period length (see
+   *  web/lib/energyWindow.ts). */
+  periodMs?: number;
 };
 
 /**

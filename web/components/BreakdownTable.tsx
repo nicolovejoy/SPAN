@@ -1,5 +1,10 @@
 import { costForKwh, proratedBaseCharge } from "@/lib/rates";
-import { comparisonGrain, comparisonLabel, computeDelta } from "@/lib/energyWindow";
+import {
+  comparisonGrain,
+  comparisonLabel,
+  computeDelta,
+  formatDuration,
+} from "@/lib/energyWindow";
 import type { EnergyRow } from "@/lib/queryCache";
 
 const fmtUsd = (n: number) => `$${n.toFixed(2)}`;
@@ -50,6 +55,7 @@ export function BreakdownTable({ rows }: { rows: EnergyRow[] }) {
   // read it off the first row rather than threading a separate prop through
   // ExplorerClient.
   const windowMs = rows[0]?.windowMs;
+  const periodMs = rows[0]?.periodMs;
   const baseCharge = windowMs !== undefined ? proratedBaseCharge(windowMs) : 0;
 
   return (
@@ -58,10 +64,14 @@ export function BreakdownTable({ rows }: { rows: EnergyRow[] }) {
         <thead className="bg-zinc-50 dark:bg-zinc-900">
           <tr>
             <th className="px-3 py-2 text-left font-medium">Category</th>
-            <th className="px-3 py-2 text-right font-medium">kWh</th>
+            <th className="px-3 py-2 text-right font-medium">
+              {windowMs !== undefined ? `kWh · ${formatDuration(windowMs)}` : "kWh"}
+            </th>
             <th className="hidden px-3 py-2 text-right font-medium sm:table-cell">
               {windowMs !== undefined
-                ? comparisonLabel(comparisonGrain(windowMs))
+                ? `${comparisonLabel(comparisonGrain(windowMs))}${
+                    periodMs !== undefined ? ` · ${formatDuration(periodMs)}` : ""
+                  }`
                 : "Δ"}
             </th>
             <th className="px-3 py-2 text-right font-medium">Cost</th>

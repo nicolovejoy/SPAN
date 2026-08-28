@@ -4,6 +4,7 @@ import {
   comparisonGrain,
   comparisonLabel,
   computeDelta,
+  formatDuration,
   hvacModeRowsFromFieldSums,
   mergeDrillRows,
   paceRanges,
@@ -119,6 +120,47 @@ describe("buildEnergyRows", () => {
     const result = buildEnergyRows([{ category: "New", kwh: 5 }], [], [], DAY);
     expect(result[0].periodKwh).toBe(0);
     expect(result[0].prevPeriodKwh).toBe(0);
+  });
+
+  it("stamps periodMs on every row when passed", () => {
+    const result = buildEnergyRows(
+      [{ category: "HVAC", kwh: 10 }],
+      [],
+      [],
+      DAY,
+      3 * HOUR,
+    );
+    expect(result[0].periodMs).toBe(3 * HOUR);
+  });
+
+  it("leaves periodMs undefined when not passed", () => {
+    const result = buildEnergyRows([{ category: "HVAC", kwh: 10 }], [], [], DAY);
+    expect(result[0].periodMs).toBeUndefined();
+  });
+});
+
+describe("formatDuration", () => {
+  it("under 1h: minutes only", () => {
+    expect(formatDuration(45 * 60 * 1000)).toBe("45m");
+  });
+
+  it("under 48h: hours with minutes only when nonzero", () => {
+    expect(formatDuration(6 * HOUR)).toBe("6h");
+    expect(formatDuration(24 * HOUR)).toBe("24h");
+    expect(formatDuration(36 * HOUR)).toBe("36h");
+    expect(formatDuration(1 * HOUR + 30 * 60 * 1000)).toBe("1h 30m");
+  });
+
+  it("48h and up: days with hours only when nonzero", () => {
+    expect(formatDuration(10 * DAY)).toBe("10d");
+    expect(formatDuration(30 * DAY)).toBe("30d");
+    expect(formatDuration(365 * DAY)).toBe("365d");
+    expect(formatDuration(3 * DAY + 10 * HOUR)).toBe("3d 10h");
+  });
+
+  it("rounds the sub-unit to the nearest whole", () => {
+    expect(formatDuration(44.6 * 60 * 1000)).toBe("45m");
+    expect(formatDuration(2 * HOUR + 29 * 60 * 1000)).toBe("2h 29m");
   });
 });
 
