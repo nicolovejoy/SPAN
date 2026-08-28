@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { cachedQueryEnergyByCategory } from "@/lib/queryCache";
-import { buildEnergyRows, previousWindowRange } from "@/lib/energyWindow";
+import { buildEnergyRows, comparisonGrain, paceRanges } from "@/lib/energyWindow";
 import { isCategory } from "@/lib/categories";
 
 export const runtime = "nodejs";
@@ -25,14 +25,16 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: `invalid drill ${drill}` }, { status: 400 });
   }
 
-  // Δ column needs the immediately-preceding equal-length window too. Same
-  // cache (cheap on repeat — e.g. it's already the previous request's "current").
-  const prevRange = previousWindowRange(fromMs, toMs);
-  const [current, previous] = await Promise.all([
+  // Δ column compares calendar periods (Pacific), not the viewed window: the
+  // period containing the window's end, so far, vs the same elapsed span of
+  // the prior period. Two extra windows through the same cache.
+  const pace = paceRanges(toMs, comparisonGrain(toMs - fromMs));
+  const [current, period, prevPeriod] = await Promise.all([
     cachedQueryEnergyByCategory({ fromMs, toMs, drill }),
-    cachedQueryEnergyByCategory({ ...prevRange, drill }),
+    cachedQueryEnergyByCategory({ ...pace.current, drill }),
+    cachedQueryEnergyByCategory({ ...pace.previous, drill }),
   ]);
-  const data = buildEnergyRows(current, previous, toMs - fromMs);
+  const data = buildEnergyRows(current, period, prevPeriod, toMs - fromMs);
 
   // Trailing window changes as time passes; historical is immutable.
   const isTrailing = Date.now() - toMs < 2 * 60_000;

@@ -241,8 +241,12 @@ export type EnergyRow = {
    *  The table indents these under their parent's subtotal row (#12). */
   parent?: string;
   kwh: number;
-  /** Same category's kWh in the immediately-preceding equal-length window. */
-  prevKwh?: number;
+  /** Same category's kWh in the current Pacific calendar period so far (day/
+   *  week/month/year, picked from the window length — see paceRanges). */
+  periodKwh?: number;
+  /** Same category's kWh over the matching elapsed span of the prior calendar
+   *  period. The Δ column compares periodKwh against this. */
+  prevPeriodKwh?: number;
   /** Window length in ms — carried on each row so the table can prorate the
    *  base charge without a separate prop (see web/lib/energyWindow.ts). */
   windowMs?: number;

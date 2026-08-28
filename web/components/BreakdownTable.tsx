@@ -1,24 +1,37 @@
 import { costForKwh, proratedBaseCharge } from "@/lib/rates";
-import { computeDelta } from "@/lib/energyWindow";
+import { comparisonGrain, comparisonLabel, computeDelta } from "@/lib/energyWindow";
 import type { EnergyRow } from "@/lib/queryCache";
 
 const fmtUsd = (n: number) => `$${n.toFixed(2)}`;
 
-/** Δ cell — signed, colored (red = more usage, green = less), falling back to
- *  a plain kWh delta when the previous window is too small for % to be legible. */
-function DeltaCell({ kwh, prevKwh }: { kwh: number; prevKwh: number | undefined }) {
-  const delta = computeDelta(kwh, prevKwh);
+/** Δ cell — calendar-pace change (this period so far vs the prior period's
+ *  matching span), signed and colored (red = more usage, green = less).
+ *  Absolute kWh first; percent only when the prior period is big enough for
+ *  one to be honest. */
+function DeltaCell({
+  periodKwh,
+  prevPeriodKwh,
+}: {
+  periodKwh: number | undefined;
+  prevPeriodKwh: number | undefined;
+}) {
+  const delta = computeDelta(periodKwh, prevPeriodKwh);
   if (delta.kind === "none") {
     return <span className="text-zinc-400">—</span>;
   }
-  const up = delta.value > 0;
+  const up = delta.kwh > 0;
   const color = up ? "text-red-600 dark:text-red-400" : "text-green-600 dark:text-green-400";
   const sign = up ? "+" : "";
-  const text =
-    delta.kind === "percent"
-      ? `${sign}${delta.value.toFixed(0)}%`
-      : `${sign}${delta.value.toFixed(1)} kWh`;
-  return <span className={color}>{text}</span>;
+  return (
+    <span className={color}>
+      {`${sign}${delta.kwh.toFixed(1)}`}
+      {delta.percent !== undefined && (
+        <span className="ml-1 text-zinc-400 dark:text-zinc-500">
+          {`(${sign}${delta.percent.toFixed(0)}%)`}
+        </span>
+      )}
+    </span>
+  );
 }
 
 export function BreakdownTable({ rows }: { rows: EnergyRow[] }) {
@@ -46,7 +59,11 @@ export function BreakdownTable({ rows }: { rows: EnergyRow[] }) {
           <tr>
             <th className="px-3 py-2 text-left font-medium">Category</th>
             <th className="px-3 py-2 text-right font-medium">kWh</th>
-            <th className="hidden px-3 py-2 text-right font-medium sm:table-cell">Δ</th>
+            <th className="hidden px-3 py-2 text-right font-medium sm:table-cell">
+              {windowMs !== undefined
+                ? comparisonLabel(comparisonGrain(windowMs))
+                : "Δ"}
+            </th>
             <th className="px-3 py-2 text-right font-medium">Cost</th>
             <th className="px-3 py-2 text-right font-medium">Share</th>
           </tr>
@@ -66,7 +83,7 @@ export function BreakdownTable({ rows }: { rows: EnergyRow[] }) {
               </td>
               <td className="px-3 py-2 text-right tabular-nums">{r.kwh.toFixed(1)}</td>
               <td className="hidden px-3 py-2 text-right tabular-nums sm:table-cell">
-                <DeltaCell kwh={r.kwh} prevKwh={r.prevKwh} />
+                <DeltaCell periodKwh={r.periodKwh} prevPeriodKwh={r.prevPeriodKwh} />
               </td>
               <td className="px-3 py-2 text-right tabular-nums">{fmtUsd(costForKwh(r.kwh))}</td>
               <td className="px-3 py-2 text-right tabular-nums text-zinc-500">

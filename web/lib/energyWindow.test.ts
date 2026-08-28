@@ -1,65 +1,145 @@
 import { describe, it, expect } from "vitest";
 import {
   buildEnergyRows,
+  comparisonGrain,
+  comparisonLabel,
   computeDelta,
   hvacModeRowsFromFieldSums,
   mergeDrillRows,
-  previousWindowRange,
+  paceRanges,
   spliceChildRows,
   unmonitoredKwh,
 } from "./energyWindow";
 
 const DAY = 24 * 60 * 60 * 1000;
+const HOUR = 60 * 60 * 1000;
 
-describe("previousWindowRange", () => {
-  it("returns the immediately-preceding equal-length window", () => {
-    const to = 10 * DAY;
-    const from = 9 * DAY;
-    expect(previousWindowRange(from, to)).toEqual({ fromMs: 8 * DAY, toMs: 9 * DAY });
+describe("comparisonGrain", () => {
+  it("picks the calendar grain nearest the viewed window length", () => {
+    expect(comparisonGrain(HOUR)).toBe("day");
+    expect(comparisonGrain(DAY)).toBe("day");
+    expect(comparisonGrain(2 * DAY)).toBe("day");
+    expect(comparisonGrain(7 * DAY)).toBe("week");
+    expect(comparisonGrain(14 * DAY)).toBe("week");
+    expect(comparisonGrain(30 * DAY)).toBe("month");
+    expect(comparisonGrain(62 * DAY)).toBe("month");
+    expect(comparisonGrain(90 * DAY)).toBe("year");
+    expect(comparisonGrain(365 * DAY)).toBe("year");
+  });
+});
+
+describe("comparisonLabel", () => {
+  it("names the prior calendar period for the table header", () => {
+    expect(comparisonLabel("day")).toBe("vs yesterday");
+    expect(comparisonLabel("week")).toBe("vs last week");
+    expect(comparisonLabel("month")).toBe("vs last month");
+    expect(comparisonLabel("year")).toBe("vs last year");
+  });
+});
+
+describe("paceRanges", () => {
+  // 2026-08-27 17:00 UTC = 10:00 PDT (a Thursday). Pacific midnight in PDT
+  // is 07:00 UTC.
+  const anchor = Date.UTC(2026, 7, 27, 17);
+
+  it("day grain: today-so-far vs yesterday through the same time", () => {
+    expect(paceRanges(anchor, "day")).toEqual({
+      current: { fromMs: Date.UTC(2026, 7, 27, 7), toMs: anchor },
+      previous: { fromMs: Date.UTC(2026, 7, 26, 7), toMs: Date.UTC(2026, 7, 26, 17) },
+    });
   });
 
-  it("handles multi-day spans", () => {
-    const to = 30 * DAY;
-    const from = 23 * DAY; // 7-day window
-    expect(previousWindowRange(from, to)).toEqual({ fromMs: 16 * DAY, toMs: 23 * DAY });
+  it("week grain: weeks start Monday Pacific", () => {
+    // Aug 27 2026 is a Thursday; its week starts Mon Aug 24.
+    expect(paceRanges(anchor, "week")).toEqual({
+      current: { fromMs: Date.UTC(2026, 7, 24, 7), toMs: anchor },
+      previous: {
+        fromMs: Date.UTC(2026, 7, 17, 7),
+        toMs: Date.UTC(2026, 7, 20, 17),
+      },
+    });
+  });
+
+  it("week grain: a Sunday belongs to the week of the preceding Monday", () => {
+    const sunday = Date.UTC(2026, 7, 23, 17); // Sun Aug 23, 10:00 PDT
+    expect(paceRanges(sunday, "week").current.fromMs).toBe(Date.UTC(2026, 7, 17, 7));
+  });
+
+  it("month grain: month-to-date vs last month through the same day and time", () => {
+    expect(paceRanges(anchor, "month")).toEqual({
+      current: { fromMs: Date.UTC(2026, 7, 1, 7), toMs: anchor },
+      previous: {
+        fromMs: Date.UTC(2026, 6, 1, 7),
+        toMs: Date.UTC(2026, 6, 1, 7) + (anchor - Date.UTC(2026, 7, 1, 7)),
+      },
+    });
+  });
+
+  it("month grain: clamps the prior period at its own end when it is shorter", () => {
+    // Mar 30: 29+ days elapsed, but February 2026 is 28 days — the prior
+    // window must stop at Mar 1 Pacific midnight, not spill into March.
+    const lateMarch = Date.UTC(2026, 2, 30, 17); // 10:00 PDT
+    const r = paceRanges(lateMarch, "month");
+    expect(r.previous.fromMs).toBe(Date.UTC(2026, 1, 1, 8)); // Feb 1, PST midnight
+    expect(r.previous.toMs).toBe(Date.UTC(2026, 2, 1, 8)); // Mar 1, PST midnight
+  });
+
+  it("year grain: year-to-date vs last year", () => {
+    const r = paceRanges(anchor, "year");
+    expect(r.current.fromMs).toBe(Date.UTC(2026, 0, 1, 8)); // Jan 1, PST midnight
+    expect(r.previous.fromMs).toBe(Date.UTC(2025, 0, 1, 8));
+  });
+
+  it("day grain across the spring-forward DST boundary uses each day's own Pacific midnight", () => {
+    // DST began Sun Mar 8 2026. Mon Mar 9 midnight is PDT (07:00 UTC);
+    // Sun Mar 8 midnight is PST (08:00 UTC).
+    const monday = Date.UTC(2026, 2, 9, 19); // Mar 9, 12:00 PDT
+    const r = paceRanges(monday, "day");
+    expect(r.current.fromMs).toBe(Date.UTC(2026, 2, 9, 7));
+    expect(r.previous.fromMs).toBe(Date.UTC(2026, 2, 8, 8));
   });
 });
 
 describe("buildEnergyRows", () => {
-  it("attaches prevKwh from the matching category and windowMs to every row", () => {
+  it("attaches period/prev-period kWh from matching categories and windowMs to every row", () => {
     const current = [
       { category: "HVAC", kwh: 10 },
       { category: "Kitchen", kwh: 2 },
     ];
-    const previous = [{ category: "HVAC", kwh: 8 }];
-    const result = buildEnergyRows(current, previous, DAY);
+    const period = [{ category: "HVAC", kwh: 6 }];
+    const prevPeriod = [{ category: "HVAC", kwh: 8 }];
+    const result = buildEnergyRows(current, period, prevPeriod, DAY);
     expect(result).toEqual([
-      { category: "HVAC", kwh: 10, prevKwh: 8, windowMs: DAY },
-      { category: "Kitchen", kwh: 2, prevKwh: 0, windowMs: DAY },
+      { category: "HVAC", kwh: 10, periodKwh: 6, prevPeriodKwh: 8, windowMs: DAY },
+      { category: "Kitchen", kwh: 2, periodKwh: 0, prevPeriodKwh: 0, windowMs: DAY },
     ]);
   });
 
-  it("defaults prevKwh to 0 for a category with no prior data", () => {
-    const result = buildEnergyRows([{ category: "New", kwh: 5 }], [], DAY);
-    expect(result[0].prevKwh).toBe(0);
+  it("defaults both period values to 0 for a category with no data there", () => {
+    const result = buildEnergyRows([{ category: "New", kwh: 5 }], [], [], DAY);
+    expect(result[0].periodKwh).toBe(0);
+    expect(result[0].prevPeriodKwh).toBe(0);
   });
 });
 
 describe("computeDelta", () => {
-  it("returns a percent change when the previous window is non-negligible", () => {
-    expect(computeDelta(12, 10)).toEqual({ kind: "percent", value: 20 });
-    expect(computeDelta(8, 10)).toEqual({ kind: "percent", value: -20 });
+  it("returns an absolute kWh delta with a percent when the prior period is big enough", () => {
+    expect(computeDelta(12, 10)).toEqual({ kind: "delta", kwh: 2, percent: 20 });
+    expect(computeDelta(8, 10)).toEqual({ kind: "delta", kwh: -2, percent: -20 });
   });
 
-  it("falls back to a plain kWh delta when the previous window is ~zero", () => {
-    expect(computeDelta(3, 0)).toEqual({ kind: "kwh", value: 3 });
+  it("omits the percent when the prior period is too small for one to be honest", () => {
+    expect(computeDelta(2.3, 0.9)).toEqual({ kind: "delta", kwh: 2.3 - 0.9 });
+    expect(computeDelta(3, 0.2)).toEqual({ kind: "delta", kwh: 2.8 });
   });
 
-  it("returns none when both windows are ~zero", () => {
+  it("returns none when both periods are ~zero", () => {
     expect(computeDelta(0, 0)).toEqual({ kind: "none" });
+    expect(computeDelta(0.01, 0.02)).toEqual({ kind: "none" });
   });
 
-  it("returns none when prevKwh is undefined", () => {
+  it("returns none when the period values are missing", () => {
+    expect(computeDelta(undefined, undefined)).toEqual({ kind: "none" });
     expect(computeDelta(5, undefined)).toEqual({ kind: "none" });
   });
 });
