@@ -91,6 +91,7 @@ GitHub pushes via the Vercel Git integration. Pi-hosted as a Docker service
 - **Client-driven state** (`ExplorerClient.tsx`, since #11 2026-06-19): a client reducer owns `{from,to,interval,show}`. Pan/zoom updates client state only — it never navigates. The URL is **intent-only** (`?range=7d&show=HVAC`), synced via `history.replaceState`; transient pan/zoom is *not* in the URL. `page.tsx` SSRs the initial breakdown + seeds the client cache for a fast first paint, then the client owns every switch. A full reload resets pan/zoom to the preset (by design).
 - **Caching:** in-memory `TtlLru` (`lib/clientCache`) fronts `/api/power` + `/api/energy` (`lib/clientFetch`) → back-and-forth between visited windows = 0-network. Server LRU (`lib/queryCache`, both power + energy) + HTTP cache are the cold-miss backstop. IndexedDB-across-reload persistence still open (#10).
 - **Breakdown table** = real 30s `integral()` via `/api/energy` (`cachedQueryEnergyByCategory`), keyed by window only so changing the bucket doesn't refetch it.
+- **Breakdown table snaps to Pacific calendar periods (2026-08-28, decided over two design rounds):** the chart shows the exact zoom window, but the table describes the calendar day/week(Mon-start)/month/year nearest the view (grain from window length: ≤2d/≤14d/≤62d/else), anchored at the window's end — full period vs full prior period when historical, period-to-date vs same-elapsed-of-prior ("pace", clamped to the prior period's end) when it contains now. Headers name the period (`kWh · Aug 2026 · so far` / `vs Jul`). All pure logic + labels in `web/lib/energyWindow.ts` (`snapPeriod`, `periodLabel`, `computeDelta`), tested incl. DST + short-month clamp. Percent deltas are suppressed under a 1 kWh prior base — small denominators screamed (+137% on 1.3 kWh).
 - Auto-coarsen interval picks bucket size to stay ≤175 points across the range
 - Tests: `cd web && npm test` (vitest) — unit tests for the cache + intent-URL logic. Chart/React wiring is manual-verify.
 - Categories sourced from `pi/categories.json` (copied to `web/categories.generated.json` by `predev`/`prebuild` — Vercel builds use this normal `prebuild` sync; the Dockerfile's copy-in path is a Docker-era leftover, no longer used)
@@ -119,27 +120,14 @@ GitHub pushes via the Vercel Git integration. Pi-hosted as a Docker service
 **Start at `docs/roadmap.md`** — phased, dependency-ordered, each phase scoped to hand to a
 subagent. The list below is near-term mechanics; the roadmap explains ordering and why.
 
-- **#14 sub-project 2 — heat/cool/hot-water split — code complete on branch `hvac-mode-split`,
-  reviewed, NOT yet deployed.** Adds a `hvac_mode` 5-min classified timeline (`hvac_modes.py`
-  bucketing/classification, `hvac_classifier.py` service, nightly 02:00 Pacific self-heal sweep),
-  re-bases `bath_detector.py` onto that timeline via a generic `attribution.py` predicate module,
-  and splits the web breakdown's HVAC row into nested Heating/Cooling/Hot Water sub-rows. Spec:
-  `docs/superpowers/specs/2026-08-26-hvac-mode-split-design.md`; plan:
-  `docs/superpowers/plans/2026-08-26-hvac-mode-split.md`. Phase 0 backtest gates: seasonal sanity
-  and energy conservation both pass comfortably; **the plan's ≥95% bath-detection parity gate was
-  waived** — best reachable was 83.3% (120 matched / 24 missed / 15 extra over 240 days) at tuned
-  thresholds, and the shortfall is structural, not a tuning miss: `bath_detector.py`'s own 2500 W
-  threshold clipped the same hot-water reheat ramp the new classifier had to solve for, so the
-  historical `bath_event` baseline being compared against has its own errors, and the classifier's
-  extra detections read as showers (median 25 min / 1.15 kWh) rather than baths (median 40 min /
-  2.15 kWh). Full analysis: `docs/superpowers/notes/2026-08-26-hvac-phase0-findings.md`. Remaining
-  before this ships: Pi deploy + historical backfill to 2026-01-04, merging to `main` (that is what
-  triggers the Vercel *production* deploy — the branch push on 2026-08-27 only built a preview), and
-  a live smoke test. The branch is on origin now, no longer laptop-only. Follow-ups now unblocked (pointers, not new
-  scope): shower/laundry predicates as small additions to `attribution.py` (the shower population
-  is now measured, per the findings note); #3 cold-weather aux suppression; a recirc-pump
-  retro-analysis (unplugged 2026-04-09) readable from overnight `hot_water` energy once the
-  timeline is backfilled. Phase 1 (weather ingest) shipped 2026-08-24, backfilled to 2026-01-04.
+- **#14 sub-project 2 — heat/cool/hot-water split — SHIPPED 2026-08-28.** Deployed to the Pi,
+  `hvac_mode` backfilled to 2026-01-04 (67,608 intervals), merged to `main`, smoke-tested live.
+  Spec/plan/findings under `docs/superpowers/` (the ≥95% bath-parity gate was waived at 83.3% —
+  structural, see `notes/2026-08-26-hvac-phase0-findings.md`). Follow-ups now unblocked (pointers,
+  not new scope): shower/laundry predicates as small additions to `attribution.py` (the shower
+  population is measured, per the findings note); #3 cold-weather aux suppression; a recirc-pump
+  retro-analysis (unplugged 2026-04-09) readable from overnight `hot_water` energy in the
+  backfilled timeline.
 - **#17 part 2 — dryer (then washer) detection**, off `panel.feedthrough_power_w`. Part 1
   ("Unmonitored" breakdown row) shipped 2026-08-23 (commit d3bb6a0) and reconciles live at ~11%
   share; part 2 is the next Phase 2 item and *does* need the sign/`abs()` handling part 1 deliberately
