@@ -1,5 +1,8 @@
-// Calendar-pace comparison for the breakdown table's Δ column. Pure
-// functions so the range math and row-merging are unit-testable without
+// Calendar-period snapping for the breakdown table. The table no longer
+// describes the chart's arbitrary zoom window — every column (kWh, Δ, Cost,
+// Share, base charge) describes the Pacific calendar period (day/week/month/
+// year) the viewed window is closest to, compared against the prior period.
+// Pure functions so the range math and row-merging are unit-testable without
 // touching Influx.
 
 import type { EnergyRow } from "./influx";
@@ -17,15 +20,6 @@ export function comparisonGrain(windowMs: number): ComparisonGrain {
   if (windowMs <= 14 * DAY_MS) return "week";
   if (windowMs <= 62 * DAY_MS) return "month";
   return "year";
-}
-
-export function comparisonLabel(grain: ComparisonGrain): string {
-  return {
-    day: "vs yesterday",
-    week: "vs last week",
-    month: "vs last month",
-    year: "vs last year",
-  }[grain];
 }
 
 const wallParts = new Intl.DateTimeFormat("en-CA", {
@@ -72,53 +66,135 @@ function pacificMidnightUtc(y: number, m: number, d: number): number {
   return ts;
 }
 
-/**
- * Calendar-pace comparison windows for the Δ column: the period containing
- * `anchorMs` from its Pacific-calendar start through the anchor, and the same
- * elapsed span of the prior period. The prior span is clamped to that period's
- * own end so a 30-day March never reads February plus a bit of March.
- */
-export function paceRanges(
+/** [fromMs, toMs) of the calendar period of `grain` containing `anchorMs`,
+ *  Pacific calendar. `toMs` is the start of the *next* period (exclusive) —
+ *  the full period regardless of where `anchorMs` (or "now") falls inside it. */
+function periodBoundsFor(
   anchorMs: number,
   grain: ComparisonGrain,
-): {
-  current: { fromMs: number; toMs: number };
-  previous: { fromMs: number; toMs: number };
-} {
+): { fromMs: number; toMs: number } {
   const w = pacificWall(anchorMs);
-  let curStart: number;
-  let prevStart: number;
-  let prevPeriodEnd: number;
   switch (grain) {
     case "day":
-      curStart = pacificMidnightUtc(w.y, w.m, w.d);
-      prevStart = pacificMidnightUtc(w.y, w.m, w.d - 1);
-      prevPeriodEnd = curStart;
-      break;
+      return {
+        fromMs: pacificMidnightUtc(w.y, w.m, w.d),
+        toMs: pacificMidnightUtc(w.y, w.m, w.d + 1),
+      };
     case "week":
-      curStart = pacificMidnightUtc(w.y, w.m, w.d - w.dow);
-      prevStart = pacificMidnightUtc(w.y, w.m, w.d - w.dow - 7);
-      prevPeriodEnd = curStart;
-      break;
+      return {
+        fromMs: pacificMidnightUtc(w.y, w.m, w.d - w.dow),
+        toMs: pacificMidnightUtc(w.y, w.m, w.d - w.dow + 7),
+      };
     case "month":
-      curStart = pacificMidnightUtc(w.y, w.m, 1);
-      prevStart = pacificMidnightUtc(w.y, w.m - 1, 1);
-      prevPeriodEnd = curStart;
-      break;
+      return {
+        fromMs: pacificMidnightUtc(w.y, w.m, 1),
+        toMs: pacificMidnightUtc(w.y, w.m + 1, 1),
+      };
     case "year":
-      curStart = pacificMidnightUtc(w.y, 1, 1);
-      prevStart = pacificMidnightUtc(w.y - 1, 1, 1);
-      prevPeriodEnd = curStart;
-      break;
+      return {
+        fromMs: pacificMidnightUtc(w.y, 1, 1),
+        toMs: pacificMidnightUtc(w.y + 1, 1, 1),
+      };
   }
-  const elapsed = anchorMs - curStart;
+}
+
+/**
+ * Snap a viewed-window endpoint to the calendar period (Pacific) it's closest
+ * to, for the breakdown table's every column. `anchorMs` is the raw viewed
+ * `toMs` — this function does the "-1, clamped to now" adjustment internally
+ * (a future-dated window snaps to the period containing now; an anchor sitting
+ * exactly on a period boundary lands in the period that just finished, not an
+ * empty new one — see docs/superpowers/specs for the design writeup).
+ *
+ * A **complete** period (its calendar end has already passed) compares full
+ * period to full prior period — full March vs full February, no clamping. A
+ * **partial** period (contains "now") compares period-start-to-now against
+ * the same elapsed span of the prior period, clamped to that period's own end
+ * so a 30-day March-to-date never reads February plus a bit of March.
+ */
+export function snapPeriod(
+  anchorMs: number,
+  grain: ComparisonGrain,
+  nowMs: number,
+): {
+  fromMs: number;
+  toMs: number;
+  complete: boolean;
+  previous: { fromMs: number; toMs: number };
+} {
+  const effectiveAnchor = Math.min(anchorMs, nowMs) - 1;
+  const cur = periodBoundsFor(effectiveAnchor, grain);
+  const prev = periodBoundsFor(cur.fromMs - 1, grain);
+  const complete = cur.toMs <= nowMs;
+  if (complete) {
+    return { fromMs: cur.fromMs, toMs: cur.toMs, complete: true, previous: prev };
+  }
+  const elapsed = nowMs - cur.fromMs;
   return {
-    current: { fromMs: curStart, toMs: anchorMs },
-    previous: {
-      fromMs: prevStart,
-      toMs: Math.min(prevStart + elapsed, prevPeriodEnd),
-    },
+    fromMs: cur.fromMs,
+    toMs: nowMs,
+    complete: false,
+    previous: { fromMs: prev.fromMs, toMs: Math.min(prev.fromMs + elapsed, prev.toMs) },
   };
+}
+
+/** Start of the calendar period immediately before the one starting at
+ *  `periodFromMs` — pure calendar arithmetic, no "now" involved. Lets the
+ *  table label the comparison column from stamped data alone rather than
+ *  re-snapping client-side with its own Date.now(). */
+export function previousPeriodStart(periodFromMs: number, grain: ComparisonGrain): number {
+  return periodBoundsFor(periodFromMs - 1, grain).fromMs;
+}
+
+const weekdayFmt = new Intl.DateTimeFormat("en-US", { timeZone: TZ, weekday: "short" });
+const monthDayFmt = new Intl.DateTimeFormat("en-US", {
+  timeZone: TZ,
+  month: "short",
+  day: "numeric",
+});
+const monthYearFmt = new Intl.DateTimeFormat("en-US", {
+  timeZone: TZ,
+  month: "short",
+  year: "numeric",
+});
+const monthFmt = new Intl.DateTimeFormat("en-US", { timeZone: TZ, month: "short" });
+const yearFmt = new Intl.DateTimeFormat("en-US", { timeZone: TZ, year: "numeric" });
+
+/** "Tue Jun 16" — composed from two formatters (rather than one weekday+month+
+ *  day formatter) because en-US's combined form inserts a comma ("Tue, Jun
+ *  16") that the table header doesn't want. */
+const dayLabel = (ms: number) => `${weekdayFmt.format(ms)} ${monthDayFmt.format(ms)}`;
+
+/** Human label for the snapped period's start, for the kWh column header:
+ *  "Tue Jun 16" (day), "Week of Aug 24" (week), "Aug 2026" (month), "2026"
+ *  (year). Pacific names via Intl.DateTimeFormat — never toISOString/getMonth
+ *  on a bare Date. */
+export function periodLabel(fromMs: number, grain: ComparisonGrain): string {
+  switch (grain) {
+    case "day":
+      return dayLabel(fromMs);
+    case "week":
+      return `Week of ${monthDayFmt.format(fromMs)}`;
+    case "month":
+      return monthYearFmt.format(fromMs);
+    case "year":
+      return yearFmt.format(fromMs);
+  }
+}
+
+/** Human label for the prior period, for the Δ column header: "vs Mon Jun
+ *  15" (day), "vs week of Aug 17" (week), "vs Jul" (month), "vs 2025" (year). */
+export function prevPeriodLabel(prevFromMs: number, grain: ComparisonGrain): string {
+  switch (grain) {
+    case "day":
+      return `vs ${dayLabel(prevFromMs)}`;
+    case "week":
+      return `vs week of ${monthDayFmt.format(prevFromMs)}`;
+    case "month":
+      return `vs ${monthFmt.format(prevFromMs)}`;
+    case "year":
+      return `vs ${yearFmt.format(prevFromMs)}`;
+  }
 }
 
 /**
@@ -133,47 +209,33 @@ export function unmonitoredKwh(panelKwh: number, circuitKwh: number): number {
   return Math.max(0, panelKwh - circuitKwh);
 }
 
-/** Human-readable span for a table header — largest unit plus at most one
- *  sub-unit, sub-unit dropped when it rounds to zero. No seconds, no
- *  decimals: `45m`, `6h`, `1h 30m`, `36h`, `10d`, `3d 10h`. */
-export function formatDuration(ms: number): string {
-  // Round once, at the finest granularity (minutes), then derive hours/days
-  // from that integer by division alone — re-rounding a already-rounded
-  // value would let a value like 59.6m round to "60m" instead of promoting
-  // to the next unit ("1h").
-  const totalMinutes = Math.round(ms / 60_000);
-  if (totalMinutes < 60) return `${totalMinutes}m`;
-  const h = Math.floor(totalMinutes / 60);
-  const m = totalMinutes % 60;
-  if (h < 48) return m === 0 ? `${h}h` : `${h}h ${m}m`;
-  const d = Math.floor(h / 24);
-  const hh = h % 24;
-  return hh === 0 ? `${d}d` : `${d}d ${hh}h`;
-}
-
 /**
- * Combine viewed-window rows with the calendar-pace comparison values (current
- * period-to-date and the prior period's matching span — see paceRanges) and
- * the window length (needed downstream to prorate the base charge). Additive
- * to EnergyRow — categories present in the window but absent from a pace query
- * get 0 (true "was zero", not "unknown"); categories that vanished are
- * dropped, same as today's behavior for the current window.
+ * Combine the snapped current period's rows with the prior period's rows
+ * (see snapPeriod) plus the snap metadata (needed downstream for headers and
+ * to prorate the base charge). `current` rows' `kwh` IS the period energy —
+ * the caller queries the snapped range directly. Additive to EnergyRow —
+ * categories present in the current period but absent from the prior one get
+ * 0 (true "was zero", not "unknown"); categories that vanished are dropped,
+ * same as today's behavior.
  */
 export function buildEnergyRows(
   current: EnergyRow[],
-  period: EnergyRow[],
   prevPeriod: EnergyRow[],
-  windowMs: number,
-  periodMs?: number,
+  meta: {
+    periodFromMs: number;
+    periodToMs: number;
+    periodGrain: ComparisonGrain;
+    periodComplete: boolean;
+  },
 ): EnergyRow[] {
-  const periodByCategory = new Map(period.map((r) => [r.category, r.kwh]));
   const prevByCategory = new Map(prevPeriod.map((r) => [r.category, r.kwh]));
   return current.map((r) => ({
     ...r,
-    periodKwh: periodByCategory.get(r.category) ?? 0,
     prevPeriodKwh: prevByCategory.get(r.category) ?? 0,
-    windowMs,
-    periodMs,
+    periodFromMs: meta.periodFromMs,
+    periodToMs: meta.periodToMs,
+    periodGrain: meta.periodGrain,
+    periodComplete: meta.periodComplete,
   }));
 }
 

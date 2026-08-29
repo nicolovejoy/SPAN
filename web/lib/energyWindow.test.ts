@@ -2,12 +2,13 @@ import { describe, it, expect } from "vitest";
 import {
   buildEnergyRows,
   comparisonGrain,
-  comparisonLabel,
   computeDelta,
-  formatDuration,
   hvacModeRowsFromFieldSums,
   mergeDrillRows,
-  paceRanges,
+  periodLabel,
+  prevPeriodLabel,
+  previousPeriodStart,
+  snapPeriod,
   spliceChildRows,
   unmonitoredKwh,
 } from "./energyWindow";
@@ -29,65 +30,59 @@ describe("comparisonGrain", () => {
   });
 });
 
-describe("comparisonLabel", () => {
-  it("names the prior calendar period for the table header", () => {
-    expect(comparisonLabel("day")).toBe("vs yesterday");
-    expect(comparisonLabel("week")).toBe("vs last week");
-    expect(comparisonLabel("month")).toBe("vs last month");
-    expect(comparisonLabel("year")).toBe("vs last year");
-  });
-});
-
-describe("paceRanges", () => {
+describe("snapPeriod", () => {
   // 2026-08-27 17:00 UTC = 10:00 PDT (a Thursday). Pacific midnight in PDT
-  // is 07:00 UTC.
-  const anchor = Date.UTC(2026, 7, 27, 17);
+  // is 07:00 UTC. Aug 24 2026 is the Monday starting that week.
+  const nowRef = Date.UTC(2026, 7, 27, 17);
 
-  it("day grain: today-so-far vs yesterday through the same time", () => {
-    expect(paceRanges(anchor, "day")).toEqual({
-      current: { fromMs: Date.UTC(2026, 7, 27, 7), toMs: anchor },
+  it("partial day: today-so-far vs yesterday through the same time", () => {
+    expect(snapPeriod(nowRef, "day", nowRef)).toEqual({
+      fromMs: Date.UTC(2026, 7, 27, 7),
+      toMs: nowRef,
+      complete: false,
       previous: { fromMs: Date.UTC(2026, 7, 26, 7), toMs: Date.UTC(2026, 7, 26, 17) },
     });
   });
 
-  it("week grain: weeks start Monday Pacific", () => {
-    // Aug 27 2026 is a Thursday; its week starts Mon Aug 24.
-    expect(paceRanges(anchor, "week")).toEqual({
-      current: { fromMs: Date.UTC(2026, 7, 24, 7), toMs: anchor },
-      previous: {
-        fromMs: Date.UTC(2026, 7, 17, 7),
-        toMs: Date.UTC(2026, 7, 20, 17),
-      },
+  it("partial week: weeks start Monday Pacific", () => {
+    expect(snapPeriod(nowRef, "week", nowRef)).toEqual({
+      fromMs: Date.UTC(2026, 7, 24, 7),
+      toMs: nowRef,
+      complete: false,
+      previous: { fromMs: Date.UTC(2026, 7, 17, 7), toMs: Date.UTC(2026, 7, 20, 17) },
     });
   });
 
   it("week grain: a Sunday belongs to the week of the preceding Monday", () => {
     const sunday = Date.UTC(2026, 7, 23, 17); // Sun Aug 23, 10:00 PDT
-    expect(paceRanges(sunday, "week").current.fromMs).toBe(Date.UTC(2026, 7, 17, 7));
+    expect(snapPeriod(sunday, "week", sunday).fromMs).toBe(Date.UTC(2026, 7, 17, 7));
   });
 
-  it("month grain: month-to-date vs last month through the same day and time", () => {
-    expect(paceRanges(anchor, "month")).toEqual({
-      current: { fromMs: Date.UTC(2026, 7, 1, 7), toMs: anchor },
-      previous: {
-        fromMs: Date.UTC(2026, 6, 1, 7),
-        toMs: Date.UTC(2026, 6, 1, 7) + (anchor - Date.UTC(2026, 7, 1, 7)),
-      },
+  it("partial month: month-to-date vs last month through the same day and time", () => {
+    const r = snapPeriod(nowRef, "month", nowRef);
+    expect(r.complete).toBe(false);
+    expect(r.fromMs).toBe(Date.UTC(2026, 7, 1, 7));
+    expect(r.toMs).toBe(nowRef);
+    expect(r.previous).toEqual({
+      fromMs: Date.UTC(2026, 6, 1, 7),
+      toMs: Date.UTC(2026, 6, 1, 7) + (nowRef - Date.UTC(2026, 7, 1, 7)),
     });
   });
 
-  it("month grain: clamps the prior period at its own end when it is shorter", () => {
+  it("partial month: clamps the prior period at its own end when it is shorter", () => {
     // Mar 30: 29+ days elapsed, but February 2026 is 28 days — the prior
     // window must stop at Mar 1 Pacific midnight, not spill into March.
     const lateMarch = Date.UTC(2026, 2, 30, 17); // 10:00 PDT
-    const r = paceRanges(lateMarch, "month");
+    const r = snapPeriod(lateMarch, "month", lateMarch);
+    expect(r.complete).toBe(false);
     expect(r.previous.fromMs).toBe(Date.UTC(2026, 1, 1, 8)); // Feb 1, PST midnight
     expect(r.previous.toMs).toBe(Date.UTC(2026, 2, 1, 8)); // Mar 1, PST midnight
   });
 
-  it("year grain: year-to-date vs last year", () => {
-    const r = paceRanges(anchor, "year");
-    expect(r.current.fromMs).toBe(Date.UTC(2026, 0, 1, 8)); // Jan 1, PST midnight
+  it("partial year: year-to-date vs last year", () => {
+    const r = snapPeriod(nowRef, "year", nowRef);
+    expect(r.complete).toBe(false);
+    expect(r.fromMs).toBe(Date.UTC(2026, 0, 1, 8)); // Jan 1, PST midnight
     expect(r.previous.fromMs).toBe(Date.UTC(2025, 0, 1, 8));
   });
 
@@ -95,77 +90,138 @@ describe("paceRanges", () => {
     // DST began Sun Mar 8 2026. Mon Mar 9 midnight is PDT (07:00 UTC);
     // Sun Mar 8 midnight is PST (08:00 UTC).
     const monday = Date.UTC(2026, 2, 9, 19); // Mar 9, 12:00 PDT
-    const r = paceRanges(monday, "day");
-    expect(r.current.fromMs).toBe(Date.UTC(2026, 2, 9, 7));
+    const r = snapPeriod(monday, "day", monday);
+    expect(r.fromMs).toBe(Date.UTC(2026, 2, 9, 7));
     expect(r.previous.fromMs).toBe(Date.UTC(2026, 2, 8, 8));
+  });
+
+  it("complete day: full prior day, no clamp", () => {
+    const anchor = Date.UTC(2026, 7, 20, 17); // Aug 20, 10:00 PDT — well before nowRef
+    const r = snapPeriod(anchor, "day", nowRef);
+    expect(r).toEqual({
+      fromMs: Date.UTC(2026, 7, 20, 7),
+      toMs: Date.UTC(2026, 7, 21, 7),
+      complete: true,
+      previous: { fromMs: Date.UTC(2026, 7, 19, 7), toMs: Date.UTC(2026, 7, 20, 7) },
+    });
+  });
+
+  it("complete week: full prior week, no clamp", () => {
+    const anchor = Date.UTC(2026, 7, 20, 17); // within the week of Aug 17-24
+    const r = snapPeriod(anchor, "week", nowRef);
+    expect(r).toEqual({
+      fromMs: Date.UTC(2026, 7, 17, 7),
+      toMs: Date.UTC(2026, 7, 24, 7),
+      complete: true,
+      previous: { fromMs: Date.UTC(2026, 7, 10, 7), toMs: Date.UTC(2026, 7, 17, 7) },
+    });
+  });
+
+  it("complete month: full prior month, no clamp", () => {
+    const anchor = Date.UTC(2026, 6, 15, 17); // mid-July, well before nowRef (late Aug)
+    const r = snapPeriod(anchor, "month", nowRef);
+    expect(r).toEqual({
+      fromMs: Date.UTC(2026, 6, 1, 7),
+      toMs: Date.UTC(2026, 7, 1, 7),
+      complete: true,
+      previous: { fromMs: Date.UTC(2026, 5, 1, 7), toMs: Date.UTC(2026, 6, 1, 7) },
+    });
+  });
+
+  it("complete year: full prior year, no clamp", () => {
+    const anchor = Date.UTC(2025, 5, 15, 17); // mid-2025
+    const r = snapPeriod(anchor, "year", nowRef);
+    expect(r).toEqual({
+      fromMs: Date.UTC(2025, 0, 1, 8),
+      toMs: Date.UTC(2026, 0, 1, 8),
+      complete: true,
+      previous: { fromMs: Date.UTC(2024, 0, 1, 8), toMs: Date.UTC(2025, 0, 1, 8) },
+    });
+  });
+
+  it("anchor at an exact midnight boundary picks the just-finished period, not an empty new one", () => {
+    const boundary = Date.UTC(2026, 7, 27, 7); // exactly Pacific midnight, Aug 27
+    const later = Date.UTC(2026, 7, 27, 17); // 10:00 PDT the same day
+    const r = snapPeriod(boundary, "day", later);
+    // Lands in Aug 26 (the day that just finished), fully complete.
+    expect(r).toEqual({
+      fromMs: Date.UTC(2026, 7, 26, 7),
+      toMs: Date.UTC(2026, 7, 27, 7),
+      complete: true,
+      previous: { fromMs: Date.UTC(2026, 7, 25, 7), toMs: Date.UTC(2026, 7, 26, 7) },
+    });
+  });
+
+  it("anchor in the future clamps to now", () => {
+    const future = Date.UTC(2026, 8, 1, 17); // Sept 1 — after nowRef
+    const r = snapPeriod(future, "day", nowRef);
+    // Snaps to the period containing "now" (today-so-far), not the future day.
+    expect(r.fromMs).toBe(Date.UTC(2026, 7, 27, 7));
+    expect(r.toMs).toBe(nowRef);
+    expect(r.complete).toBe(false);
+  });
+});
+
+describe("previousPeriodStart", () => {
+  it("agrees with snapPeriod's own previous.fromMs (pure calendar step, no now)", () => {
+    const nowRef = Date.UTC(2026, 7, 27, 17);
+    for (const grain of ["day", "week", "month", "year"] as const) {
+      const snap = snapPeriod(nowRef, grain, nowRef);
+      expect(previousPeriodStart(snap.fromMs, grain)).toBe(snap.previous.fromMs);
+    }
+  });
+});
+
+describe("periodLabel", () => {
+  it("labels each grain's period start", () => {
+    expect(periodLabel(Date.UTC(2026, 5, 16, 7), "day")).toBe("Tue Jun 16");
+    expect(periodLabel(Date.UTC(2026, 7, 24, 7), "week")).toBe("Week of Aug 24");
+    expect(periodLabel(Date.UTC(2026, 7, 1, 7), "month")).toBe("Aug 2026");
+    expect(periodLabel(Date.UTC(2026, 0, 1, 8), "year")).toBe("2026");
+  });
+});
+
+describe("prevPeriodLabel", () => {
+  it("labels each grain's prior period start", () => {
+    expect(prevPeriodLabel(Date.UTC(2026, 5, 15, 7), "day")).toBe("vs Mon Jun 15");
+    expect(prevPeriodLabel(Date.UTC(2026, 7, 17, 7), "week")).toBe("vs week of Aug 17");
+    expect(prevPeriodLabel(Date.UTC(2026, 6, 1, 7), "month")).toBe("vs Jul");
+    expect(prevPeriodLabel(Date.UTC(2025, 0, 1, 8), "year")).toBe("vs 2025");
   });
 });
 
 describe("buildEnergyRows", () => {
-  it("attaches period/prev-period kWh from matching categories and windowMs to every row", () => {
+  const meta = {
+    periodFromMs: 100,
+    periodToMs: 200,
+    periodGrain: "day" as const,
+    periodComplete: true,
+  };
+
+  it("attaches prevPeriodKwh from matching categories and stamps meta on every row", () => {
     const current = [
       { category: "HVAC", kwh: 10 },
       { category: "Kitchen", kwh: 2 },
     ];
-    const period = [{ category: "HVAC", kwh: 6 }];
     const prevPeriod = [{ category: "HVAC", kwh: 8 }];
-    const result = buildEnergyRows(current, period, prevPeriod, DAY);
+    const result = buildEnergyRows(current, prevPeriod, meta);
     expect(result).toEqual([
-      { category: "HVAC", kwh: 10, periodKwh: 6, prevPeriodKwh: 8, windowMs: DAY },
-      { category: "Kitchen", kwh: 2, periodKwh: 0, prevPeriodKwh: 0, windowMs: DAY },
+      { category: "HVAC", kwh: 10, prevPeriodKwh: 8, ...meta },
+      { category: "Kitchen", kwh: 2, prevPeriodKwh: 0, ...meta },
     ]);
   });
 
-  it("defaults both period values to 0 for a category with no data there", () => {
-    const result = buildEnergyRows([{ category: "New", kwh: 5 }], [], [], DAY);
-    expect(result[0].periodKwh).toBe(0);
+  it("defaults prevPeriodKwh to 0 for a category with no data in the prior period", () => {
+    const result = buildEnergyRows([{ category: "New", kwh: 5 }], [], meta);
     expect(result[0].prevPeriodKwh).toBe(0);
   });
 
-  it("stamps periodMs on every row when passed", () => {
-    const result = buildEnergyRows(
-      [{ category: "HVAC", kwh: 10 }],
-      [],
-      [],
-      DAY,
-      3 * HOUR,
-    );
-    expect(result[0].periodMs).toBe(3 * HOUR);
-  });
-
-  it("leaves periodMs undefined when not passed", () => {
-    const result = buildEnergyRows([{ category: "HVAC", kwh: 10 }], [], [], DAY);
-    expect(result[0].periodMs).toBeUndefined();
-  });
-});
-
-describe("formatDuration", () => {
-  it("under 1h: minutes only", () => {
-    expect(formatDuration(45 * 60 * 1000)).toBe("45m");
-  });
-
-  it("under 48h: hours with minutes only when nonzero", () => {
-    expect(formatDuration(6 * HOUR)).toBe("6h");
-    expect(formatDuration(24 * HOUR)).toBe("24h");
-    expect(formatDuration(36 * HOUR)).toBe("36h");
-    expect(formatDuration(1 * HOUR + 30 * 60 * 1000)).toBe("1h 30m");
-  });
-
-  it("48h and up: days with hours only when nonzero", () => {
-    expect(formatDuration(10 * DAY)).toBe("10d");
-    expect(formatDuration(30 * DAY)).toBe("30d");
-    expect(formatDuration(365 * DAY)).toBe("365d");
-    expect(formatDuration(3 * DAY + 10 * HOUR)).toBe("3d 10h");
-  });
-
-  it("rounds the sub-unit to the nearest whole", () => {
-    expect(formatDuration(44.6 * 60 * 1000)).toBe("45m");
-    expect(formatDuration(2 * HOUR + 29.6 * 60 * 1000)).toBe("2h 30m");
-  });
-
-  it("escalates to the next unit when rounding crosses a threshold", () => {
-    expect(formatDuration(59.6 * 60 * 1000)).toBe("1h");
-    expect(formatDuration(47 * HOUR + 59.6 * 60 * 1000)).toBe("2d");
+  it("stamps periodComplete: false for a partial period", () => {
+    const result = buildEnergyRows([{ category: "HVAC", kwh: 10 }], [], {
+      ...meta,
+      periodComplete: false,
+    });
+    expect(result[0].periodComplete).toBe(false);
   });
 });
 

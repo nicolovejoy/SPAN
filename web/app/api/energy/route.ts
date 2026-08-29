@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { cachedQueryEnergyByCategory } from "@/lib/queryCache";
-import { buildEnergyRows, comparisonGrain, paceRanges } from "@/lib/energyWindow";
+import { buildEnergyRows, comparisonGrain, snapPeriod } from "@/lib/energyWindow";
 import { isCategory } from "@/lib/categories";
 
 export const runtime = "nodejs";
@@ -25,25 +25,26 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: `invalid drill ${drill}` }, { status: 400 });
   }
 
-  // Δ column compares calendar periods (Pacific), not the viewed window: the
-  // period containing the window's end, so far, vs the same elapsed span of
-  // the prior period. Two extra windows through the same cache.
-  const pace = paceRanges(toMs, comparisonGrain(toMs - fromMs));
-  const [current, period, prevPeriod] = await Promise.all([
-    cachedQueryEnergyByCategory({ fromMs, toMs, drill }),
-    cachedQueryEnergyByCategory({ ...pace.current, drill }),
-    cachedQueryEnergyByCategory({ ...pace.previous, drill }),
+  // The table no longer describes the viewed window: every column describes
+  // the Pacific calendar period (day/week/month/year) that window snaps to,
+  // compared against the prior period.
+  const grain = comparisonGrain(toMs - fromMs);
+  const nowMs = Date.now();
+  const snap = snapPeriod(toMs, grain, nowMs);
+  const [current, prevPeriod] = await Promise.all([
+    cachedQueryEnergyByCategory({ fromMs: snap.fromMs, toMs: snap.toMs, drill }),
+    cachedQueryEnergyByCategory({ ...snap.previous, drill }),
   ]);
-  const data = buildEnergyRows(
-    current,
-    period,
-    prevPeriod,
-    toMs - fromMs,
-    pace.current.toMs - pace.current.fromMs,
-  );
+  const data = buildEnergyRows(current, prevPeriod, {
+    periodFromMs: snap.fromMs,
+    periodToMs: snap.toMs,
+    periodGrain: grain,
+    periodComplete: snap.complete,
+  });
 
-  // Trailing window changes as time passes; historical is immutable.
-  const isTrailing = Date.now() - toMs < 2 * 60_000;
+  // Trailing window changes as time passes; historical is immutable. Keys off
+  // the snapped current period's toMs — a partial period's toMs ≈ now.
+  const isTrailing = Date.now() - snap.toMs < 2 * 60_000;
   const maxAge = isTrailing ? 60 : 86400;
   return NextResponse.json(
     { data },

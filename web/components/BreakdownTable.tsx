@@ -1,26 +1,25 @@
 import { costForKwh, proratedBaseCharge } from "@/lib/rates";
 import {
-  comparisonGrain,
-  comparisonLabel,
   computeDelta,
-  formatDuration,
+  periodLabel,
+  prevPeriodLabel,
+  previousPeriodStart,
 } from "@/lib/energyWindow";
 import type { EnergyRow } from "@/lib/queryCache";
 
 const fmtUsd = (n: number) => `$${n.toFixed(2)}`;
 
-/** Δ cell — calendar-pace change (this period so far vs the prior period's
- *  matching span), signed and colored (red = more usage, green = less).
- *  Absolute kWh first; percent only when the prior period is big enough for
- *  one to be honest. */
+/** Δ cell — snapped period vs the prior period's matching span, signed and
+ *  colored (red = more usage, green = less). Absolute kWh first; percent only
+ *  when the prior period is big enough for one to be honest. */
 function DeltaCell({
-  periodKwh,
+  kwh,
   prevPeriodKwh,
 }: {
-  periodKwh: number | undefined;
+  kwh: number;
   prevPeriodKwh: number | undefined;
 }) {
-  const delta = computeDelta(periodKwh, prevPeriodKwh);
+  const delta = computeDelta(kwh, prevPeriodKwh);
   if (delta.kind === "none") {
     return <span className="text-zinc-400">—</span>;
   }
@@ -51,12 +50,17 @@ export function BreakdownTable({ rows }: { rows: EnergyRow[] }) {
     (acc, r) => (r.kwh > 0 ? acc + costForKwh(r.kwh) : acc),
     0,
   );
-  // windowMs is the same on every row (carried by the API for exactly this) —
-  // read it off the first row rather than threading a separate prop through
-  // ExplorerClient.
-  const windowMs = rows[0]?.windowMs;
-  const periodMs = rows[0]?.periodMs;
-  const baseCharge = windowMs !== undefined ? proratedBaseCharge(windowMs) : 0;
+  // Snap metadata is the same on every row (carried by the API for exactly
+  // this) — read it off the first row rather than threading separate props
+  // through ExplorerClient.
+  const periodFromMs = rows[0]?.periodFromMs;
+  const periodToMs = rows[0]?.periodToMs;
+  const periodGrain = rows[0]?.periodGrain;
+  const periodComplete = rows[0]?.periodComplete;
+  const baseCharge =
+    periodFromMs !== undefined && periodToMs !== undefined
+      ? proratedBaseCharge(periodToMs - periodFromMs)
+      : 0;
 
   return (
     <div className="overflow-hidden rounded-md border border-zinc-200 dark:border-zinc-800">
@@ -65,13 +69,15 @@ export function BreakdownTable({ rows }: { rows: EnergyRow[] }) {
           <tr>
             <th className="px-3 py-2 text-left font-medium">Category</th>
             <th className="px-3 py-2 text-right font-medium">
-              {windowMs !== undefined ? `kWh · ${formatDuration(windowMs)}` : "kWh"}
+              {periodFromMs !== undefined && periodGrain !== undefined
+                ? `kWh · ${periodLabel(periodFromMs, periodGrain)}${
+                    periodComplete === false ? " · so far" : ""
+                  }`
+                : "kWh"}
             </th>
             <th className="hidden px-3 py-2 text-right font-medium sm:table-cell">
-              {windowMs !== undefined
-                ? `${comparisonLabel(comparisonGrain(windowMs))}${
-                    periodMs !== undefined ? ` · ${formatDuration(periodMs)}` : ""
-                  }`
+              {periodFromMs !== undefined && periodGrain !== undefined
+                ? prevPeriodLabel(previousPeriodStart(periodFromMs, periodGrain), periodGrain)
                 : "Δ"}
             </th>
             <th className="px-3 py-2 text-right font-medium">Cost</th>
@@ -93,7 +99,7 @@ export function BreakdownTable({ rows }: { rows: EnergyRow[] }) {
               </td>
               <td className="px-3 py-2 text-right tabular-nums">{r.kwh.toFixed(1)}</td>
               <td className="hidden px-3 py-2 text-right tabular-nums sm:table-cell">
-                <DeltaCell periodKwh={r.periodKwh} prevPeriodKwh={r.prevPeriodKwh} />
+                <DeltaCell kwh={r.kwh} prevPeriodKwh={r.prevPeriodKwh} />
               </td>
               <td className="px-3 py-2 text-right tabular-nums">{fmtUsd(costForKwh(r.kwh))}</td>
               <td className="px-3 py-2 text-right tabular-nums text-zinc-500">

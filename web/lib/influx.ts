@@ -3,6 +3,7 @@ import type { IntervalKey } from "./interval";
 import { fluxEvery } from "./interval";
 import { categoryFromNameFlux, nameMatchesCategoriesFlux } from "./categories";
 import { hvacModeRowsFromFieldSums, spliceChildRows, unmonitoredKwh } from "./energyWindow";
+import type { ComparisonGrain } from "./energyWindow";
 import {
   RAW_ENERGY_SOURCE,
   energySourceForSpan,
@@ -240,20 +241,24 @@ export type EnergyRow = {
   /** Set on drill-down rows only: the category this circuit rolls up into.
    *  The table indents these under their parent's subtotal row (#12). */
   parent?: string;
+  /** Energy in the snapped Pacific calendar period (day/week/month/year,
+   *  picked from the viewed window length — see snapPeriod in
+   *  web/lib/energyWindow.ts). The table no longer describes the viewed
+   *  window itself. */
   kwh: number;
-  /** Same category's kWh in the current Pacific calendar period so far (day/
-   *  week/month/year, picked from the window length — see paceRanges). */
-  periodKwh?: number;
   /** Same category's kWh over the matching elapsed span of the prior calendar
-   *  period. The Δ column compares periodKwh against this. */
+   *  period. The Δ column compares kwh against this. */
   prevPeriodKwh?: number;
-  /** Window length in ms — carried on each row so the table can prorate the
-   *  base charge without a separate prop (see web/lib/energyWindow.ts). */
-  windowMs?: number;
-  /** Elapsed span of the pace comparison's current side, in ms — carried on
-   *  each row so the table can label the Δ column's period length (see
-   *  web/lib/energyWindow.ts). */
-  periodMs?: number;
+  /** Snapped period bounds (ms) — carried on each row so the table can label
+   *  headers and prorate the base charge without a separate prop (see
+   *  web/lib/energyWindow.ts snapPeriod). */
+  periodFromMs?: number;
+  periodToMs?: number;
+  /** Calendar grain of the snapped period. */
+  periodGrain?: ComparisonGrain;
+  /** False while the period is still in progress (contains "now") — drives
+   *  the kWh header's "· so far" suffix. */
+  periodComplete?: boolean;
 };
 
 /**
