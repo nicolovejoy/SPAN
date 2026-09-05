@@ -1,4 +1,5 @@
 import { InfluxDB } from "@influxdata/influxdb-client";
+import type { EventItem, ModeInterval } from "./eventRuns";
 import type { IntervalKey } from "./interval";
 import { fluxEvery } from "./interval";
 import { categoryFromNameFlux, nameMatchesCategoriesFlux } from "./categories";
@@ -444,4 +445,73 @@ export function mergeEnergyRows(rows: EnergyRow[]): EnergyRow[] {
   return Array.from(byCat, ([category, kwh]) => ({ category, kwh })).sort(
     (a, b) => b.kwh - a.kwh,
   );
+}
+
+/**
+ * Raw 5-min hvac_mode intervals over [fromMs, toMs) (#14 sub-project 2), one
+ * row per interval with the mode's own energy field picked out. The caller
+ * groups them into runs. Empty before the timeline starts (2026-01-04).
+ */
+export async function queryHvacModeIntervals(
+  fromMs: number,
+  toMs: number,
+): Promise<ModeInterval[]> {
+  const flux = `
+from(bucket: "${BUCKET}")
+  |> range(start: ${fluxDate(fromMs)}, stop: ${fluxDate(toMs)})
+  |> filter(fn: (r) => r._measurement == "hvac_mode")
+  |> filter(fn: (r) => r._field == "mode" or r._field =~ /^energy_.*_kwh$/ or r._field == "hp_mean_w" or r._field == "hp_max_w" or r._field == "aux_mean_w")
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+  |> sort(columns: ["_time"])
+`;
+  const out: ModeInterval[] = [];
+  const queryApi = makeClient().getQueryApi(ORG);
+  for await (const row of queryApi.iterateRows(flux)) {
+    const o = row.tableMeta.toObject(row.values) as Record<string, unknown>;
+    const mode = String(o.mode ?? "");
+    out.push({
+      startMs: Date.parse(String(o._time)),
+      mode,
+      kwh: Number(o[`energy_${mode}_kwh`]) || 0,
+      hpMeanW: Number(o.hp_mean_w) || 0,
+      hpMaxW: Number(o.hp_max_w) || 0,
+      auxMeanW: Number(o.aux_mean_w) || 0,
+    });
+  }
+  return out;
+}
+
+/**
+ * bath_event + charge_event overlapping [fromMs, toMs). Point time is the
+ * event start; duration_min gives the end. The range starts 24h early so an
+ * event that began before the window but runs into it is included.
+ */
+export async function queryEvents(fromMs: number, toMs: number): Promise<EventItem[]> {
+  const flux = `
+from(bucket: "${BUCKET}")
+  |> range(start: ${fluxDate(fromMs - 24 * 3600_000)}, stop: ${fluxDate(toMs)})
+  |> filter(fn: (r) => r._measurement == "bath_event" or r._measurement == "charge_event")
+  |> pivot(rowKey: ["_time", "_measurement"], columnKey: ["_field"], valueColumn: "_value")
+  |> sort(columns: ["_time"])
+`;
+  const out: EventItem[] = [];
+  const queryApi = makeClient().getQueryApi(ORG);
+  for await (const row of queryApi.iterateRows(flux)) {
+    const o = row.tableMeta.toObject(row.values) as Record<string, unknown>;
+    const startMs = Date.parse(String(o._time));
+    const endMs = startMs + (Number(o.duration_min) || 0) * 60_000;
+    if (endMs <= fromMs) continue;
+    const bath = o._measurement === "bath_event";
+    out.push({
+      kind: bath ? "bath" : "charge",
+      fromMs: startMs,
+      toMs: endMs,
+      kwh: Number(o.energy_kwh) || 0,
+      costDollars: Number(o.cost_dollars) || 0,
+      meanW: Number(bath ? o.hp_mean_power_w : o.mean_power_w) || 0,
+      maxW: Number(bath ? o.hp_max_power_w : o.max_power_w) || 0,
+      ...(bath ? { auxActive: Boolean(o.aux_active) } : {}),
+    });
+  }
+  return out;
 }

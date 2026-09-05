@@ -1,11 +1,14 @@
 import {
   queryPower,
   queryEnergyByCategory,
+  queryEvents,
+  queryHvacModeIntervals,
   type Grouping,
   type SeriesPoint,
 } from "./influx";
 import { intervalSeconds, type IntervalKey } from "./interval";
 import { energySourceForSpan, sourceForInterval, sourceKey } from "./rollup";
+import { groupModeRuns, MODES_MAX_WINDOW_MS, type EventsPayload } from "./eventRuns";
 
 export type { EnergyRow } from "./influx";
 import type { EnergyRow } from "./influx";
@@ -144,5 +147,57 @@ export async function cachedQueryEnergyByCategory(opts: {
     });
 
   energyInflight.set(key, promise);
+  return promise;
+}
+
+// Events cache — window-keyed like energy; independent of the display bucket.
+export function makeEventsKey(fromMs: number, toMs: number): string {
+  return `events|${fromMs}|${toMs}`;
+}
+
+const eventsCache = new Map<string, { data: EventsPayload; expiresAt: number }>();
+const eventsInflight = new Map<string, Promise<EventsPayload>>();
+
+export async function cachedQueryEvents(opts: {
+  fromMs: number;
+  toMs: number;
+}): Promise<EventsPayload> {
+  const key = makeEventsKey(opts.fromMs, opts.toMs);
+  const now = Date.now();
+
+  const hit = eventsCache.get(key);
+  if (hit && hit.expiresAt > now) {
+    eventsCache.delete(key);
+    eventsCache.set(key, hit);
+    return hit.data;
+  }
+  const pending = eventsInflight.get(key);
+  if (pending) return pending;
+
+  const isTrailing = now - opts.toMs < 2 * 60_000;
+  const ttlMs = isTrailing ? 60_000 : 24 * 60 * 60 * 1000;
+  const modesTruncated = opts.toMs - opts.fromMs > MODES_MAX_WINDOW_MS;
+
+  const promise = Promise.all([
+    modesTruncated ? Promise.resolve([]) : queryHvacModeIntervals(opts.fromMs, opts.toMs),
+    queryEvents(opts.fromMs, opts.toMs),
+  ])
+    .then(([intervals, events]) => {
+      const data: EventsPayload = { modes: groupModeRuns(intervals), events, modesTruncated };
+      eventsCache.set(key, { data, expiresAt: Date.now() + ttlMs });
+      while (eventsCache.size > MAX_ENTRIES) {
+        const oldest = eventsCache.keys().next().value;
+        if (oldest === undefined) break;
+        eventsCache.delete(oldest);
+      }
+      eventsInflight.delete(key);
+      return data;
+    })
+    .catch((e) => {
+      eventsInflight.delete(key);
+      throw e;
+    });
+
+  eventsInflight.set(key, promise);
   return promise;
 }
