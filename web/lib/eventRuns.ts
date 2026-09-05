@@ -118,7 +118,7 @@ export function groupModeRuns(intervals: ModeInterval[]): ModeRun[] {
 }
 
 const overlaps = (a: { fromMs: number; toMs: number }, b: { fromMs: number; toMs: number }) =>
-  a.fromMs < b.toMs && b.fromMs <= a.toMs;
+  a.fromMs < b.toMs && b.fromMs < a.toMs;
 
 export function bathsWithin(
   run: { fromMs: number; toMs: number },
