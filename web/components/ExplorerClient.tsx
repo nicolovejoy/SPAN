@@ -8,11 +8,13 @@ import { QuickFilters } from "./QuickFilters";
 import { FocusToggle } from "./FocusToggle";
 import { BreakdownTable } from "./BreakdownTable";
 import { OverviewStrip } from "./OverviewStrip";
+import { EventList } from "./EventList";
 import { stepWindow } from "@/lib/brush";
 import { initView, reducer } from "@/lib/viewState";
 import { buildIntentSearch, type DashState } from "@/lib/url-state";
-import { fetchEnergyCached, seedEnergy } from "@/lib/clientFetch";
+import { fetchEnergyCached, fetchEventsCached, seedEnergy } from "@/lib/clientFetch";
 import { mergeDrillRows } from "@/lib/energyWindow";
+import type { EventsPayload } from "@/lib/eventRuns";
 import type { EnergyRow } from "@/lib/queryCache";
 
 // Header range label — pinned to Pacific so server and client render the same
@@ -115,6 +117,31 @@ export function ExplorerClient({
     };
   }, [visible.fromMs, visible.toMs, view.drill]);
 
+  // Events layer — mode runs + bath/charge events for the visible window. No
+  // fetch while the Events chip is off.
+  const [events, setEvents] = useState<EventsPayload | null>(null);
+  const [eventsError, setEventsError] = useState(false);
+  useEffect(() => {
+    if (!view.events) return;
+    let cancelled = false;
+    fetchEventsCached(visible.fromMs, visible.toMs)
+      .then((d) => {
+        if (!cancelled) {
+          setEvents(d);
+          setEventsError(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setEvents(null);
+          setEventsError(true);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [visible.fromMs, visible.toMs, view.events]);
+
   const filtered =
     view.show.length === 0
       ? rows
@@ -187,7 +214,7 @@ export function ExplorerClient({
       <PowerChart
         state={view}
         onVisibleChange={onVisibleChange}
-        events={null}
+        events={events}
         eventsOn={view.events}
       />
 
@@ -210,6 +237,19 @@ export function ExplorerClient({
           <BreakdownTable rows={tableRows} />
         )}
       </div>
+
+      {view.events && (
+        <div className="focus-hide">
+          <EventList
+            data={events}
+            error={eventsError}
+            visible={visible}
+            onZoom={(fromMs, toMs) =>
+              dispatch({ type: "window", fromMs, toMs, now: Date.now() })
+            }
+          />
+        </div>
+      )}
     </main>
   );
 }
