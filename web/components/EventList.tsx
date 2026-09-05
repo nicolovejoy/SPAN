@@ -47,7 +47,15 @@ export function EventList({
   visible: { fromMs: number; toMs: number };
   onZoom: (fromMs: number, toMs: number) => void;
 }) {
-  const { rows, total } = data ? buildListRows(data, costForKwh) : { rows: [], total: 0 };
+  // The payload covers a padded window (see ExplorerClient), so scope it to the
+  // visible one before building rows — filtering ahead of the cap also keeps
+  // "showing 50 of N" honest for what the chart is actually showing.
+  const overlaps = (r: { fromMs: number; toMs: number }) =>
+    r.toMs > visible.fromMs && r.fromMs < visible.toMs;
+  const scoped = data
+    ? { ...data, modes: data.modes.filter(overlaps), events: data.events.filter(overlaps) }
+    : null;
+  const { rows, total } = scoped ? buildListRows(scoped, costForKwh) : { rows: [], total: 0 };
   return (
     <section className="flex flex-col gap-1">
       <div className="flex items-baseline justify-between">

@@ -14,7 +14,7 @@ import { initView, reducer } from "@/lib/viewState";
 import { buildIntentSearch, type DashState } from "@/lib/url-state";
 import { fetchEnergyCached, fetchEventsCached, seedEnergy } from "@/lib/clientFetch";
 import { mergeDrillRows } from "@/lib/energyWindow";
-import type { EventsPayload } from "@/lib/eventRuns";
+import { MODES_MAX_WINDOW_MS, type EventsPayload } from "@/lib/eventRuns";
 import type { EnergyRow } from "@/lib/queryCache";
 
 // Header range label — pinned to Pacific so server and client render the same
@@ -131,11 +131,14 @@ export function ExplorerClient({
       return;
     }
     let cancelled = false;
-    // Pad to ~3× the visible window, matching the chart's own load padding, so
-    // the lanes stay populated while panning inside the loaded data.
+    // Pad toward ~3× the visible window, matching the chart's own load padding,
+    // so the lanes stay populated while panning inside the loaded data. The pad
+    // is capped so the request never crosses the 62-day mode cap: a ≤62-day view
+    // must not lose its HP-mode runs to `modesTruncated` just from padding.
     const span = visible.toMs - visible.fromMs;
-    const evFrom = Math.max(0, visible.fromMs - span);
-    const evTo = Math.min(Date.now(), visible.toMs + span);
+    const pad = Math.min(span, Math.max(0, (MODES_MAX_WINDOW_MS - span) / 2));
+    const evFrom = Math.max(0, visible.fromMs - pad);
+    const evTo = Math.min(Date.now(), visible.toMs + pad);
     fetchEventsCached(evFrom, evTo)
       .then((d) => {
         if (!cancelled) {
