@@ -52,7 +52,7 @@ cumulative meter doesn't have this problem, and we already store it as
 
 - **#15** — make `energy_wh_counter` authoritative for energy; keep power-integration
   for the chart, where the counter is too coarse.
-- **~~#16~~ — DONE (branch pending merge).** Pi observability. ~2% of polls were missed on a
+- **~~#16~~ — DONE, merged + deployed 2026-08-23.** Pi observability. ~2% of polls were missed on a
   sampled day and a 2h50m outage on 2026-07-30 went unnoticed; backup health was already covered
   by `web/lib/health.ts` + UptimeRobot, so this scoped to collector reliability. Shipped:
   `collector_poll` points per iteration (result/error classification), a 07:00 data-gap email
@@ -89,13 +89,14 @@ grid 964 W = named circuits 681 W + feedthrough 266 W.
 
 *Unblocks everything in Phase 4. Free, and backfillable.*
 
-No temperature data exists anywhere — Influx holds exactly `circuit`, `panel`,
-`bath_event`, `charge_event`.
-
-- **#14 phase 1** — hourly outdoor temp from Open-Meteo into a `weather` series.
-  Backfills to 2026-01-04, so it retroactively classifies the entire dataset.
-- **#3** — cold-weather suppression for the aux-heat alarm becomes implementable
-  the moment #14 lands. It is not implementable before.
+- **~~#14 phase 1~~ — DONE, deployed 2026-08-24.** Hourly outdoor temp from Open-Meteo into a
+  `weather` series (`pi/weather_poller.py`), backfilled to 2026-01-04.
+- **~~#14 sub-project 2~~ — DONE, deployed 2026-08-28.** Heat/cool/hot-water split into a 5-min
+  `hvac_mode` timeline (`pi/hvac_classifier.py`), backfilled to 2026-01-04; web breakdown shows
+  Heating/Cooling/Hot Water sub-rows. #14 closed 2026-09-05; its remaining half lives in #3.
+- **#3** — cold-weather suppression for the aux-heat alarm. Now implementable; nothing built.
+  Note `daily_report.py` has no aux-heat-specific alarm yet, only the generic per-category
+  anomaly check — #3 has to define the alarm before it can suppress it.
 
 **Decision point:** if Phase 5 (Timescale) is going to happen, write `weather` to
 Timescale rather than Influx from day one. It's the natural pilot — small, new, and
@@ -122,7 +123,7 @@ on the site and in the email, with baths and laundry broken out.*
 - **Water-bill estimate** — bath and laundry hot-water volume → gallons → SPU rates.
   Explicitly an estimate with stated assumptions.
 
-**Ground truth for tuning this:** `notes/2026-09-04-vacation-and-dhw-ground-truth.md` has two more
+**Ground truth for tuning this:** `docs/superpowers/notes/2026-09-04-vacation-and-dhw-ground-truth.md` has two more
 dated, confirmed-against-reality misses (a fast overlapping heat+shower+laundry call classified
 `ambiguous`; a slow-ramping delayed DHW reheat classified `heat`) alongside the original Aug 26
 findings doc — useful fixtures whenever this gets revisited.

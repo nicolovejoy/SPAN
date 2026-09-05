@@ -75,7 +75,7 @@ directory later means editing the unit and `systemctl daemon-reload` first.
     (uid `pi-health`) — collector poll failure rate, host + container metrics (#16)
 - `web/` - Next.js power-explorer dashboard (Vercel-hosted, see § web/)
 - `pi/backup/` - nightly restic backup to Cloudflare R2 (systemd timer, 03:30). Covers the
-  only unrecoverable state: InfluxDB, TimescaleDB, the Grafana volume, and the `.env` files —
+  only unrecoverable state: InfluxDB, the lights project's TimescaleDB (shares the Pi; not span data), the Grafana volume, and the `.env` files —
   everything else rebuilds from git. Config at `/etc/span-backup.env` on the Pi (rendered from
   `span-backup.env.tpl` via `op inject`; the Pi has no 1Password). **Restore runbook and setup
   steps: `pi/backup/README.md`.** The repo password lives in 1Password as `phrpi-restic-backup`
@@ -137,12 +137,12 @@ subagent. The list below is near-term mechanics; the roadmap explains ordering a
   future cleanup pass if nothing else picks them up first.
 - **Make bath + charge events explorable over time** — requested 2026-08-21. Their sections leave
   the email; the detectors keep writing. Probably belongs in `web/`, needs its own design. Broaden
-  scope per `notes/2026-09-04-vacation-and-dhw-ground-truth.md`: expose the raw `hot_water`
+  scope per `docs/superpowers/notes/2026-09-04-vacation-and-dhw-ground-truth.md`: expose the raw `hot_water`
   `hvac_mode` intervals as a browsable layer too, not just formal `bath_event` rows — that's the
   actual workflow for cross-checking "who showered when" against memory, and formal baths are a
   narrow subset of it.
 - **Presence/occupancy signal from lights-circuit baseline deviation** — new idea, not yet built.
-  `notes/2026-09-04-vacation-and-dhw-ground-truth.md` found the vacant-period baseline for "Lights /
+  `docs/superpowers/notes/2026-09-04-vacation-and-dhw-ground-truth.md` found the vacant-period baseline for "Lights /
   Downstairs" stable to ±2W night over night, and a real visitor broke it by 2–3x with bedroom
   circuits untouched — a much cleaner occupancy signal than anything HVAC- or grid-based (HVAC
   reacts to weather regardless of occupancy; grid blends EV/kitchen/everything together). Sketch:
