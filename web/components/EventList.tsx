@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { costForKwh } from "@/lib/rates";
 import { EVENT_COLOR, MODE_COLOR } from "@/lib/eventLanes";
 import {
@@ -18,10 +19,15 @@ const TZ = "America/Los_Angeles";
 const dayKey = new Intl.DateTimeFormat("en-CA", { timeZone: TZ });
 const monthDay = new Intl.DateTimeFormat("en-US", { timeZone: TZ, month: "short", day: "numeric" });
 
-/** "12:00 PM", or "Sep 5 12:20 AM" when the row crosses a Pacific midnight. */
-function cell(ms: number, row: ListRow): string {
+/** Rows shown before the "more" expander. */
+const COLLAPSED_ROWS = 3;
+
+/** "12:00 PM", or "Sep 5 12:20 AM" when the date is needed to place the row:
+ *  either the visible window spans more than one Pacific day, or the row
+ *  itself crosses a Pacific midnight. */
+function cell(ms: number, row: ListRow, multiDay: boolean): string {
   const crosses = dayKey.format(row.fromMs) !== dayKey.format(row.toMs);
-  return crosses ? `${monthDay.format(ms)} ${fmtPacificTime(ms)}` : fmtPacificTime(ms);
+  return multiDay || crosses ? `${monthDay.format(ms)} ${fmtPacificTime(ms)}` : fmtPacificTime(ms);
 }
 
 function Swatch({ kind }: { kind: ListRow["kind"] }) {
@@ -56,6 +62,16 @@ export function EventList({
     ? { ...data, modes: data.modes.filter(overlaps), events: data.events.filter(overlaps) }
     : null;
   const { rows, total } = scoped ? buildListRows(scoped, costForKwh) : { rows: [], total: 0 };
+  const multiDay = dayKey.format(visible.fromMs) !== dayKey.format(visible.toMs);
+
+  // Collapsed by default so the list doesn't dominate the page; a window change
+  // collapses it again since the rows it was expanded for are gone.
+  const [expanded, setExpanded] = useState(false);
+  useEffect(() => {
+    setExpanded(false);
+  }, [visible.fromMs, visible.toMs]);
+  const shown = expanded ? rows : rows.slice(0, COLLAPSED_ROWS);
+  const hidden = rows.length - shown.length;
   return (
     <section className="flex flex-col gap-1">
       <div className="flex items-baseline justify-between">
@@ -86,7 +102,7 @@ export function EventList({
               </tr>
             </thead>
             <tbody>
-              {rows.map((r) => {
+              {shown.map((r) => {
                 const zoom = () => {
                   const z = zoomWindow(r.fromMs, r.toMs);
                   onZoom(z.fromMs, z.toMs);
@@ -106,8 +122,8 @@ export function EventList({
                     }}
                   >
                     <td className="px-2 py-1.5"><span className="inline-flex items-center gap-1.5"><Swatch kind={r.kind} />{MODE_LABEL[r.kind]}</span></td>
-                    <td className="px-2 py-1.5">{cell(r.fromMs, r)}</td>
-                    <td className="px-2 py-1.5">{cell(r.toMs, r)}</td>
+                    <td className="px-2 py-1.5">{cell(r.fromMs, r, multiDay)}</td>
+                    <td className="px-2 py-1.5">{cell(r.toMs, r, multiDay)}</td>
                     <td className="px-2 py-1.5 text-right">{formatDurationMs(r.toMs - r.fromMs)}</td>
                     <td className="px-2 py-1.5 text-right">{r.kwh.toFixed(1)}</td>
                     <td className="px-2 py-1.5 text-right">{r.costDollars.toFixed(2)}</td>
@@ -118,6 +134,24 @@ export function EventList({
               })}
             </tbody>
           </table>
+          {hidden > 0 && (
+            <button
+              type="button"
+              onClick={() => setExpanded(true)}
+              className="mt-1 px-2 py-1 text-xs text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"
+            >
+              … {hidden} more event{hidden === 1 ? "" : "s"}
+            </button>
+          )}
+          {expanded && rows.length > COLLAPSED_ROWS && (
+            <button
+              type="button"
+              onClick={() => setExpanded(false)}
+              className="mt-1 px-2 py-1 text-xs text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"
+            >
+              show fewer
+            </button>
+          )}
         </div>
       )}
     </section>
