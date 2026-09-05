@@ -122,7 +122,14 @@ export function ExplorerClient({
   const [events, setEvents] = useState<EventsPayload | null>(null);
   const [eventsError, setEventsError] = useState(false);
   useEffect(() => {
-    if (!view.events) return;
+    if (!view.events) {
+      // Drop the payload rather than keeping it: panning while the chip is off
+      // would otherwise re-render stale blocks for the old window for one pass
+      // when the chip comes back on.
+      setEvents(null);
+      setEventsError(false);
+      return;
+    }
     let cancelled = false;
     fetchEventsCached(visible.fromMs, visible.toMs)
       .then((d) => {

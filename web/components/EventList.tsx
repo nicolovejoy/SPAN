@@ -78,25 +78,36 @@ export function EventList({
               </tr>
             </thead>
             <tbody>
-              {rows.map((r) => (
-                <tr
-                  key={r.id}
-                  className="cursor-pointer border-t border-zinc-100 hover:bg-zinc-50 dark:border-zinc-900 dark:hover:bg-zinc-900/60"
-                  onClick={() => {
-                    const z = zoomWindow(r.fromMs, r.toMs);
-                    onZoom(z.fromMs, z.toMs);
-                  }}
-                >
-                  <td className="px-2 py-1.5"><span className="inline-flex items-center gap-1.5"><Swatch kind={r.kind} />{MODE_LABEL[r.kind]}</span></td>
-                  <td className="px-2 py-1.5">{cell(r.fromMs, r)}</td>
-                  <td className="px-2 py-1.5">{cell(r.toMs, r)}</td>
-                  <td className="px-2 py-1.5 text-right">{formatDurationMs(r.toMs - r.fromMs)}</td>
-                  <td className="px-2 py-1.5 text-right">{r.kwh.toFixed(1)}</td>
-                  <td className="px-2 py-1.5 text-right">{r.costDollars.toFixed(2)}</td>
-                  <td className="px-2 py-1.5 text-xs text-zinc-500">{r.detail}</td>
-                  <td className="px-2 py-1.5 text-right text-xs text-zinc-400">zoom →</td>
-                </tr>
-              ))}
+              {rows.map((r) => {
+                const zoom = () => {
+                  const z = zoomWindow(r.fromMs, r.toMs);
+                  onZoom(z.fromMs, z.toMs);
+                };
+                return (
+                  <tr
+                    key={r.id}
+                    role="button"
+                    tabIndex={0}
+                    className="cursor-pointer border-t border-zinc-100 outline-none hover:bg-zinc-50 focus-visible:bg-zinc-50 dark:border-zinc-900 dark:hover:bg-zinc-900/60 dark:focus-visible:bg-zinc-900/60"
+                    onClick={zoom}
+                    onKeyDown={(e) => {
+                      if (e.key !== "Enter" && e.key !== " ") return;
+                      // Space would scroll the page otherwise.
+                      e.preventDefault();
+                      zoom();
+                    }}
+                  >
+                    <td className="px-2 py-1.5"><span className="inline-flex items-center gap-1.5"><Swatch kind={r.kind} />{MODE_LABEL[r.kind]}</span></td>
+                    <td className="px-2 py-1.5">{cell(r.fromMs, r)}</td>
+                    <td className="px-2 py-1.5">{cell(r.toMs, r)}</td>
+                    <td className="px-2 py-1.5 text-right">{formatDurationMs(r.toMs - r.fromMs)}</td>
+                    <td className="px-2 py-1.5 text-right">{r.kwh.toFixed(1)}</td>
+                    <td className="px-2 py-1.5 text-right">{r.costDollars.toFixed(2)}</td>
+                    <td className="px-2 py-1.5 text-xs text-zinc-500">{r.detail}</td>
+                    <td className="px-2 py-1.5 text-right text-xs text-zinc-400">zoom →</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
