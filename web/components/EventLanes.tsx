@@ -57,17 +57,21 @@ export function EventLanes({
             </pattern>
           </defs>
           {modes.map((b) => (
-            <rect
+            <g
               key={`${b.item.mode}:${b.item.fromMs}`}
-              x={b.x}
-              y={4}
-              width={b.w}
-              height={LANE_H - 8}
-              fill={b.item.mode === "ambiguous" ? "url(#lane-hatch)" : MODE_COLOR[b.item.mode]}
               onMouseEnter={() => setHover({ kind: "mode", run: b.item, x: b.x + b.w / 2 })}
               onMouseLeave={() => setHover(null)}
               onClick={() => setHover({ kind: "mode", run: b.item, x: b.x + b.w / 2 })}
-            />
+            >
+              <HitRect x={b.x} w={b.w} />
+              <rect
+                x={b.x}
+                y={4}
+                width={b.w}
+                height={LANE_H - 8}
+                fill={b.item.mode === "ambiguous" ? "url(#lane-hatch)" : MODE_COLOR[b.item.mode]}
+              />
+            </g>
           ))}
         </svg>
       </div>
@@ -86,6 +90,7 @@ export function EventLanes({
                 onMouseLeave={() => setHover(null)}
                 onClick={() => setHover({ kind: "event", ev: b.item, x: b.x + b.w / 2 })}
               >
+                <HitRect x={b.x} w={b.w} />
                 <rect
                   x={b.x}
                   y={5}
@@ -127,6 +132,14 @@ export function EventLanes({
   );
 }
 
+/** Invisible full-lane-height target behind a block. A bath block is
+ *  `fill="none"`, so under SVG's default `visiblePainted` its group would only
+ *  be hoverable on the 1.5px stroke; a 1px-wide block is unhittable either way.
+ *  Drawn first so it sits behind, and widened to a minimum 8px. */
+function HitRect({ x, w }: { x: number; w: number }) {
+  return <rect x={x} y={0} width={Math.max(w, 8)} height={LANE_H} fill="transparent" />;
+}
+
 function Gutter({ children }: { children: React.ReactNode }) {
   return (
     <span className="pointer-events-none absolute left-1 top-1 z-[1] text-[10px] uppercase tracking-wide text-zinc-400 dark:text-zinc-500">
@@ -136,16 +149,18 @@ function Gutter({ children }: { children: React.ReactNode }) {
 }
 
 function ModeTip({ run, events }: { run: ModeRun; events: EventItem[] }) {
-  const baths = run.mode === "hot_water" ? bathsWithin(run, events) : [];
+  // Count only — a long hot-water run can hold several baths, and listing every
+  // range overflows the fixed 220px tooltip.
+  const nBaths = run.mode === "hot_water" ? bathsWithin(run, events).length : 0;
   return (
     <>
       <div><b>{MODE_LABEL[run.mode]}</b> · {fmtPacificRange(run.fromMs, run.toMs)}</div>
       <div className="text-zinc-500">
         {formatDurationMs(run.toMs - run.fromMs)} · {run.kwh.toFixed(1)} kWh · HP mean {kw(run.hpMeanW)} · max {kw(run.hpMaxW)} · aux {run.auxMeanW > 50 ? "on" : "off"}
       </div>
-      {baths.length > 0 && (
+      {nBaths > 0 && (
         <div className="text-zinc-500">
-          contains {baths.map((b) => `bath ${fmtPacificRange(b.fromMs, b.toMs)}`).join(", ")}
+          contains {nBaths} bath{nBaths === 1 ? "" : "s"}
         </div>
       )}
     </>
