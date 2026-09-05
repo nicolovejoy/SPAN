@@ -272,7 +272,9 @@ describe("bathsWithin", () => {
 describe("buildListRows", () => {
   const cost = (kwh: number) => kwh * 0.1;
   const payload: EventsPayload = {
-    modes: groupModeRuns([iv(0, "hot_water", 1), iv(1, "hot_water", 1)]),
+    // Three intervals: the run ends at T0+15m, so it strictly overlaps the bath
+    // starting at T0+10m, and the hp mean (2000, 2100, 2200) is exactly 2100 W.
+    modes: groupModeRuns([iv(0, "hot_water", 1), iv(1, "hot_water", 1), iv(2, "hot_water", 1)]),
     events: [bath, charge],
     modesTruncated: false,
   };
@@ -282,7 +284,7 @@ describe("buildListRows", () => {
     expect(total).toBe(3);
     expect(rows.map((r) => r.kind)).toEqual(["hot_water", "bath", "charge"]);
     expect(rows[0].detail).toBe("HP 2.1 kW mean · contains 1 bath");
-    expect(rows[0].costDollars).toBeCloseTo(0.2);
+    expect(rows[0].costDollars).toBeCloseTo(0.3);
     expect(rows[1].detail).toBe("HP max 3.4 kW, aux off");
     expect(rows[1].costDollars).toBe(0.45);
     expect(rows[2].detail).toBe("9.6 kW peak");
@@ -295,7 +297,8 @@ describe("buildListRows", () => {
 
   it("caps at the 50 largest by kWh, re-sorted by start", () => {
     const many: EventsPayload = {
-      modes: groupModeRuns(Array.from({ length: 120 }, (_, i) => iv(i * 2, "heat", i % 2 ? 0.1 : 1))),
+      // Spaced three intervals apart (15 min between starts) so none join.
+      modes: groupModeRuns(Array.from({ length: 120 }, (_, i) => iv(i * 3, "heat", i % 2 ? 0.1 : 1))),
       events: [],
       modesTruncated: false,
     };
