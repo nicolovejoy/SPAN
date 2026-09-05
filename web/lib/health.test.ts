@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { evaluateCheck } from "./health";
+import { evaluateCheck, HEALTH_CHECKS } from "./health";
 
 const now = new Date("2026-08-13T12:00:00Z");
 
@@ -50,5 +50,32 @@ describe("evaluateCheck", () => {
     );
     expect(c.ok).toBe(true);
     expect(c.ageSeconds).toBe(60);
+  });
+});
+
+describe("HEALTH_CHECKS registry", () => {
+  it("names the four cadence-bound services once each", () => {
+    expect(HEALTH_CHECKS.map((c) => c.name)).toEqual([
+      "collector",
+      "backup",
+      "weather",
+      "hvac_mode",
+    ]);
+  });
+
+  it("thresholds are 3x each service's cadence or more", () => {
+    const by = Object.fromEntries(HEALTH_CHECKS.map((c) => [c.name, c]));
+    expect(by.collector.maxAgeSeconds).toBe(300);        // 30s poll
+    expect(by.backup.maxAgeSeconds).toBe(30 * 3600);     // nightly
+    expect(by.weather.maxAgeSeconds).toBe(3 * 3600);     // hourly poll
+    expect(by.hvac_mode.maxAgeSeconds).toBe(45 * 60);    // 10-min loop, 5-min intervals
+  });
+
+  it("every check has a measurement, field and lookback", () => {
+    for (const c of HEALTH_CHECKS) {
+      expect(c.measurement).toBeTruthy();
+      expect(c.field).toBeTruthy();
+      expect(c.lookback).toMatch(/^\d+[hd]$/);
+    }
   });
 });

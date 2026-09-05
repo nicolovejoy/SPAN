@@ -1,11 +1,6 @@
 import { NextResponse } from "next/server";
 import { queryLastPointTime } from "@/lib/influx";
-import {
-  BACKUP_MAX_AGE_S,
-  COLLECTOR_MAX_AGE_S,
-  evaluateCheck,
-  type HealthCheck,
-} from "@/lib/health";
+import { HEALTH_CHECKS, evaluateCheck, type HealthCheck } from "@/lib/health";
 
 export const dynamic = "force-dynamic";
 
@@ -13,20 +8,21 @@ export async function GET() {
   const now = new Date();
   let checks: HealthCheck[];
   try {
-    const [collector, backup] = await Promise.all([
-      queryLastPointTime("circuit", "power_w", "1h"),
-      queryLastPointTime("backup_snapshot", "ok", "14d"),
-    ]);
-    checks = [
-      evaluateCheck("collector", collector, now, COLLECTOR_MAX_AGE_S),
-      evaluateCheck("backup", backup, now, BACKUP_MAX_AGE_S),
-    ];
+    const lastTimes = await Promise.all(
+      HEALTH_CHECKS.map((c) => queryLastPointTime(c.measurement, c.field, c.lookback)),
+    );
+    checks = HEALTH_CHECKS.map((c, i) =>
+      evaluateCheck(c.name, lastTimes[i], now, c.maxAgeSeconds),
+    );
   } catch (err) {
     const note = `influx query failed: ${err instanceof Error ? err.message : String(err)}`;
-    checks = [
-      { name: "collector", ok: false, ageSeconds: null, maxAgeSeconds: COLLECTOR_MAX_AGE_S, note },
-      { name: "backup", ok: false, ageSeconds: null, maxAgeSeconds: BACKUP_MAX_AGE_S, note },
-    ];
+    checks = HEALTH_CHECKS.map((c) => ({
+      name: c.name,
+      ok: false,
+      ageSeconds: null,
+      maxAgeSeconds: c.maxAgeSeconds,
+      note,
+    }));
   }
   const ok = checks.every((c) => c.ok);
   return NextResponse.json(
