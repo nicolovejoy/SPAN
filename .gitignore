@@ -12,3 +12,6 @@ pi/cloudflared/
 
 # git worktrees created by EnterWorktree — never commit these
 .claude/worktrees/
+
+# Ad-hoc Influx query dumps (query_usage.sh) — never committed
+/tmp/

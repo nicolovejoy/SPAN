@@ -122,6 +122,11 @@ on the site and in the email, with baths and laundry broken out.*
 - **Water-bill estimate** — bath and laundry hot-water volume → gallons → SPU rates.
   Explicitly an estimate with stated assumptions.
 
+**Ground truth for tuning this:** `notes/2026-09-04-vacation-and-dhw-ground-truth.md` has two more
+dated, confirmed-against-reality misses (a fast overlapping heat+shower+laundry call classified
+`ambiguous`; a slow-ramping delayed DHW reheat classified `heat`) alongside the original Aug 26
+findings doc — useful fixtures whenever this gets revisited.
+
 **Open question worth settling with data:** the recirc pump. Unplugged 2026-04-09;
 overnight (2–5am) heat-pump draw went from 806 W median to 21 W. Bounded at
 $107–$850/yr, too wide to act on because April warming is confounded. #14 resolves it

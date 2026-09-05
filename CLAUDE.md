@@ -136,7 +136,20 @@ subagent. The list below is near-term mechanics; the roadmap explains ordering a
   `query_total_kwh`, `_delta_arrow` are unreferenced by the shipped weekly report. Candidate for a
   future cleanup pass if nothing else picks them up first.
 - **Make bath + charge events explorable over time** — requested 2026-08-21. Their sections leave
-  the email; the detectors keep writing. Probably belongs in `web/`, needs its own design.
+  the email; the detectors keep writing. Probably belongs in `web/`, needs its own design. Broaden
+  scope per `notes/2026-09-04-vacation-and-dhw-ground-truth.md`: expose the raw `hot_water`
+  `hvac_mode` intervals as a browsable layer too, not just formal `bath_event` rows — that's the
+  actual workflow for cross-checking "who showered when" against memory, and formal baths are a
+  narrow subset of it.
+- **Presence/occupancy signal from lights-circuit baseline deviation** — new idea, not yet built.
+  `notes/2026-09-04-vacation-and-dhw-ground-truth.md` found the vacant-period baseline for "Lights /
+  Downstairs" stable to ±2W night over night, and a real visitor broke it by 2–3x with bedroom
+  circuits untouched — a much cleaner occupancy signal than anything HVAC- or grid-based (HVAC
+  reacts to weather regardless of occupancy; grid blends EV/kitchen/everything together). Sketch:
+  a rolling per-circuit, per-time-of-day baseline (trailing-N-day median at matching local time),
+  flag sustained deviation as a presence event, surface either as its own event stream (like
+  `bath_event`/`charge_event`) or a shaded band on the explorer chart. The Aug 31–Sep 2 vacant
+  window in that note is a ready-made calibration case.
 - **Dashboard access model** — decision pending (2026-08-13); candidate: signed-cookie unlock link in Next.js middleware. /api/health (observer endpoint, see prompt-lab uptime convention) must stay exempt.
 - **EV monthly + annual cost rollup** in daily report (request #3 from 2026-05-23 batch — last unaddressed item). Weekly section already excludes EV (per-2h-bucket subtract); EV accounting is pinned to the exact `CHARGE_CIRCUIT` name shared with `charge_detector`, not the Car regex.
 - **Power explorer chart E2E** (#13) — Playwright harness via a `MOCK_INFLUX` fixture mode. Plan in the issue.
