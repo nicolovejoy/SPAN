@@ -45,3 +45,46 @@ export function layoutBlocks<T extends { fromMs: number; toMs: number }>(
 }
 
 export const labelFits = (w: number): boolean => w >= LABEL_MIN_PX;
+
+/**
+ * Place an arbitrary instant on the chart's x axis.
+ *
+ * lightweight-charts' `timeToCoordinate` only resolves times that are actual
+ * points on the series — it returns null anywhere between two buckets. Run and
+ * event boundaries are not bucket-aligned (a charge session starts on some
+ * second), so asking it directly drops nearly every block once the bucket is
+ * coarser than the events themselves. The chart does carry a data or whitespace
+ * point at every bucket across the loaded window, so we resolve the two buckets
+ * that straddle `ms` and interpolate between them instead.
+ *
+ * At the edges of the loaded data only one side resolves; we then take the
+ * slope from the next bucket inward and extrapolate, falling back to the single
+ * resolvable anchor if even that is missing.
+ *
+ * @param timeToX ms → px, or null when the chart can't place that instant.
+ */
+export function interpolateX(
+  ms: number,
+  bucketMs: number,
+  timeToX: (ms: number) => number | null,
+): number | null {
+  const t0 = Math.floor(ms / bucketMs) * bucketMs;
+  const t1 = t0 + bucketMs;
+  const frac = (ms - t0) / bucketMs;
+  const x0 = timeToX(t0);
+  const x1 = timeToX(t1);
+  if (x0 !== null && x1 !== null) return x0 + (x1 - x0) * frac;
+  if (x0 !== null) {
+    // Right edge: slope from the bucket before t0.
+    const xPrev = timeToX(t0 - bucketMs);
+    return xPrev === null ? x0 : x0 + (x0 - xPrev) * frac;
+  }
+  if (x1 !== null) {
+    // Left edge: slope from the bucket after t1.
+    const xNext = timeToX(t1 + bucketMs);
+    if (xNext === null) return x1;
+    const step = xNext - x1;
+    return x1 - step + step * frac;
+  }
+  return null;
+}

@@ -25,7 +25,7 @@ import { padWindow, needsExtension, extendWindow } from "@/lib/panWindow";
 import { fetchSeriesCached } from "@/lib/clientFetch";
 import type { SeriesPoint } from "@/lib/influx";
 import type { DashState } from "@/lib/url-state";
-import type { XOf } from "@/lib/eventLanes";
+import { interpolateX, type XOf } from "@/lib/eventLanes";
 import type { EventsPayload } from "@/lib/eventRuns";
 import { EventLanes } from "./EventLanes";
 
@@ -763,10 +763,15 @@ export function PowerChart({
   // during a pan; laneTick forces this block to re-run per scale change.
   void laneTick;
   const laneChart = chartAliveRef.current ? chartRef.current : null;
+  // timeToCoordinate only resolves times that are actual points on the series,
+  // so run/event boundaries (rarely bucket-aligned) have to be interpolated
+  // between the two buckets that straddle them — see interpolateX.
+  const laneBucketMs = intervalSeconds(state.interval) * 1000;
   const xOf: XOf = (ms) => {
     if (!laneChart) return null;
-    const x = laneChart.timeScale().timeToCoordinate(toDisplay(ms / 1000));
-    return x === null ? null : x;
+    return interpolateX(ms, laneBucketMs, (at) =>
+      laneChart.timeScale().timeToCoordinate(toDisplay(at / 1000)),
+    );
   };
   const laneWidth = laneChart ? laneChart.timeScale().width() : 0;
   // getVisibleRange() returns null — and throws — before the chart has data.

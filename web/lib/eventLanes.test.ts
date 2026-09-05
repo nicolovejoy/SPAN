@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { labelFits, layoutBlocks, type XOf } from "./eventLanes";
+import { interpolateX, labelFits, layoutBlocks, type XOf } from "./eventLanes";
 
 // Linear mapper: 0..1000 ms → 0..1000 px, null outside the loaded range.
 const xOf: XOf = (ms) => (ms < 0 || ms > 1000 ? null : ms);
@@ -24,6 +24,39 @@ describe("layoutBlocks", () => {
   it("drops an item whose edges the mapper cannot place", () => {
     const [b] = layoutBlocks([{ fromMs: 200, toMs: 300 }], vis, () => null);
     expect(b).toBeUndefined();
+  });
+});
+
+describe("interpolateX", () => {
+  // 100ms buckets at 0.1 px/ms. `only` restricts which bucket stamps the chart
+  // will resolve, standing in for the edges of the loaded data.
+  const BUCKET = 100;
+  const mapper =
+    (only: (ms: number) => boolean) =>
+    (ms: number): number | null =>
+      only(ms) ? ms / 10 : null;
+  const all = mapper(() => true);
+
+  it("lerps between the two surrounding buckets", () => {
+    expect(interpolateX(1050, BUCKET, all)).toBe(105);
+  });
+  it("returns the bucket's own coordinate on an exact boundary", () => {
+    expect(interpolateX(1100, BUCKET, all)).toBe(110);
+  });
+  it("extrapolates off the right edge from the previous bucket", () => {
+    // Nothing past 1100 resolves: step back to 1000 for the slope.
+    expect(interpolateX(1150, BUCKET, mapper((ms) => ms <= 1100))).toBe(115);
+  });
+  it("extrapolates off the left edge from the following bucket", () => {
+    // Nothing before 1100 resolves: step forward to 1200 for the slope.
+    expect(interpolateX(1050, BUCKET, mapper((ms) => ms >= 1100))).toBe(105);
+  });
+  it("falls back to the one resolvable anchor when the slope is unknowable", () => {
+    expect(interpolateX(1150, BUCKET, mapper((ms) => ms === 1100))).toBe(110);
+    expect(interpolateX(1050, BUCKET, mapper((ms) => ms === 1100))).toBe(110);
+  });
+  it("returns null when neither surrounding bucket resolves", () => {
+    expect(interpolateX(1050, BUCKET, () => null)).toBeNull();
   });
 });
 
