@@ -184,7 +184,12 @@ export function ExplorerClient({
         <FocusToggle />
       </div>
 
-      <PowerChart state={view} onVisibleChange={onVisibleChange} />
+      <PowerChart
+        state={view}
+        onVisibleChange={onVisibleChange}
+        events={null}
+        eventsOn={view.events}
+      />
 
       {/* All-history overview: the brush follows `visible` (so preset clicks and
           pan/zoom move it too) and dragging it loads an arbitrary window. */}

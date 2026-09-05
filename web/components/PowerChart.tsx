@@ -25,6 +25,9 @@ import { padWindow, needsExtension, extendWindow } from "@/lib/panWindow";
 import { fetchSeriesCached } from "@/lib/clientFetch";
 import type { SeriesPoint } from "@/lib/influx";
 import type { DashState } from "@/lib/url-state";
+import type { XOf } from "@/lib/eventLanes";
+import type { EventsPayload } from "@/lib/eventRuns";
+import { EventLanes } from "./EventLanes";
 
 /** Called when a pan/zoom settles, with the visible sub-window (real-UTC ms).
  *  Drives the table + header only — it never moves the chart's view, so there
@@ -267,9 +270,13 @@ function Spinner() {
 export function PowerChart({
   state,
   onVisibleChange,
+  events,
+  eventsOn,
 }: {
   state: DashState;
   onVisibleChange: VisibleChange;
+  events: EventsPayload | null;
+  eventsOn: boolean;
 }) {
   // Latest onVisibleChange, read from the create-once chart effect without
   // re-subscribing.
@@ -304,6 +311,9 @@ export function PowerChart({
   // Circuit names in the current drill, sorted — legend only; the series
   // themselves live in circuitSeriesRef.
   const [circuitNames, setCircuitNames] = useState<string[]>([]);
+  // Bumped on every visible-logical-range change so the lanes re-read the
+  // chart's scale and stay pinned under the data during a pan/zoom.
+  const [laneTick, setLaneTick] = useState(0);
   // The loaded (padded) window. `loadRef` mirrors it for the create-once chart
   // callback; `extendingRef` keeps overlapping extensions from stacking up.
   const [load, setLoad] = useState<LoadWindow | null>(null);
@@ -453,6 +463,13 @@ export function PowerChart({
 
     chart.timeScale().subscribeVisibleTimeRangeChange(onRangeChange);
 
+    let raf = 0;
+    const onLogical = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => { raf = 0; setLaneTick((t) => t + 1); });
+    };
+    chart.timeScale().subscribeVisibleLogicalRangeChange(onLogical);
+
     return () => {
       // Drop every handle *before* removing the chart: if `remove()` throws
       // mid-teardown the refs would otherwise stay pointing at a dead chart and
@@ -474,6 +491,8 @@ export function PowerChart({
         gestureTimer.current = null;
       }
       chart.timeScale().unsubscribeVisibleTimeRangeChange(onRangeChange);
+      chart.timeScale().unsubscribeVisibleLogicalRangeChange(onLogical);
+      if (raf) cancelAnimationFrame(raf);
       chart.remove();
     };
     // intentionally empty: stable chart instance; callback read via onVisibleRef
@@ -740,49 +759,75 @@ export function PowerChart({
     ),
   ];
 
+  // Lanes read the chart's own scale so they stay pinned under the data
+  // during a pan; laneTick forces this block to re-run per scale change.
+  void laneTick;
+  const laneChart = chartAliveRef.current ? chartRef.current : null;
+  const xOf: XOf = (ms) => {
+    if (!laneChart) return null;
+    const x = laneChart.timeScale().timeToCoordinate(toDisplay(ms / 1000));
+    return x === null ? null : x;
+  };
+  const laneWidth = laneChart ? laneChart.timeScale().width() : 0;
+  // getVisibleRange() returns null — and throws — before the chart has data.
+  let range: { from: Time; to: Time } | null = null;
+  try {
+    range = laneChart?.timeScale().getVisibleRange() ?? null;
+  } catch {
+    range = null;
+  }
+  const laneVisible = range
+    ? { fromMs: fromDisplay(Number(range.from)) * 1000, toMs: fromDisplay(Number(range.to)) * 1000 }
+    : { fromMs: state.fromMs, toMs: state.toMs };
+
   return (
     <div className="relative">
-      <div
-        ref={containerRef}
-        className="h-[55vh] min-h-[280px] w-full touch-none sm:h-[420px]"
-      />
-      <div className="pointer-events-none absolute left-2 top-1 flex flex-col gap-0.5 text-[11px]">
-        {legend.map((it) => (
-          <div
-            key={it.label}
-            className={`flex items-center gap-1.5 ${it.indent ? "pl-3" : ""}`}
-          >
-            <span
-              className="inline-block h-0 w-3.5 shrink-0"
-              style={
-                it.header
-                  ? undefined
-                  : {
-                      borderTop: `${it.dotted ? "1px dotted" : "2px solid"} ${it.color}`,
-                    }
-              }
-            />
-            <span className="text-zinc-500 dark:text-zinc-400">{it.label}</span>
-          </div>
-        ))}
-      </div>
-      <div className="pointer-events-none absolute right-1 top-0 text-[10px] font-medium uppercase tracking-wide text-zinc-400 dark:text-zinc-500">
-        kW
-      </div>
-      {loading && (
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-zinc-50/60 backdrop-blur-[1px] dark:bg-zinc-950/60">
-          <div className="flex items-center gap-2 rounded-full border border-zinc-300 bg-white/90 px-3 py-1.5 text-xs text-zinc-700 shadow-sm dark:border-zinc-700 dark:bg-zinc-900/90 dark:text-zinc-200">
-            <Spinner />
-            loading…
-          </div>
+      <div className="relative">
+        <div
+          ref={containerRef}
+          className="h-[55vh] min-h-[280px] w-full touch-none sm:h-[420px]"
+        />
+        <div className="pointer-events-none absolute left-2 top-1 flex flex-col gap-0.5 text-[11px]">
+          {legend.map((it) => (
+            <div
+              key={it.label}
+              className={`flex items-center gap-1.5 ${it.indent ? "pl-3" : ""}`}
+            >
+              <span
+                className="inline-block h-0 w-3.5 shrink-0"
+                style={
+                  it.header
+                    ? undefined
+                    : {
+                        borderTop: `${it.dotted ? "1px dotted" : "2px solid"} ${it.color}`,
+                      }
+                }
+              />
+              <span className="text-zinc-500 dark:text-zinc-400">{it.label}</span>
+            </div>
+          ))}
         </div>
-      )}
-      {error && !loading && (
-        <div className="pointer-events-none absolute inset-x-2 top-2 flex justify-center">
-          <div className="rounded-md border border-red-300 bg-red-50/95 px-3 py-1.5 text-xs text-red-800 shadow-sm dark:border-red-900/60 dark:bg-red-950/80 dark:text-red-200">
-            {error}
-          </div>
+        <div className="pointer-events-none absolute right-1 top-0 text-[10px] font-medium uppercase tracking-wide text-zinc-400 dark:text-zinc-500">
+          kW
         </div>
+        {loading && (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-zinc-50/60 backdrop-blur-[1px] dark:bg-zinc-950/60">
+            <div className="flex items-center gap-2 rounded-full border border-zinc-300 bg-white/90 px-3 py-1.5 text-xs text-zinc-700 shadow-sm dark:border-zinc-700 dark:bg-zinc-900/90 dark:text-zinc-200">
+              <Spinner />
+              loading…
+            </div>
+          </div>
+        )}
+        {error && !loading && (
+          <div className="pointer-events-none absolute inset-x-2 top-2 flex justify-center">
+            <div className="rounded-md border border-red-300 bg-red-50/95 px-3 py-1.5 text-xs text-red-800 shadow-sm dark:border-red-900/60 dark:bg-red-950/80 dark:text-red-200">
+              {error}
+            </div>
+          </div>
+        )}
+      </div>
+      {eventsOn && laneWidth > 0 && (
+        <EventLanes data={events} visible={laneVisible} xOf={xOf} width={laneWidth} />
       )}
     </div>
   );
