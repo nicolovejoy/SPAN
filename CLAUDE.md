@@ -62,8 +62,8 @@ directory later means editing the unit and `systemctl daemon-reload` first.
     (heat/cool/hot_water/idle/ambiguous) via `hvac_modes.py`, writing to Influx; `--loop` /
     `--backfill` / `--backtest` modes plus a nightly 02:00 Pacific self-heal sweep re-backfilling
     the last 2 completed days (#14 sub-project 2). Depends on `weather_poller.py`'s output — no
-    weather data degrades intervals to `ambiguous`. Writes no health point; not in `pi-health.json`
-    or `/api/health` (see Next Steps).
+    weather data degrades intervals to `ambiguous`. Writes no health point and isn't in
+    `pi-health.json`; `/api/health` does check `hvac_mode` freshness (≤75 min, since 2026-09-05).
   - `daily_report.py` - Weekly energy briefing (Mondays) + daily anomaly-check email + daily
     data-gap alert via Resend, all at 7am
   - `rates.py` - TOU rate schedule for cost calculations
@@ -136,6 +136,13 @@ subagent. The list below is near-term mechanics; the roadmap explains ordering a
 - **#9 segment-router cleanup candidate** — `daily_report.py`'s `_run_segments` and friends,
   `query_total_kwh`, `_delta_arrow` are unreferenced by the shipped weekly report. Candidate for a
   future cleanup pass if nothing else picks them up first.
+- **Events layer follow-ups** (from the 2026-09-05 final review, none blocking): mode-run `$` uses
+  the flat `web/lib/rates.ts` rate while bath/charge rows use the Pi's TOU `cost_dollars` —
+  `hvac_mode` already stores a per-interval `cost_dollars` that `queryHvacModeIntervals` could sum
+  instead; `queryEvents` looks back only 24h for events overlapping the window start (fine for
+  baths/charges, will truncate any future long-running `<kind>_event`); adjacent lane hit-targets
+  (8px minimum) overlap at 7d+ so hover can pick a neighbour; no loading state distinct from
+  "no events"; first paint shifts 44px when the lanes mount. UX de-clutter / drill-down pages: #25.
 - **Presence/occupancy signal from lights-circuit baseline deviation** — new idea, not yet built.
   `docs/superpowers/notes/2026-09-04-vacation-and-dhw-ground-truth.md` found the vacant-period baseline for "Lights /
   Downstairs" stable to ±2W night over night, and a real visitor broke it by 2–3x with bedroom
