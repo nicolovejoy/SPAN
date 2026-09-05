@@ -26,7 +26,8 @@ export type Action =
   | { type: "window"; fromMs: number; toMs: number; now: number }
   | { type: "bucket"; key: BucketKey }
   | { type: "show"; show: string[] }
-  | { type: "drill"; category: string | null };
+  | { type: "drill"; category: string | null }
+  | { type: "events"; on: boolean };
 
 /** Seed the reducer from a parsed URL — nothing to restore yet. */
 export const initView = (s: DashState): ViewState => ({
@@ -106,5 +107,7 @@ export function reducer(s: ViewState, a: Action): ViewState {
             show: s.showBeforeDrill ?? s.show,
             showBeforeDrill: null,
           };
+    case "events":
+      return { ...s, events: a.on };
   }
 }

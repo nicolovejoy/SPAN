@@ -64,9 +64,14 @@ export function ExplorerClient({
   // Intent-only URL — preset + filter, never the pan/zoom window. replaceState
   // (not router) so there's no server navigation.
   useEffect(() => {
-    const search = buildIntentSearch(view.rangePreset, view.show, view.drill);
+    const search = buildIntentSearch(
+      view.rangePreset,
+      view.show,
+      view.drill,
+      view.events,
+    );
     window.history.replaceState(null, "", search ? `/?${search}` : "/");
-  }, [view.rangePreset, view.show, view.drill]);
+  }, [view.rangePreset, view.show, view.drill, view.events]);
 
   // Breakdown table — cache-backed energy fetch for the visible window.
   const [rows, setRows] = useState<EnergyRow[]>(initialEnergy);
@@ -172,6 +177,8 @@ export function ExplorerClient({
             onChange={(show) => dispatch({ type: "show", show })}
             drill={view.drill}
             onDrill={(category) => dispatch({ type: "drill", category })}
+            events={view.events}
+            onEvents={(on) => dispatch({ type: "events", on })}
           />
         </div>
         <FocusToggle />

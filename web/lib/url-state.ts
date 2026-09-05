@@ -21,6 +21,9 @@ export type DashState = {
   /** Category expanded into its member circuits, or null. At most one at a
    * time (#12). Unlike `show` this *does* drive a query. */
   drill: string | null;
+  /** Events layer (mode strip + list) visible. Default true; URL carries
+   *  events=0 only when off. */
+  events: boolean;
 };
 
 /**
@@ -33,11 +36,13 @@ export function buildIntentSearch(
   range: RangePreset | null,
   show: string[],
   drill: string | null = null,
+  events: boolean = true,
 ): string {
   const parts: string[] = [];
   if (range) parts.push(`range=${range}`);
   if (show.length) parts.push(`show=${show.join(",")}`);
   if (drill) parts.push(`drill=${drill}`);
+  if (!events) parts.push("events=0");
   return parts.join("&");
 }
 
@@ -120,5 +125,6 @@ export function parseState(
     // backing out of a drill you arrived at by URL leaves `show` narrowed.
     show: drill ? [drill] : show,
     drill,
+    events: first(params.events) !== "0",
   };
 }

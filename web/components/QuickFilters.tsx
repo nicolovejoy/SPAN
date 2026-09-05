@@ -16,12 +16,16 @@ export function QuickFilters({
   onChange,
   drill,
   onDrill,
+  events,
+  onEvents,
 }: {
   show: string[];
   onChange: (next: string[]) => void;
   /** Category currently expanded into its circuits, or null (#12). */
   drill: string | null;
   onDrill: (next: string | null) => void;
+  events: boolean;
+  onEvents: (on: boolean) => void;
 }) {
   const navigate = (next: string[]) => onChange(next);
 
@@ -62,6 +66,14 @@ export function QuickFilters({
           </span>
         );
       })}
+      <span className="mx-1 text-zinc-300 dark:text-zinc-700" aria-hidden>|</span>
+      <Chip
+        active={events}
+        onClick={() => onEvents(!events)}
+        title="Heat-pump mode strip + bath/EV events under the chart"
+      >
+        Events
+      </Chip>
     </div>
   );
 }
@@ -100,17 +112,20 @@ function Chip({
   dim,
   onClick,
   children,
+  title,
 }: {
   active?: boolean;
   dim?: boolean;
   onClick: () => void;
   children: React.ReactNode;
+  title?: string;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
       aria-pressed={active}
+      title={title}
       className={[
         "rounded-full border px-3 py-1 text-xs transition-colors",
         active

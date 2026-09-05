@@ -74,3 +74,18 @@ describe("parseDrill", () => {
     ]);
   });
 });
+
+describe("events intent flag", () => {
+  it("is on by default and absent from the URL", () => {
+    expect(parseState({}).events).toBe(true);
+    expect(buildIntentSearch("24h", [], null, true)).toBe("range=24h");
+  });
+  it("round-trips events=0", () => {
+    expect(parseState({ events: "0" }).events).toBe(false);
+    expect(buildIntentSearch("24h", [], null, false)).toBe("range=24h&events=0");
+  });
+  it("treats any other value as on", () => {
+    expect(parseState({ events: "1" }).events).toBe(true);
+    expect(parseState({ events: "no" }).events).toBe(true);
+  });
+});

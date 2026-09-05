@@ -76,6 +76,16 @@ describe("drill focuses the Show filter", () => {
   });
 });
 
+describe("events action", () => {
+  it("toggles the events flag and nothing else", () => {
+    const base = initView(parseState({}));
+    const off = reducer(base, { type: "events", on: false });
+    expect(off.events).toBe(false);
+    expect({ ...off, events: true }).toEqual(base);
+    expect(reducer(off, { type: "events", on: true }).events).toBe(true);
+  });
+});
+
 describe("initView", () => {
   it("starts with nothing to restore — a URL drill is already narrowed", () => {
     const s = initView(parseState({ range: "7d", drill: "Lights" }));

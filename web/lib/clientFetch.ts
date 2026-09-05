@@ -8,6 +8,7 @@ import { TtlLru, cacheTtlMs } from "./clientCache";
 import { intervalSeconds, type IntervalKey } from "./interval";
 import type { SeriesPoint } from "./influx";
 import type { EnergyRow } from "./queryCache";
+import type { EventsPayload } from "./eventRuns";
 
 const MAX_ENTRIES = 60;
 
@@ -113,4 +114,40 @@ export function seedEnergy(fromMs: number, toMs: number, rows: EnergyRow[]): voi
   const key = energyCacheKey(fromMs, toMs);
   const ttl = cacheTtlMs(toMs, 60_000, Date.now());
   energyCache.set(key, rows, Date.now() + ttl);
+}
+
+const eventsCache = new TtlLru<EventsPayload>(MAX_ENTRIES);
+const eventsInflight = new Map<string, Promise<EventsPayload>>();
+
+export const eventsCacheKey = (fromMs: number, toMs: number): string =>
+  `events|${fromMs}|${toMs}`;
+
+export async function fetchEventsCached(
+  fromMs: number,
+  toMs: number,
+): Promise<EventsPayload> {
+  const key = eventsCacheKey(fromMs, toMs);
+  const hit = eventsCache.get(key, Date.now());
+  if (hit) return hit;
+  const inflight = eventsInflight.get(key);
+  if (inflight) return inflight;
+
+  const p = (async () => {
+    const url = new URL("/api/events", location.origin);
+    url.searchParams.set("from", String(fromMs));
+    url.searchParams.set("to", String(toMs));
+    const r = await fetch(url.toString());
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = (await r.json()) as EventsPayload;
+    const ttl = cacheTtlMs(toMs, 60_000, Date.now());
+    eventsCache.set(key, data, Date.now() + ttl);
+    return data;
+  })();
+
+  eventsInflight.set(key, p);
+  try {
+    return await p;
+  } finally {
+    eventsInflight.delete(key);
+  }
 }
