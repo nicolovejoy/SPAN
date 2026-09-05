@@ -131,7 +131,12 @@ export function ExplorerClient({
       return;
     }
     let cancelled = false;
-    fetchEventsCached(visible.fromMs, visible.toMs)
+    // Pad to ~3× the visible window, matching the chart's own load padding, so
+    // the lanes stay populated while panning inside the loaded data.
+    const span = visible.toMs - visible.fromMs;
+    const evFrom = Math.max(0, visible.fromMs - span);
+    const evTo = Math.min(Date.now(), visible.toMs + span);
+    fetchEventsCached(evFrom, evTo)
       .then((d) => {
         if (!cancelled) {
           setEvents(d);

@@ -34,11 +34,12 @@ export const HEALTH_CHECKS: CheckSpec[] = [
   { name: "collector", measurement: "circuit", field: "power_w", lookback: "1h", maxAgeSeconds: 300 },
   // Nightly at 03:30 + generous grace for a slow run or a late timer.
   { name: "backup", measurement: "backup_snapshot", field: "ok", lookback: "14d", maxAgeSeconds: 30 * 3600 },
-  // weather_poller loops hourly.
-  { name: "weather", measurement: "weather", field: "temp_f", lookback: "2d", maxAgeSeconds: 3 * 3600 },
-  // hvac_classifier loops every 600s and writes only completed 5-min intervals,
-  // so a healthy newest point is 5–15 min old; 45 min is 3× the worst healthy case.
-  { name: "hvac_mode", measurement: "hvac_mode", field: "mode", lookback: "2d", maxAgeSeconds: 45 * 60 },
+  // weather_poller loops hourly; 5h leaves 3+ missed passes of headroom before paging.
+  { name: "weather", measurement: "weather", field: "temp_f", lookback: "2d", maxAgeSeconds: 5 * 3600 },
+  // hvac_classifier loops every 600s and writes only completed 5-min intervals, so a
+  // healthy newest point is already 15–20 min old. 75 min leaves 3+ missed passes of
+  // headroom; 45 min paged after only two.
+  { name: "hvac_mode", measurement: "hvac_mode", field: "mode", lookback: "2d", maxAgeSeconds: 75 * 60 },
 ];
 
 export function evaluateCheck(

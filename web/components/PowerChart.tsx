@@ -25,7 +25,7 @@ import { padWindow, needsExtension, extendWindow } from "@/lib/panWindow";
 import { fetchSeriesCached } from "@/lib/clientFetch";
 import type { SeriesPoint } from "@/lib/influx";
 import type { DashState } from "@/lib/url-state";
-import { interpolateX, type XOf } from "@/lib/eventLanes";
+import { affineXOf, resolveAnchors, type XOf } from "@/lib/eventLanes";
 import type { EventsPayload } from "@/lib/eventRuns";
 import { EventLanes } from "./EventLanes";
 
@@ -763,16 +763,7 @@ export function PowerChart({
   // during a pan; laneTick forces this block to re-run per scale change.
   void laneTick;
   const laneChart = chartAliveRef.current ? chartRef.current : null;
-  // timeToCoordinate only resolves times that are actual points on the series,
-  // so run/event boundaries (rarely bucket-aligned) have to be interpolated
-  // between the two buckets that straddle them — see interpolateX.
   const laneBucketMs = intervalSeconds(state.interval) * 1000;
-  const xOf: XOf = (ms) => {
-    if (!laneChart) return null;
-    return interpolateX(ms, laneBucketMs, (at) =>
-      laneChart.timeScale().timeToCoordinate(toDisplay(at / 1000)),
-    );
-  };
   const laneWidth = laneChart ? laneChart.timeScale().width() : 0;
   // getVisibleRange() returns null — and throws — before the chart has data.
   let range: { from: Time; to: Time } | null = null;
@@ -784,6 +775,18 @@ export function PowerChart({
   const laneVisible = range
     ? { fromMs: fromDisplay(Number(range.from)) * 1000, toMs: fromDisplay(Number(range.to)) * 1000 }
     : { fromMs: state.fromMs, toMs: state.toMs };
+
+  // timeToCoordinate only resolves times that are actual points on the series,
+  // and run/event boundaries are rarely bucket-aligned. Rather than probe per
+  // block, resolve two bucket anchors near the visible edges once per render
+  // and derive one affine time→x map from them — the axis is index-linear, so
+  // that is exact between real grid points and cheap (2 probes, not 3 per edge).
+  const anchors = laneChart
+    ? resolveAnchors(laneVisible.fromMs, laneVisible.toMs, laneBucketMs, (at) =>
+        laneChart.timeScale().timeToCoordinate(toDisplay(at / 1000)),
+      )
+    : null;
+  const xOf: XOf = (anchors && affineXOf(anchors[0], anchors[1])) ?? (() => null);
 
   return (
     <div className="relative">

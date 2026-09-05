@@ -46,45 +46,63 @@ export function layoutBlocks<T extends { fromMs: number; toMs: number }>(
 
 export const labelFits = (w: number): boolean => w >= LABEL_MIN_PX;
 
+export type Anchor = { ms: number; x: number };
+
+/** Linear time→x map from two resolved chart anchors. The chart's time axis is
+ *  index-linear, so between two real grid points this is exact; across an
+ *  interior data gap it degrades to a small misplacement rather than a dropped
+ *  block. Returns null when the anchors coincide. */
+export function affineXOf(a: Anchor, b: Anchor): XOf | null {
+  if (a.ms === b.ms) return null;
+  const slope = (b.x - a.x) / (b.ms - a.ms);
+  return (ms) => a.x + (ms - a.ms) * slope;
+}
+
 /**
- * Place an arbitrary instant on the chart's x axis.
+ * Resolve the two bucket anchors that define the visible window's time→x map.
  *
  * lightweight-charts' `timeToCoordinate` only resolves times that are actual
- * points on the series — it returns null anywhere between two buckets. Run and
- * event boundaries are not bucket-aligned (a charge session starts on some
- * second), so asking it directly drops nearly every block once the bucket is
- * coarser than the events themselves. The chart does carry a data or whitespace
- * point at every bucket across the loaded window, so we resolve the two buckets
- * that straddle `ms` and interpolate between them instead.
- *
- * At the edges of the loaded data only one side resolves; we then take the
- * slope from the next bucket inward and extrapolate, falling back to the single
- * resolvable anchor if even that is missing.
+ * points on the series — it returns null anywhere between two buckets, and the
+ * chart does *not* carry a point at every bucket (the power query uses
+ * `createEmpty: false`, so interior buckets can be missing; only the loaded
+ * window's outer edges carry whitespace sentinels). So we start at the buckets
+ * containing `fromMs`/`toMs` and step inward until both sides resolve.
  *
  * @param timeToX ms → px, or null when the chart can't place that instant.
+ * @returns [left, right] anchors, or null if either side never resolves or the
+ *          two land on the same bucket.
  */
-export function interpolateX(
-  ms: number,
+export function resolveAnchors(
+  fromMs: number,
+  toMs: number,
   bucketMs: number,
   timeToX: (ms: number) => number | null,
-): number | null {
-  const t0 = Math.floor(ms / bucketMs) * bucketMs;
-  const t1 = t0 + bucketMs;
-  const frac = (ms - t0) / bucketMs;
-  const x0 = timeToX(t0);
-  const x1 = timeToX(t1);
-  if (x0 !== null && x1 !== null) return x0 + (x1 - x0) * frac;
-  if (x0 !== null) {
-    // Right edge: slope from the bucket before t0.
-    const xPrev = timeToX(t0 - bucketMs);
-    return xPrev === null ? x0 : x0 + (x0 - xPrev) * frac;
+  maxSteps = 8,
+): [Anchor, Anchor] | null {
+  const tA0 = Math.floor(fromMs / bucketMs) * bucketMs;
+  const tB0 = Math.floor(toMs / bucketMs) * bucketMs;
+
+  let left: Anchor | null = null;
+  for (let i = 0; i <= maxSteps; i++) {
+    const ms = tA0 + i * bucketMs;
+    const x = timeToX(ms);
+    if (x !== null) {
+      left = { ms, x };
+      break;
+    }
   }
-  if (x1 !== null) {
-    // Left edge: slope from the bucket after t1.
-    const xNext = timeToX(t1 + bucketMs);
-    if (xNext === null) return x1;
-    const step = xNext - x1;
-    return x1 - step + step * frac;
+  if (left === null) return null;
+
+  let right: Anchor | null = null;
+  for (let i = 0; i <= maxSteps; i++) {
+    const ms = tB0 - i * bucketMs;
+    const x = timeToX(ms);
+    if (x !== null) {
+      right = { ms, x };
+      break;
+    }
   }
-  return null;
+  if (right === null) return null;
+  if (left.ms === right.ms) return null;
+  return [left, right];
 }

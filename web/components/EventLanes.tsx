@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   EVENT_COLOR,
   LANE_H,
@@ -26,6 +26,9 @@ type Hover =
 
 const kw = (w: number) => `${(w / 1000).toFixed(1)} kW`;
 
+const itemOf = (h: NonNullable<Hover>): ModeRun | EventItem =>
+  h.kind === "mode" ? h.run : h.ev;
+
 export function EventLanes({
   data,
   visible,
@@ -39,6 +42,17 @@ export function EventLanes({
   width: number;
 }) {
   const [hover, setHover] = useState<Hover>(null);
+  // onMouseLeave never fires if the hovered block unmounts under the cursor, so
+  // a new payload would otherwise leave a tooltip describing the old one.
+  useEffect(() => {
+    setHover(null);
+  }, [data]);
+  // Click toggles: tapping the open block again dismisses the tooltip, which is
+  // the only way to close it on touch (no mouseleave).
+  const toggle = (next: NonNullable<Hover>) =>
+    setHover((cur) =>
+      cur && cur.kind === next.kind && itemOf(cur).fromMs === itemOf(next).fromMs ? null : next,
+    );
   const modes = data ? layoutBlocks(data.modes, visible, xOf) : [];
   const events = data ? layoutBlocks(data.events, visible, xOf) : [];
 
@@ -61,7 +75,7 @@ export function EventLanes({
               key={`${b.item.mode}:${b.item.fromMs}`}
               onMouseEnter={() => setHover({ kind: "mode", run: b.item, x: b.x + b.w / 2 })}
               onMouseLeave={() => setHover(null)}
-              onClick={() => setHover({ kind: "mode", run: b.item, x: b.x + b.w / 2 })}
+              onClick={() => toggle({ kind: "mode", run: b.item, x: b.x + b.w / 2 })}
             >
               <HitRect x={b.x} w={b.w} />
               <rect
@@ -88,7 +102,7 @@ export function EventLanes({
                 key={`${b.item.kind}:${b.item.fromMs}`}
                 onMouseEnter={() => setHover({ kind: "event", ev: b.item, x: b.x + b.w / 2 })}
                 onMouseLeave={() => setHover(null)}
-                onClick={() => setHover({ kind: "event", ev: b.item, x: b.x + b.w / 2 })}
+                onClick={() => toggle({ kind: "event", ev: b.item, x: b.x + b.w / 2 })}
               >
                 <HitRect x={b.x} w={b.w} />
                 <rect

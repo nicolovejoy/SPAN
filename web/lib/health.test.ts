@@ -67,8 +67,8 @@ describe("HEALTH_CHECKS registry", () => {
     const by = Object.fromEntries(HEALTH_CHECKS.map((c) => [c.name, c]));
     expect(by.collector.maxAgeSeconds).toBe(300);        // 30s poll
     expect(by.backup.maxAgeSeconds).toBe(30 * 3600);     // nightly
-    expect(by.weather.maxAgeSeconds).toBe(3 * 3600);     // hourly poll
-    expect(by.hvac_mode.maxAgeSeconds).toBe(45 * 60);    // 10-min loop, 5-min intervals
+    expect(by.weather.maxAgeSeconds).toBe(5 * 3600);     // hourly poll
+    expect(by.hvac_mode.maxAgeSeconds).toBe(75 * 60);    // 10-min loop, 5-min intervals
   });
 
   it("every check has a measurement, field and lookback", () => {

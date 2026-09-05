@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { interpolateX, labelFits, layoutBlocks, type XOf } from "./eventLanes";
+import { affineXOf, labelFits, layoutBlocks, resolveAnchors, type XOf } from "./eventLanes";
 
 // Linear mapper: 0..1000 ms → 0..1000 px, null outside the loaded range.
 const xOf: XOf = (ms) => (ms < 0 || ms > 1000 ? null : ms);
@@ -27,9 +27,33 @@ describe("layoutBlocks", () => {
   });
 });
 
-describe("interpolateX", () => {
+describe("affineXOf", () => {
+  const a = { ms: 1000, x: 100 };
+  const b = { ms: 2000, x: 300 };
+
+  it("is exact at both anchors", () => {
+    const f = affineXOf(a, b)!;
+    expect(f(1000)).toBe(100);
+    expect(f(2000)).toBe(300);
+  });
+  it("is linear in between", () => {
+    const f = affineXOf(a, b)!;
+    expect(f(1500)).toBe(200);
+    expect(f(1250)).toBe(150);
+  });
+  it("extrapolates beyond both anchors", () => {
+    const f = affineXOf(a, b)!;
+    expect(f(500)).toBe(0);
+    expect(f(2500)).toBe(400);
+  });
+  it("returns null on coincident anchors", () => {
+    expect(affineXOf(a, { ms: 1000, x: 180 })).toBeNull();
+  });
+});
+
+describe("resolveAnchors", () => {
   // 100ms buckets at 0.1 px/ms. `only` restricts which bucket stamps the chart
-  // will resolve, standing in for the edges of the loaded data.
+  // will resolve, standing in for holes and edges of the loaded data.
   const BUCKET = 100;
   const mapper =
     (only: (ms: number) => boolean) =>
@@ -37,26 +61,28 @@ describe("interpolateX", () => {
       only(ms) ? ms / 10 : null;
   const all = mapper(() => true);
 
-  it("lerps between the two surrounding buckets", () => {
-    expect(interpolateX(1050, BUCKET, all)).toBe(105);
+  it("takes the containing buckets when both resolve immediately", () => {
+    expect(resolveAnchors(1050, 1950, BUCKET, all)).toEqual([
+      { ms: 1000, x: 100 },
+      { ms: 1900, x: 190 },
+    ]);
   });
-  it("returns the bucket's own coordinate on an exact boundary", () => {
-    expect(interpolateX(1100, BUCKET, all)).toBe(110);
+  it("steps the left anchor inward across a gap", () => {
+    const [l, r] = resolveAnchors(1050, 1950, BUCKET, mapper((ms) => ms >= 1300))!;
+    expect(l).toEqual({ ms: 1300, x: 130 });
+    expect(r).toEqual({ ms: 1900, x: 190 });
   });
-  it("extrapolates off the right edge from the previous bucket", () => {
-    // Nothing past 1100 resolves: step back to 1000 for the slope.
-    expect(interpolateX(1150, BUCKET, mapper((ms) => ms <= 1100))).toBe(115);
+  it("steps the right anchor inward across a gap", () => {
+    const [l, r] = resolveAnchors(1050, 1950, BUCKET, mapper((ms) => ms <= 1600))!;
+    expect(l).toEqual({ ms: 1000, x: 100 });
+    expect(r).toEqual({ ms: 1600, x: 160 });
   });
-  it("extrapolates off the left edge from the following bucket", () => {
-    // Nothing before 1100 resolves: step forward to 1200 for the slope.
-    expect(interpolateX(1050, BUCKET, mapper((ms) => ms >= 1100))).toBe(105);
+  it("gives up after maxSteps", () => {
+    // Nothing resolves until 1900, which is 9 steps from bucket 1000.
+    expect(resolveAnchors(1050, 2950, BUCKET, mapper((ms) => ms >= 1900), 8)).toBeNull();
   });
-  it("falls back to the one resolvable anchor when the slope is unknowable", () => {
-    expect(interpolateX(1150, BUCKET, mapper((ms) => ms === 1100))).toBe(110);
-    expect(interpolateX(1050, BUCKET, mapper((ms) => ms === 1100))).toBe(110);
-  });
-  it("returns null when neither surrounding bucket resolves", () => {
-    expect(interpolateX(1050, BUCKET, () => null)).toBeNull();
+  it("rejects coincident anchors", () => {
+    expect(resolveAnchors(1050, 1150, BUCKET, mapper((ms) => ms === 1100))).toBeNull();
   });
 });
 
