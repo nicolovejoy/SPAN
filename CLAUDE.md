@@ -92,6 +92,7 @@ GitHub pushes via the Vercel Git integration. Pi-hosted as a Docker service
 - **Caching:** in-memory `TtlLru` (`lib/clientCache`) fronts `/api/power` + `/api/energy` (`lib/clientFetch`) → back-and-forth between visited windows = 0-network. Server LRU (`lib/queryCache`, both power + energy) + HTTP cache are the cold-miss backstop. IndexedDB-across-reload persistence still open (#10).
 - **Breakdown table** = real 30s `integral()` via `/api/energy` (`cachedQueryEnergyByCategory`), keyed by window only so changing the bucket doesn't refetch it.
 - **Breakdown table snaps to Pacific calendar periods (2026-08-28, decided over two design rounds):** the chart shows the exact zoom window, but the table describes the calendar day/week(Mon-start)/month/year nearest the view (grain from window length: ≤2d/≤14d/≤62d/else), anchored at the window's end — full period vs full prior period when historical, period-to-date vs same-elapsed-of-prior ("pace", clamped to the prior period's end) when it contains now. Headers name the period (`kWh · Aug 2026 · so far` / `vs Jul`). All pure logic + labels in `web/lib/energyWindow.ts` (`snapPeriod`, `periodLabel`, `computeDelta`), tested incl. DST + short-month clamp. Percent deltas are suppressed under a 1 kWh prior base — small denominators screamed (+137% on 1.3 kWh).
+- **Events layer (2026-09-05):** two SVG lanes under the chart (heat-pump `hvac_mode` runs; `bath_event` + `charge_event` spans) drawn inside `PowerChart` via lightweight-charts' `timeToCoordinate` plus bucket-aligned interpolation (`interpolateX`) so they track pan/zoom, plus an `EventList` under the breakdown table (rows follow the visible window, click zooms). Data from `/api/events?from&to` → `{ modes, events, modesTruncated }`; runs grouped server-side by `lib/eventRuns.ts` (pure, tested), layout in `lib/eventLanes.ts` (pure, tested). Mode runs are skipped beyond 62-day windows. `events=0` in the intent URL hides the layer; on by default. Spec: `docs/superpowers/specs/2026-09-05-explorer-events-layer-design.md`. Future de-clutter / drill-down pages: #25.
 - Auto-coarsen interval picks bucket size to stay ≤175 points across the range
 - Tests: `cd web && npm test` (vitest) — unit tests for the cache + intent-URL logic. Chart/React wiring is manual-verify.
 - Categories sourced from `pi/categories.json` (copied to `web/categories.generated.json` by `predev`/`prebuild` — Vercel builds use this normal `prebuild` sync; the Dockerfile's copy-in path is a Docker-era leftover, no longer used)
@@ -112,7 +113,7 @@ GitHub pushes via the Vercel Git integration. Pi-hosted as a Docker service
     single success. Both agents on the 2026-08-21 incident initially misread this as a refilling
     rate-limit budget. Firewall-events export (Security → Analytics → Events) names the rule directly;
     read it before theorising.
-- `/api/health` — observer endpoint (UptimeRobot + prompt-lab's daily health email): `checks[]` of artifact ages — collector (newest raw Influx point, ≤300s) and backup (newest `backup_snapshot` point, ≤30h; written by `pi/backup/backup.sh` with the restic snapshot's own timestamp). 503 on any failure. Logic in `web/lib/health.ts`.
+- `/api/health` — observer endpoint (UptimeRobot + prompt-lab's daily health email): reads `HEALTH_CHECKS` in `web/lib/health.ts`, four checks — collector ≤300s, backup ≤30h, weather ≤3h, hvac_mode ≤45min. 503 on any failure.
 - Deploy/auth setup: see `docs/web-deploy.md`
 
 ## Next Steps
@@ -135,12 +136,6 @@ subagent. The list below is near-term mechanics; the roadmap explains ordering a
 - **#9 segment-router cleanup candidate** — `daily_report.py`'s `_run_segments` and friends,
   `query_total_kwh`, `_delta_arrow` are unreferenced by the shipped weekly report. Candidate for a
   future cleanup pass if nothing else picks them up first.
-- **Make bath + charge events explorable over time** — requested 2026-08-21. Their sections leave
-  the email; the detectors keep writing. Probably belongs in `web/`, needs its own design. Broaden
-  scope per `docs/superpowers/notes/2026-09-04-vacation-and-dhw-ground-truth.md`: expose the raw `hot_water`
-  `hvac_mode` intervals as a browsable layer too, not just formal `bath_event` rows — that's the
-  actual workflow for cross-checking "who showered when" against memory, and formal baths are a
-  narrow subset of it.
 - **Presence/occupancy signal from lights-circuit baseline deviation** — new idea, not yet built.
   `docs/superpowers/notes/2026-09-04-vacation-and-dhw-ground-truth.md` found the vacant-period baseline for "Lights /
   Downstairs" stable to ±2W night over night, and a real visitor broke it by 2–3x with bedroom
@@ -155,15 +150,16 @@ subagent. The list below is near-term mechanics; the roadmap explains ordering a
 - **Power explorer chart E2E** (#13) — Playwright harness via a `MOCK_INFLUX` fixture mode. Plan in the issue.
 - **`weather_poller.py` has no dead-service detection.** `normal_run`'s `past_days=2` self-heals a
   single missed poll, but an outage longer than ~2 days leaves a permanent hole only a manual
-  `--backfill` re-run repairs. Unlike `collector.py`, it writes no health point, isn't in
-  `pi/grafana/provisioning`'s `pi-health.json`, and isn't checked by `web/`'s `/api/health`. No fix
-  designed yet. The same blind spot exists for `hvac_classifier.py` (#14 sub-project 2): its
-  nightly 02:00 Pacific sweep re-backfills the last 2 completed days, so an outage under ~2 days
-  self-heals, but a longer one still needs a manual `--backfill`, and it likewise writes no health
-  point and isn't in `pi-health.json` or `/api/health`. Neither gap is fixed by that sub-project —
-  and because the classifier depends on `weather_poller.py`'s output (no weather data degrades
-  intervals to `ambiguous`), an unfixed weather outage silently degrades the HVAC split too, even
-  after `hvac_classifier` deploys.
+  `--backfill` re-run repairs. Unlike `collector.py`, it writes no health point and isn't in
+  `pi/grafana/provisioning`'s `pi-health.json`. No fix designed yet. The same blind spot exists for
+  `hvac_classifier.py` (#14 sub-project 2): its nightly 02:00 Pacific sweep re-backfills the last 2
+  completed days, so an outage under ~2 days self-heals, but a longer one still needs a manual
+  `--backfill`, and it likewise writes no health point and isn't in `pi-health.json`. Both are now
+  in `/api/health` (2026-09-05) so a dead container pages via UptimeRobot; the remaining gap is that
+  an outage longer than the self-heal window still needs a manual `--backfill`. Because the
+  classifier depends on `weather_poller.py`'s output (no weather data degrades intervals to
+  `ambiguous`), an unfixed weather outage silently degrades the HVAC split too, even after
+  `hvac_classifier` deploys.
 - **Dashboard UX backlog** — open: polling cadence (#5), 1m smoothing (#7), custom PWA icon,
   zoom-in-loads-detail (#12 follow-up, low priority), in-email settings link (#8, needs persistent
   store + report-loop rework).

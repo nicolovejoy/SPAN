@@ -69,7 +69,7 @@ type Event = {
 `hp_mean_w`, `hp_max_w`, `aux_mean_w`; one point per 5-min interval, time = interval start).
 The Flux query pivots the fields per timestamp. Grouping into runs is a pure function
 `groupModeRuns(intervals)` in `web/lib/eventRuns.ts`: consecutive intervals of the same
-non-idle mode join if the gap between starts is ≤ 5 min (one missing interval is not a
+non-idle mode join if the gap between starts is ≤ 10 min (one missing interval is not a
 break; two are). `kwh` sums the mode's energy field; `hpMeanW` is the interval-count-weighted
 mean; `hpMaxW` the max. Unit-tested with the fixtures in the Sep 4 note's spirit: a
 single-interval run, a one-gap bridge, a two-gap split, mode change mid-stream, idle
